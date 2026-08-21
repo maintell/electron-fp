@@ -1848,7 +1848,7 @@ Returns `Promise<PrinterInfo[]>` - Resolves with a [`PrinterInfo[]`](structures/
   * `pageRanges` Object[]  (optional) - The page range to print. On macOS, only one range is honored.
     * `from` number - Index of the first page to print (0-based).
     * `to` number - Index of the last page to print (inclusive) (0-based).
-  * `duplexMode` string (optional) - Set the duplex mode of the printed web page. Can be `simplex`, `shortEdge`, or `longEdge`.
+  * `duplexMode` string (optional) - Set the duplex mode of the printed web page. Can be `simplex`, `shortEdge`, or `longEdge`. Defaults to the printer's setting.
   * `dpi` Record\<string, number\> (optional)
     * `horizontal` number (optional) - The horizontal dpi.
     * `vertical` number (optional) - The vertical dpi.
@@ -1865,6 +1865,12 @@ When a custom `pageSize` is passed, Chromium attempts to validate platform speci
 
 Prints window's web page. When `silent` is set to `true`, Electron will pick
 the system's default printer if `deviceName` is empty and the default settings for printing.
+
+When `silent` is `false` the system print dialog opens with `options` applied.
+Because the page is laid out only after the dialog is confirmed, the dialog
+does not offer printing the current selection, and on Windows its page range
+field is unavailable; pass `pageRanges` instead. Use `window.print()` in the
+page for a dialog with those controls.
 
 Some possible `failureReason`s for print failure include:
 
