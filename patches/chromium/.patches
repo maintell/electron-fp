@@ -196,3 +196,4 @@ cherry-pick-2c2d4b9fc5f2.patch
 cherry-pick-cf1e39ed8884.patch
 cherry-pick-b403c7aeff2b.patch
 cherry-pick-58b7849d7590.patch
+fix_wayland_window_stuck_maximized_after_early_maximize.patch
