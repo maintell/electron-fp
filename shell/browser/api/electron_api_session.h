@@ -148,6 +148,8 @@ class Session final : public gin::Wrappable<Session>,
   void SetUserAgent(const std::string& user_agent, gin::Arguments* args);
   std::string GetUserAgent();
   void SetSSLConfig(network::mojom::SSLConfigPtr config);
+  void SetFingerprintConfig(gin::Arguments* args);
+  v8::Local<v8::Value> GetFingerprintConfig(gin::Arguments* args);
   bool IsPersistent();
   v8::Local<v8::Promise> GetBlobData(v8::Isolate* isolate,
                                      const std::string& uuid);

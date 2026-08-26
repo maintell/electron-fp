@@ -242,6 +242,8 @@ class WebContents final : public ExclusiveAccessContext,
   void ForcefullyCrashRenderer();
   void SetUserAgent(const std::string& user_agent);
   std::string GetUserAgent();
+  void SetFingerprintConfig(gin::Arguments* args);
+  v8::Local<v8::Value> GetFingerprintConfig(gin::Arguments* args);
   void InsertCSS(const std::string& css);
   v8::Local<v8::Promise> SavePage(const base::FilePath& full_file_path,
                                   const content::SavePageType& save_type);

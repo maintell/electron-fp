@@ -17,6 +17,7 @@
 #include "base/memory/ptr_util.h"
 #include "cc/base/switches.h"
 #include "content/public/browser/render_process_host.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_user_data.h"
 #include "content/public/common/content_switches.h"
 #include "electron/buildflags/buildflags.h"
@@ -322,6 +323,7 @@ void WebContentsPreferences::SetFromDictionary(
 
   // Fingerprint: dictionary → JSON → base64 for per-renderer
   // --fingerprint-config. false/null/empty/absent → empty (native).
+  // If absent, fall back to session-level config for inheritance.
   base::Value fingerprint_value;
   if (web_preferences.Get(options::kFingerprint, &fingerprint_value)) {
     if (fingerprint_value.is_dict() && !fingerprint_value.GetDict().empty()) {
@@ -334,7 +336,13 @@ void WebContentsPreferences::SetFromDictionary(
       fingerprint_config_.clear();
     }
   } else {
-    fingerprint_config_.clear();
+    // Inherit from session if present.
+    if (auto* session_prefs = SessionPreferences::FromBrowserContext(
+            web_contents_->GetBrowserContext())) {
+      fingerprint_config_ = session_prefs->GetFingerprintConfigBase64();
+    } else {
+      fingerprint_config_.clear();
+    }
   }
 
 #if BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
@@ -342,6 +350,17 @@ void WebContentsPreferences::SetFromDictionary(
 #endif
 
   SaveLastPreferences();
+}
+
+void WebContentsPreferences::SetFingerprintConfigFromValue(
+    const base::Value& val) {
+  if (val.is_dict() && !val.GetDict().empty()) {
+    if (std::optional<std::string> json = base::WriteJson(val)) {
+      fingerprint_config_ = base::Base64Encode(*json);
+      return;
+    }
+  }
+  fingerprint_config_.clear();
 }
 
 bool WebContentsPreferences::SetImageAnimationPolicy(std::string policy) {

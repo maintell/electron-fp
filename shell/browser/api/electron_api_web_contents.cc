@@ -23,6 +23,7 @@
 #include "base/containers/map_util.h"
 #include "base/files/file_util.h"
 #include "base/json/json_reader.h"
+#include "base/json/json_writer.h"
 #include "base/no_destructor.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
@@ -3289,6 +3290,64 @@ std::string WebContents::GetUserAgent() {
   return web_contents()->GetUserAgentOverride().ua_string_override;
 }
 
+void WebContents::SetFingerprintConfig(gin::Arguments* args) {
+  v8::Local<v8::Value> val;
+  if (!args->GetNext(&val) || val->IsNullOrUndefined() ||
+      (val->IsBoolean() && !val.As<v8::Boolean>()->Value())) {
+    if (auto* prefs = WebContentsPreferences::From(web_contents())) {
+      prefs->SetFingerprintConfig("");
+    }
+    return;
+  }
+
+  base::Value fingerprint_val;
+  if (!gin::ConvertFromV8(args->isolate(), val, &fingerprint_val) ||
+      !fingerprint_val.is_dict()) {
+    args->ThrowTypeError("fingerprint config must be an object");
+    return;
+  }
+  if (fingerprint_val.GetDict().empty()) {
+    if (auto* prefs = WebContentsPreferences::From(web_contents())) {
+      prefs->SetFingerprintConfig("");
+    }
+    return;
+  }
+  std::optional<std::string> json = base::WriteJson(fingerprint_val);
+  if (!json) {
+    args->ThrowTypeError("fingerprint config is not serializable");
+    return;
+  }
+  std::string b64 = base::Base64Encode(*json);
+  if (auto* prefs = WebContentsPreferences::From(web_contents())) {
+    prefs->SetFingerprintConfig(b64);
+  }
+}
+
+v8::Local<v8::Value> WebContents::GetFingerprintConfig(gin::Arguments* args) {
+  v8::Isolate* isolate = args->isolate();
+  auto* prefs = WebContentsPreferences::From(web_contents());
+  std::string b64 = prefs ? prefs->GetFingerprintConfigBase64() : "";
+  // Fall back to session-level if per-WebContents is empty.
+  if (b64.empty() && web_contents()) {
+    if (auto* sp = SessionPreferences::FromBrowserContext(
+            web_contents()->GetBrowserContext())) {
+      b64 = sp->GetFingerprintConfigBase64();
+    }
+  }
+  if (b64.empty()) {
+    return v8::Null(isolate);
+  }
+  std::string json;
+  if (!base::Base64Decode(b64, &json)) {
+    return v8::Null(isolate);
+  }
+  std::optional<base::Value> val = base::JSONReader::Read(json);
+  if (!val) {
+    return v8::Null(isolate);
+  }
+  return gin::ConvertToV8(isolate, *val);
+}
+
 v8::Local<v8::Promise> WebContents::SavePage(
     const base::FilePath& full_file_path,
     const content::SavePageType& save_type) {
@@ -5001,6 +5060,8 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
                  &WebContents::ForcefullyCrashRenderer)
       .SetMethod("setUserAgent", &WebContents::SetUserAgent)
       .SetMethod("getUserAgent", &WebContents::GetUserAgent)
+      .SetMethod("setFingerprintConfig", &WebContents::SetFingerprintConfig)
+      .SetMethod("getFingerprintConfig", &WebContents::GetFingerprintConfig)
       .SetMethod("savePage", &WebContents::SavePage)
       .SetMethod("openDevTools", &WebContents::OpenDevTools)
       .SetMethod("closeDevTools", &WebContents::CloseDevTools)

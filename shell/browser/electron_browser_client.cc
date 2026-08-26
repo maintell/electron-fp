@@ -541,7 +541,17 @@ void ElectronBrowserClient::RegisterPendingSiteInstance(
   // Fingerprint is per-Renderer via --fingerprint-config; spare is launched
   // without it. A fingerprint window must not reuse the spare to keep
   // window isolation; and vice-versa the spare must remain generic.
+  // Check both per-WebContents and per-Session (fallback) configs.
+  bool has_fp = false;
   if (prefs && !prefs->GetFingerprintConfigBase64().empty())
+    has_fp = true;
+  else if (web_contents) {
+    if (auto* sp = SessionPreferences::FromBrowserContext(
+            web_contents->GetBrowserContext())) {
+      has_fp = !sp->GetFingerprintConfigBase64().empty();
+    }
+  }
+  if (has_fp)
     compatible = false;
   base::AutoReset<bool> reset(&spare_renderer_compatible_, compatible);
   const auto pending_process_id = pending_site_instance->GetProcess()->GetID();
@@ -687,8 +697,25 @@ void ElectronBrowserClient::AppendExtraCommandLineSwitches(
         // Empty → native passthrough (zero-config). Non-empty base64 JSON is
         // read by blink's FpConfigContent() with highest priority.
         std::string fp_b64 = web_preferences->GetFingerprintConfigBase64();
+        if (fp_b64.empty()) {
+          if (auto* sp = SessionPreferences::FromBrowserContext(
+                  web_contents->GetBrowserContext())) {
+            fp_b64 = sp->GetFingerprintConfigBase64();
+          }
+        }
         if (!fp_b64.empty()) {
           command_line->AppendSwitchASCII(switches::kFingerprintConfig, fp_b64);
+        }
+      } else {
+        // No WebContentsPreferences (e.g. extension/service-worker); still
+        // honour session-level fingerprint.
+        if (auto* sp = SessionPreferences::FromBrowserContext(
+                web_contents->GetBrowserContext())) {
+          std::string fp_b64 = sp->GetFingerprintConfigBase64();
+          if (!fp_b64.empty()) {
+            command_line->AppendSwitchASCII(switches::kFingerprintConfig,
+                                            fp_b64);
+          }
         }
       }
     } else if (render_process_host && render_process_host->IsSpare()) {

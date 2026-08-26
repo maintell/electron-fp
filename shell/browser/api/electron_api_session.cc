@@ -11,11 +11,14 @@
 #include <utility>
 #include <vector>
 
+#include "base/base64.h"
 #include "base/command_line.h"
 #include "base/containers/fixed_flat_map.h"
 #include "base/containers/map_util.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
+#include "base/json/json_reader.h"
+#include "base/json/json_writer.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "base/strings/string_util.h"
@@ -1036,6 +1039,59 @@ std::string Session::GetUserAgent() {
   return browser_context_->GetUserAgent();
 }
 
+void Session::SetFingerprintConfig(gin::Arguments* args) {
+  v8::Local<v8::Value> val;
+  if (!args->GetNext(&val) || val->IsNullOrUndefined() ||
+      (val->IsBoolean() && !val.As<v8::Boolean>()->Value())) {
+    if (auto* prefs =
+            SessionPreferences::FromBrowserContext(browser_context())) {
+      prefs->SetFingerprintConfig("");
+    }
+    return;
+  }
+
+  base::Value fingerprint_val;
+  if (!gin::ConvertFromV8(args->isolate(), val, &fingerprint_val) ||
+      !fingerprint_val.is_dict()) {
+    args->ThrowTypeError("fingerprint config must be an object");
+    return;
+  }
+  if (fingerprint_val.GetDict().empty()) {
+    if (auto* prefs =
+            SessionPreferences::FromBrowserContext(browser_context())) {
+      prefs->SetFingerprintConfig("");
+    }
+    return;
+  }
+  std::optional<std::string> json = base::WriteJson(fingerprint_val);
+  if (!json) {
+    args->ThrowTypeError("fingerprint config is not serializable");
+    return;
+  }
+  std::string b64 = base::Base64Encode(*json);
+  if (auto* prefs = SessionPreferences::FromBrowserContext(browser_context())) {
+    prefs->SetFingerprintConfig(b64);
+  }
+}
+
+v8::Local<v8::Value> Session::GetFingerprintConfig(gin::Arguments* args) {
+  v8::Isolate* isolate = args->isolate();
+  auto* prefs = SessionPreferences::FromBrowserContext(browser_context());
+  std::string b64 = prefs ? prefs->GetFingerprintConfigBase64() : "";
+  if (b64.empty()) {
+    return v8::Null(isolate);
+  }
+  std::string json;
+  if (!base::Base64Decode(b64, &json)) {
+    return v8::Null(isolate);
+  }
+  std::optional<base::Value> val = base::JSONReader::Read(json);
+  if (!val) {
+    return v8::Null(isolate);
+  }
+  return gin::ConvertToV8(isolate, *val);
+}
+
 void Session::SetSSLConfig(network::mojom::SSLConfigPtr config) {
   browser_context_->SetSSLConfig(std::move(config));
 }
@@ -1846,6 +1902,8 @@ void Session::FillObjectTemplate(v8::Isolate* isolate,
       .SetMethod("isPersistent", &Session::IsPersistent)
       .SetMethod("setUserAgent", &Session::SetUserAgent)
       .SetMethod("getUserAgent", &Session::GetUserAgent)
+      .SetMethod("setFingerprintConfig", &Session::SetFingerprintConfig)
+      .SetMethod("getFingerprintConfig", &Session::GetFingerprintConfig)
       .SetMethod("setSSLConfig", &Session::SetSSLConfig)
       .SetMethod("getBlobData", &Session::GetBlobData)
       .SetMethod("downloadURL", &Session::DownloadURL)

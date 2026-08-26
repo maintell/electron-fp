@@ -5,6 +5,7 @@
 #ifndef ELECTRON_SHELL_BROWSER_SESSION_PREFERENCES_H_
 #define ELECTRON_SHELL_BROWSER_SESSION_PREFERENCES_H_
 
+#include <string>
 #include <vector>
 
 #include "base/supports_user_data.h"
@@ -29,6 +30,14 @@ class SessionPreferences : public base::SupportsUserData::Data {
 
   bool HasServiceWorkerPreloadScript();
 
+  const std::string& GetFingerprintConfig() const { return fingerprint_config_; }
+  const std::string& GetFingerprintConfigBase64() const {
+    return fingerprint_config_;
+  }
+  void SetFingerprintConfig(const std::string& b64) {
+    fingerprint_config_ = b64;
+  }
+
  private:
   SessionPreferences();
 
@@ -36,6 +45,7 @@ class SessionPreferences : public base::SupportsUserData::Data {
   static int kLocatorKey;
 
   std::vector<PreloadScript> preload_scripts_;
+  std::string fingerprint_config_;
 };
 
 }  // namespace electron

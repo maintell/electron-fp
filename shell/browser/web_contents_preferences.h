@@ -133,6 +133,10 @@ class WebContentsPreferences
   const std::string& GetFingerprintConfigBase64() const {
     return fingerprint_config_;
   }
+  void SetFingerprintConfig(const std::string& base64) {
+    fingerprint_config_ = base64;
+  }
+  void SetFingerprintConfigFromValue(const base::Value& val);
 
  private:
   friend class content::WebContentsUserData<WebContentsPreferences>;
