@@ -1008,9 +1008,17 @@ WebContents::WebContents(v8::Isolate* isolate,
     params.starting_sandbox_flags = starting_sandbox_flags;
     params.initially_hidden = !initially_shown;
     params.enable_wake_locks = !disable_wake_locks;
+    bool can_use_spare =
+        RendererProcessPreferences::From(options).CanUseSpareRenderer();
+    // Fingerprint is per-Renderer via --fingerprint-config; spare has none,
+    // so a window with fingerprint must not reuse the spare.
+    base::Value fp_val;
+    if (options.Get(options::kFingerprint, &fp_val) && fp_val.is_dict() &&
+        !fp_val.GetDict().empty())
+      can_use_spare = false;
     base::AutoReset<bool> reset(
         ElectronBrowserClient::Get()->spare_renderer_compatible(),
-        RendererProcessPreferences::From(options).CanUseSpareRenderer());
+        can_use_spare);
     web_contents = content::WebContents::Create(params);
   }
 

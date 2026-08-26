@@ -123,7 +123,11 @@ class WebContentsPreferences
   std::optional<base::FilePath> GetPreloadPath() const { return preload_path_; }
   bool ShouldFocusOnNavigation() const { return focus_on_navigation_; }
   bool IsSandboxed() const { return renderer_.sandboxed; }
-  bool CanUseSpareRenderer() const { return renderer_.CanUseSpareRenderer(); }
+  bool CanUseSpareRenderer() const {
+    if (!fingerprint_config_.empty())
+      return false;
+    return renderer_.CanUseSpareRenderer();
+  }
   const std::string& GetFingerprintConfig() const { return fingerprint_config_; }
   // Alias for Task 4 injection path.
   const std::string& GetFingerprintConfigBase64() const {

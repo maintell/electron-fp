@@ -536,8 +536,13 @@ void ElectronBrowserClient::RegisterPendingSiteInstance(
   // Remember the original web contents for the pending renderer process.
   auto* web_contents = content::WebContents::FromRenderFrameHost(rfh);
   auto* prefs = WebContentsPreferences::From(web_contents);
-  const bool compatible =
+  bool compatible =
       prefs ? prefs->CanUseSpareRenderer() : spare_renderer_compatible_;
+  // Fingerprint is per-Renderer via --fingerprint-config; spare is launched
+  // without it. A fingerprint window must not reuse the spare to keep
+  // window isolation; and vice-versa the spare must remain generic.
+  if (prefs && !prefs->GetFingerprintConfigBase64().empty())
+    compatible = false;
   base::AutoReset<bool> reset(&spare_renderer_compatible_, compatible);
   const auto pending_process_id = pending_site_instance->GetProcess()->GetID();
   pending_processes_[pending_process_id] = web_contents;
@@ -675,9 +680,17 @@ void ElectronBrowserClient::AppendExtraCommandLineSwitches(
         GetWebContentsFromProcessID(unsafe_process_id);
     if (web_contents) {
       auto* web_preferences = WebContentsPreferences::From(web_contents);
-      if (web_preferences)
+      if (web_preferences) {
         web_preferences->AppendCommandLineSwitches(
             command_line, IsRendererSubFrame(unsafe_process_id));
+        // Fingerprint: per-Renderer isolated config via --fingerprint-config.
+        // Empty → native passthrough (zero-config). Non-empty base64 JSON is
+        // read by blink's FpConfigContent() with highest priority.
+        std::string fp_b64 = web_preferences->GetFingerprintConfigBase64();
+        if (!fp_b64.empty()) {
+          command_line->AppendSwitchASCII(switches::kFingerprintConfig, fp_b64);
+        }
+      }
     } else if (render_process_host && render_process_host->IsSpare()) {
       // Launched like a sandboxed window's renderer, which is the only kind
       // ShouldUseSpareRenderProcessHost() hands it to.
