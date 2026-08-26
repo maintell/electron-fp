@@ -7,6 +7,9 @@ import { net, type UtilityProcess } from 'electron/main';
 const { fromPartition, fromPath, Session } = process._linkedBinding('electron_browser_session');
 const { isDisplayMediaSystemPickerAvailable } = process._linkedBinding('electron_browser_desktop_capturer');
 
+// ponytail: 56-key flat config; Record covers all without over-specifying narrow type
+export type FingerprintConfig = Record<string, any>;
+
 // Fake video window that activates the native system picker
 // This is used to get around the need for a screen/window
 // id in Chrome's desktopCapturer.
@@ -121,6 +124,33 @@ Session.prototype.registerLocalAIHandler = function (handler: UtilityProcess | n
   // `ElectronInternal.UtilityProcessWrapper` before we call the C++ function
   return this._registerLocalAIHandler(handler !== null ? (handler as any)._unwrapHandle() : null);
 };
+
+// ponytail: native gin bindings (setFingerprintConfig/getFingerprintConfig) already exist via FillObjectTemplate; wrappers preserve typing and handle null/false clearing
+const _origSetFingerprintConfig = (Session.prototype as any).setFingerprintConfig as ((config: any) => void) | undefined;
+const _origGetFingerprintConfig = (Session.prototype as any).getFingerprintConfig as (() => any) | undefined;
+
+Session.prototype.setFingerprintConfig = function (config: FingerprintConfig | null | false) {
+  void process._linkedBinding('electron_browser_session');
+  if (typeof _origSetFingerprintConfig === 'function') return _origSetFingerprintConfig.call(this, config as any);
+  return (this as any)._setFingerprintConfig?.(config as any);
+};
+
+Session.prototype.getFingerprintConfig = function (): FingerprintConfig | null {
+  void process._linkedBinding('electron_browser_session');
+  if (typeof _origGetFingerprintConfig === 'function') return _origGetFingerprintConfig.call(this);
+  return null;
+};
+
+Object.defineProperty(Session.prototype, 'fingerprintConfig', {
+  get(this: Electron.Session): FingerprintConfig | null {
+    return this.getFingerprintConfig();
+  },
+  set(this: Electron.Session, v: FingerprintConfig | null) {
+    this.setFingerprintConfig(v as any);
+  },
+  enumerable: true,
+  configurable: true
+});
 
 export default {
   fromPartition,

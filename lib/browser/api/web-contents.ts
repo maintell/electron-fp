@@ -878,6 +878,12 @@ WebContents.prototype._init = function () {
     set: (agent) => this.setUserAgent(agent)
   });
 
+  // ponytail: 56-key fingerprint config per-WebContents (window isolation); native gin handles base64 JSON, JS is pass-through
+  Object.defineProperty(this, 'fingerprintConfig', {
+    get: () => (this as any).getFingerprintConfig(),
+    set: (config) => (this as any).setFingerprintConfig(config)
+  });
+
   Object.defineProperty(this, 'zoomLevel', {
     get: () => this.getZoomLevel(),
     set: (level) => this.setZoomLevel(level)

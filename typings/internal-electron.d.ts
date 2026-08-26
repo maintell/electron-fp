@@ -6,6 +6,9 @@
  */
 
 declare namespace Electron {
+  // ponytail: 56-key flat map; Record covers all without over-specifying
+  type FingerprintConfig = Record<string, any>;
+
   enum ProcessType {
     browser = 'browser',
     renderer = 'renderer',
@@ -166,11 +169,25 @@ declare namespace Electron {
     embedder?: Electron.WebContents;
     openerSandboxFlags?: number;
     type?: 'backgroundPage' | 'window' | 'browserView' | 'remote' | 'webview' | 'offscreen';
+    fingerprint?: FingerprintConfig | null | false;
   }
 
   interface Session {
     _setDisplayMediaRequestHandler: Electron.Session['setDisplayMediaRequestHandler'];
     _registerLocalAIHandler(handler: ElectronInternal.UtilityProcessWrapper | null): void;
+  }
+
+  // ponytail: fingerprint - per-session and per-WebContents (window) isolation
+  interface Session {
+    setFingerprintConfig(config: FingerprintConfig | null | false): void;
+    getFingerprintConfig(): FingerprintConfig | null;
+    fingerprintConfig: FingerprintConfig | null;
+  }
+
+  interface WebContents {
+    setFingerprintConfig(config: FingerprintConfig | null | false): void;
+    getFingerprintConfig(): FingerprintConfig | null;
+    fingerprintConfig: FingerprintConfig | null;
   }
 
   type CreateWindowFunction = (options: BrowserWindowConstructorOptions) => WebContents;
