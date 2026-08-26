@@ -1,0 +1,1881 @@
+# ============================================================================
+# fp-fingerprint.patch - fingerprint browser patches
+#
+# PURPOSE: controllable fingerprint spoofing for a multi-language
+# automation browser. Every behavior is driven by FP_CONFIG (JSON via
+# FP_CONFIG_DATA env or FP_CONFIG file, plus FP_<KEY> env fallbacks),
+# see fp_config_helpers.h (OWN FILE - never conflicts on upgrade).
+# With no config, the browser behaves 100% stock (zero intervention).
+#
+# MERGE/UPGRADE GUIDE (new Chromium versions):
+#   - Applied with patch.exe (patches/series). Any hunk mismatch aborts
+#     loudly - nothing is silently skipped.
+#   - After adapting hunks, regenerate with gen_patch6.py: it rewrites
+#     this documentation + per-file docs from the source of truth and
+#     runs a completeness check (all 54 known config keys must be
+#     present in the patch) - missing keys abort generation.
+#   - Risk legend per file below: LOW = stable getter anchors; MEDIUM =
+#     occasionally refactored modules; HIGH = frequently changing
+#     internals (WebGL/Canvas/WebRTC) - expect manual hunk adaptation.
+#   - After merging, run the CDP smoke/regression suite (verifies
+#     behavior, not just compilation).
+# ============================================================================#
+
+# --- third_party/webrtc/rtc_base/network.cc ---
+# RANGE: NetworkManager::GetCustomWebRtcIp() + helpers (config read).
+# PURPOSE: custom WebRTC IP override source (webrtc_ip).
+# CONFIG: webrtc_ip (JSON or FP_WEBRTC_IP env).
+# MERGE: HIGH risk - WebRTC is a separate repo; network.cc refactors
+# frequently. Re-anchor on NetworkManager class methods.
+--- a/third_party/webrtc/rtc_base/network.cc
++++ b/third_party/webrtc/rtc_base/network.cc
+@@ -14,6 +14,8 @@
+ #include <cerrno>
+ #include <cstdint>
+ #include <cstring>
++#include <cstdio>
++#include <cstdlib>
+ #include <map>
+ #include <memory>
+ #include <span>
+@@ -631,6 +633,118 @@
+   RTC_LOG(LS_INFO) << "Network change was observed";
+   UpdateNetworksOnce();
+ }
++
++// ---- fp: custom WebRTC IP ----
++std::string FpTrimWs(const std::string& s) {
++  std::string r = s;
++  while (!r.empty() && (r.back() == ' ' || r.back() == '\t' ||
++                        r.back() == '\r' || r.back() == '\n')) {
++    r.pop_back();
++  }
++  return r;
++}
++
++// Read a string value for |key| from JSON content.
++std::string ReadConfigValue(const std::string& content, const char* key) {
++  std::string needle = "\"";
++  needle += key;
++  needle += "\"";
++  size_t pos = content.find(needle);
++  if (pos == std::string::npos) {
++    return "";
++  }
++  size_t colon = content.find(':', pos);
++  if (colon == std::string::npos) {
++    return "";
++  }
++  size_t q1 = content.find('"', colon);
++  if (q1 == std::string::npos) {
++    return "";
++  }
++  size_t q2 = content.find('"', q1 + 1);
++  if (q2 == std::string::npos) {
++    return "";
++  }
++  return content.substr(q1 + 1, q2 - q1 - 1);
++}
++
++IPAddress GetCustomWebRtcIp() {
++  // Resolve once per process (candidate generation calls this frequently).
++  static IPAddress cached;
++  static bool resolved = false;
++  if (resolved) {
++    return cached;
++  }
++  // 1) FP_CONFIG_DATA env (JSON content, sandbox-safe) — priority.
++  const char* data = getenv("FP_CONFIG_DATA");
++  if (data && *data) {
++    std::string ip = ReadConfigValue(std::string(data), "webrtc_ip");
++    IPAddress addr;
++    if (!ip.empty() && IPFromString(ip, &addr)) {
++      resolved = true;
++      cached = addr;
++      return cached;
++    }
++  }
++  // 2) Config file (path via FP_CONFIG env).
++  const char* config = getenv("FP_CONFIG");
++  if (config) {
++    std::string path = FpTrimWs(config);
++    FILE* f = fopen(path.c_str(), "rb");
++    if (f) {
++      std::string content;
++      char buf[4096];
++      size_t n;
++      while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
++        content.append(buf, n);
++      }
++      fclose(f);
++      std::string ip = ReadConfigValue(content, "webrtc_ip");
++      IPAddress addr;
++      if (!ip.empty() && IPFromString(ip, &addr)) {
++        resolved = true;
++        cached = addr;
++        return cached;
++      }
++    }
++  }
++  // 3) Fallback: direct env var.
++  const char* ip = getenv("FP_WEBRTC_IP");
++  if (ip) {
++    std::string ipstr = FpTrimWs(ip);
++    in_addr a4;
++    if (inet_pton(AF_INET, ipstr, &a4) == 1) {
++      resolved = true;
++      cached = IPAddress(a4);
++      return cached;
++    }
++    in6_addr a6;
++    if (inet_pton(AF_INET6, ipstr, &a6) == 1) {
++      resolved = true;
++      cached = IPAddress(a6);
++      return cached;
++    }
++    RTC_LOG(LS_ERROR) << "custom webrtc ip parse failed: " << ipstr;
++  }
++  resolved = true;
++  cached = IPAddress();
++  return cached;
++}
++
++void ApplyCustomWebRtcIp(std::vector<std::unique_ptr<Network>>& list) {
++  IPAddress custom = GetCustomWebRtcIp();
++  if (custom.IsNil()) {
++    return;
++  }
++  RTC_LOG(LS_INFO) << "Applying custom WebRTC IP: " << custom.ToString();
++  for (auto& network : list) {
++    network->ClearIPs();
++    network->AddIP(custom);
++    // Disable mDNS obfuscation so the custom IP is exposed directly.
++    network->set_mdns_responder_provider(nullptr);
++  }
++}
++
+ #if defined(WEBRTC_POSIX)
+ NetworkMonitorInterface::InterfaceInfo BasicNetworkManager::GetInterfaceInfo(
+     struct ifaddrs* cursor) const {
+@@ -1116,6 +1230,8 @@
+   if (!CreateNetworks(false, &list)) {
+     NotifyError();
+   } else {
++    // fp: override host IPs before merging.
++    ApplyCustomWebRtcIp(list);
+     bool changed;
+     NetworkManager::Stats stats;
+     MergeNetworkList(std::move(list), &changed, &stats);
+# --- third_party/webrtc/rtc_base/network.h ---
+# RANGE: NetworkManager interface (GetCustomWebRtcIp exposure).
+# PURPOSE: declare custom IP hook used by network.cc.
+# MERGE: HIGH risk (WebRTC), keep in sync with network.cc changes.
+--- a/third_party/webrtc/rtc_base/network.h
++++ b/third_party/webrtc/rtc_base/network.h
+@@ -478,6 +478,9 @@
+   friend class NetworkManager;
+ };
+ 
++// fp: override host candidate IPs (config/env driven).
++IPAddress GetCustomWebRtcIp();
++void ApplyCustomWebRtcIp(std::vector<std::unique_ptr<Network>>& list);
+ 
+ // Base class for NetworkManager implementations.
+ class RTC_EXPORT NetworkManagerBase : public NetworkManager {
+# --- third_party/blink/renderer/platform/p2p/ipc_network_manager.cc ---
+# RANGE: network IP list rewrite (IpcNetworkManager).
+# PURPOSE: replace host network IPs with configured webrtc_ip so
+# local-IP leakage via ICE/network enumeration is closed.
+# CONFIG: webrtc_ip.
+# MERGE: MEDIUM - anchor on IpcNetworkManager::GetNetworks.
+--- a/third_party/blink/renderer/platform/p2p/ipc_network_manager.cc
++++ b/third_party/blink/renderer/platform/p2p/ipc_network_manager.cc
+@@ -19,6 +19,7 @@
+ #include "net/base/network_interfaces.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
++#include "third_party/webrtc/rtc_base/network.h"
+ #include "third_party/webrtc/rtc_base/socket_address.h"
+ 
+ namespace blink {
+@@ -216,6 +217,8 @@
+ 
+   bool changed = false;
+   NetworkManager::Stats stats;
++  // fp: override host IPs before merging.
++  webrtc::ApplyCustomWebRtcIp(networks);
+   MergeNetworkList(std::move(networks), &changed, &stats);
+   if (changed)
+     NotifyNetworksChanged();
+# --- third_party/webrtc/p2p/base/port.cc ---
+# RANGE: candidate local address override (Port::GetLocalAddress).
+# PURPOSE: host candidate IP spoofing (webrtc_ip).
+# MERGE: HIGH risk (WebRTC); anchor on Port class address getters.
+--- a/third_party/webrtc/p2p/base/port.cc
++++ b/third_party/webrtc/p2p/base/port.cc
+@@ -222,6 +222,13 @@
+   // thing for the Candidate class to know the base address and keep it const.
+   Candidate c(component_, protocol, address, 0U, username_fragment(), password_,
+               type, generation_, "", network_->id(), network_cost_);
++  // fp: spoof host candidate address.
++  {
++    IPAddress custom_ip = GetCustomWebRtcIp();
++    if (!custom_ip.IsNil() && c.is_local()) {
++      c.set_address(SocketAddress(custom_ip, address.port()));
++    }
++  }
+   // Set the relay protocol before computing the foundation field.
+   c.set_relay_protocol(relay_protocol);
+   c.ComputeFoundation(base_address, ice_tiebreaker_);
+@@ -251,6 +258,10 @@
+ }
+ 
+ bool Port::MaybeObfuscateAddress(const Candidate& c, bool is_final) {
++  // fp: never obfuscate when a custom IP is active.
++  if (!GetCustomWebRtcIp().IsNil()) {
++    return false;
++  }
+   // TODO(bugs.webrtc.org/9723): Use a config to control the feature of IP
+   // handling with mDNS.
+   if (network_->GetMdnsResponder() == nullptr) {
+# --- third_party/webrtc/p2p/base/stun_port.cc ---
+# RANGE: srflx candidate IP override (StunPort).
+# PURPOSE: server-reflexive candidate IP spoofing (webrtc_ip).
+# MERGE: HIGH risk (WebRTC); anchor on StunPort::PrepareAddress.
+--- a/third_party/webrtc/p2p/base/stun_port.cc
++++ b/third_party/webrtc/p2p/base/stun_port.cc
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include "p2p/base/stun_port.h"
++#include "rtc_base/network.h"
+ 
+ #include <cstddef>
+ #include <cstdint>
+@@ -566,6 +567,13 @@
+        Network()->GetMdnsResponder() != nullptr) &&
+       !HasStunCandidateWithAddress(stun_reflected_addr)) {
+     SocketAddress related_address = socket_->GetLocalAddress();
++    // fp: spoof srflx related address (leaks the real local IP).
++    {
++      IPAddress fp_ip = GetCustomWebRtcIp();
++      if (!fp_ip.IsNil()) {
++        related_address = SocketAddress(fp_ip, related_address.port());
++      }
++    }
+     // If we can't stamp the related address correctly, empty it to avoid leak.
+     if (!MaybeSetDefaultLocalAddress(&related_address)) {
+       related_address = EmptySocketAddressWithFamily(related_address.family());
+# --- third_party/blink/renderer/core/frame/fp_config_helpers.h (OWN FILE) ---
+# RANGE: whole file - config reading infrastructure + shared helpers
+# (FpConfigInt/String/Int64, FpFontFamilyBlocked, canvas noise fn).
+# PURPOSE: single source of truth for FP_CONFIG; never conflicts on
+# upstream upgrade (new file). Keep all new helpers here.
+--- a/third_party/blink/renderer/core/frame/fp_config_helpers.h
++++ b/third_party/blink/renderer/core/frame/fp_config_helpers.h
+@@ -0,0 +1,363 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// fp: fingerprint configuration helpers for Blink.
++// Reads values from FP_CONFIG_DATA env var (JSON content, sandbox-safe) with
++// priority, then FP_CONFIG JSON file, then FP_<KEY> env vars (fallback).
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_FP_CONFIG_HELPERS_H_
++#define THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_FP_CONFIG_HELPERS_H_
++
++#include <cstdio>
++#include <cstdlib>
++#include <string>
++#include "ui/gfx/geometry/rect_f.h"
++#include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "third_party/skia/include/core/SkImageInfo.h"
++#include "third_party/skia/include/core/SkData.h"
++
++namespace blink {
++
++inline std::string FpTrim(std::string s) {
++  while (!s.empty() && (s.back() == ' ' || s.back() == '\t' ||
++                        s.back() == '\r' || s.back() == '\n')) {
++    s.pop_back();
++  }
++  return s;
++}
++
++// Returns the FP_CONFIG JSON content: FP_CONFIG_DATA env (priority) or the
++// file pointed to by FP_CONFIG. Empty string if unavailable.
++inline std::string FpConfigContent() {
++  const char* data = getenv("FP_CONFIG_DATA");
++  if (data && *data) {
++    return std::string(data);
++  }
++  const char* path = getenv("FP_CONFIG");
++  if (!path) {
++    return "";
++  }
++  std::string path_str = FpTrim(path);
++  FILE* f = fopen(path_str.c_str(), "rb");
++  if (!f) {
++    return "";
++  }
++  std::string content;
++  char buf[4096];
++  size_t n;
++  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
++    content.append(buf, n);
++  }
++  fclose(f);
++  return content;
++}
++
++// Find `"key"` in JSON content; returns position after the colon, or npos.
++inline size_t FpConfigFindKey(const std::string& content, const char* key) {
++  std::string needle = "\"";
++  needle += key;
++  needle += "\"";
++  size_t pos = content.find(needle);
++  if (pos == std::string::npos) {
++    return std::string::npos;
++  }
++  size_t colon = content.find(':', pos);
++  if (colon == std::string::npos) {
++    return std::string::npos;
++  }
++  size_t i = colon + 1;
++  while (i < content.size() && (content[i] == ' ' || content[i] == '\t' ||
++                                content[i] == '\r' || content[i] == '\n')) {
++    i++;
++  }
++  return i;
++}
++
++// Read a string value for |key| from the FP_CONFIG JSON content.
++inline std::string FpConfigString(const char* key) {
++  std::string content = FpConfigContent();
++  if (content.empty()) {
++    return "";
++  }
++  size_t i = FpConfigFindKey(content, key);
++  if (i == std::string::npos || i >= content.size() || content[i] != '"') {
++    return "";
++  }
++  size_t q2 = content.find('"', i + 1);
++  if (q2 == std::string::npos) {
++    return "";
++  }
++  return content.substr(i + 1, q2 - i - 1);
++}
++
++// Read an int value for |key|: FP_CONFIG JSON ("key": N) or FP_<KEY> env var.
++inline int FpConfigInt(const char* key, int fallback) {
++  std::string content = FpConfigContent();
++  if (!content.empty()) {
++    size_t i = FpConfigFindKey(content, key);
++    if (i != std::string::npos && i < content.size()) {
++      bool neg = false;
++      if (content[i] == '-') {
++        neg = true;
++        i++;
++      }
++      long v = 0;
++      bool any = false;
++      while (i < content.size() && content[i] >= '0' && content[i] <= '9') {
++        v = v * 10 + (content[i] - '0');
++        i++;
++        any = true;
++      }
++      if (any) {
++        return static_cast<int>(neg ? -v : v);
++      }
++    }
++  }
++  std::string env_name = "FP_";
++  env_name += key;
++  const char* e = getenv(env_name.c_str());
++  if (e && *e) {
++    char* end = nullptr;
++    long v = strtol(e, &end, 10);
++    if (end != e) {
++      return static_cast<int>(v);
++    }
++  }
++  return fallback;
++}
++
++// Same as FpConfigInt but returns int64 (for large byte counts).
++inline int64_t FpConfigInt64(const char* key, int64_t fallback) {
++  std::string content = FpConfigContent();
++  if (!content.empty()) {
++    size_t i = FpConfigFindKey(content, key);
++    if (i != std::string::npos && i < content.size()) {
++      bool neg = false;
++      if (content[i] == '-') {
++        neg = true;
++        i++;
++      }
++      long long v = 0;
++      bool any = false;
++      while (i < content.size() && content[i] >= '0' && content[i] <= '9') {
++        v = v * 10 + (content[i] - '0');
++        i++;
++        any = true;
++      }
++      if (any) {
++        return neg ? -v : v;
++      }
++    }
++  }
++  std::string env_name = "FP_";
++  env_name += key;
++  const char* e = getenv(env_name.c_str());
++  if (e && *e) {
++    char* end = nullptr;
++    long long v = strtoll(e, &end, 10);
++    if (end != e) {
++      return v;
++    }
++  }
++  return fallback;
++}
++
++
++
++// Deterministic per-pixel noise for canvas data (export + getImageData).
++// SplitMix64 per-pixel hash from (seed, pixel index). Camoufox-style
++// minimal noise: fully transparent pixels untouched (clearRect semantics),
++// only the first non-zero RGB channel perturbed.
++inline void FpApplyPixelNoise(uint8_t* px, size_t total, uint64_t state,
++                              int strength) {
++  for (size_t i = 0; i + 4 <= total; i += 4) {
++    if (px[i + 3] == 0) {  // fully transparent: leave untouched
++      continue;
++    }
++    size_t c = 0;
++    while (c < 3 && px[i + c] == 0) {
++      ++c;
++    }
++    if (c == 3) {  // opaque black pixel: leave untouched
++      continue;
++    }
++    uint64_t h = state ^
++                 (static_cast<uint64_t>(i >> 2) * 0x9E3779B97F4A7C15ULL);
++    h ^= h >> 30;
++    h *= 0xBF58476D1CE4E5B9ULL;
++    h ^= h >> 27;
++    h *= 0x94D049BB133111EBULL;
++    h ^= h >> 31;
++    int delta = static_cast<int>(h & 0xFF) % (2 * strength + 1) - strength;
++    int v = px[i + c] + delta;
++    px[i + c] = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
++  }
++}
++
++// Deterministic pixel noise for canvas export paths (toDataURL/toBlob).
++// Enabled when FP_CONFIG "canvas_noise_seed" > 0; strength via
++// "canvas_noise_strength" (default 2, clamp 1..8). Same seed + same drawn
++// content -> identical export bytes across sessions (stable fingerprint
++// change), while the bytes differ from the unnoised original.
++inline void FpApplyCanvasExportNoise(
++    scoped_refptr<blink::StaticBitmapImage>& image) {
++  int64_t fp_seed = static_cast<int64_t>(FpConfigInt("canvas_noise_seed", 0));
++  if (fp_seed == 0 || !image) {
++    return;
++  }
++  int strength = FpConfigInt("canvas_noise_strength", 2);
++  if (strength < 1) {
++    strength = 1;
++  }
++  if (strength > 8) {
++    strength = 8;
++  }
++  SkImageInfo info = image->PaintImageForCurrentFrame().GetSkImageInfo();
++  if (info.bytesPerPixel() != 4) {
++    return;
++  }
++  SkBitmap bitmap;
++  if (!bitmap.tryAllocPixels(info)) {
++    return;
++  }
++  if (!image->PaintImageForCurrentFrame().readPixels(
++          bitmap.info(), bitmap.getPixels(), bitmap.rowBytes(), 0, 0)) {
++    return;
++  }
++  uint8_t* px = static_cast<uint8_t*>(bitmap.getPixels());
++  const size_t total = bitmap.computeByteSize();
++  const uint64_t state = static_cast<uint64_t>(fp_seed);
++  FpApplyPixelNoise(px, total, state, strength);
++  sk_sp<SkData> data = SkData::MakeWithCopy(px, total);
++  image = blink::StaticBitmapImage::Create(data, info, gfx::HDRMetadata());
++}
++
++
++// Returns true if |family| must be hidden from the page: either it is
++// listed in FP_CONFIG "fonts_blocklist" (comma-separated, case-insensitive),
++// or "fonts_whitelist" is set and the family is NOT in it. Generic families
++// (sans-serif/serif/monospace/cursive/fantasy/system-ui) are always exempt
++// so fallback never deadlocks. Web fonts (@font-face) bypass FontCache, so
++// they are unaffected. Whitelist wins over blocklist when both are set.
++inline bool FpFontFamilyHidden(const std::string& family) {
++  std::string whitelist = FpConfigString("fonts_whitelist");
++  std::string blocklist = FpConfigString("fonts_blocklist");
++  if (whitelist.empty() && blocklist.empty()) {
++    return false;
++  }
++  // generic families always pass
++  {
++    std::string lower;
++    for (char ch : family) {
++      lower += (ch >= 'A' && ch <= 'Z') ? static_cast<char>(ch - 'A' + 'a') : ch;
++    }
++    if (lower == "sans-serif" || lower == "serif" || lower == "monospace" ||
++        lower == "cursive" || lower == "fantasy" || lower == "system-ui") {
++      return false;
++    }
++  }
++  // case-insensitive substring-set membership helper
++  auto in_list = [](const std::string& list, const std::string& name) -> bool {
++    size_t start = 0;
++    while (start <= list.size()) {
++      size_t comma = list.find(',', start);
++      size_t end = (comma == std::string::npos) ? list.size() : comma;
++      if (end > start) {
++        std::string entry = list.substr(start, end - start);
++        size_t b = 0, e2 = entry.size();
++        while (b < e2 && (entry[b] == ' ' || entry[b] == '\t')) b++;
++        while (e2 > b && (entry[e2 - 1] == ' ' || entry[e2 - 1] == '\t')) e2--;
++        if (e2 - b > 0) {
++          std::string name_l;
++          for (char ch : name) {
++            name_l += (ch >= 'A' && ch <= 'Z') ? static_cast<char>(ch - 'A' + 'a') : ch;
++          }
++          std::string entry_l;
++          for (size_t k = b; k < e2; ++k) {
++            char ch = entry[k];
++            entry_l += (ch >= 'A' && ch <= 'Z') ? static_cast<char>(ch - 'A' + 'a') : ch;
++          }
++          if (name_l == entry_l) {
++            return true;
++          }
++        }
++      }
++      if (comma == std::string::npos) {
++        break;
++      }
++      start = comma + 1;
++    }
++    return false;
++  };
++  if (!whitelist.empty()) {
++    return !in_list(whitelist, family);
++  }
++  return in_list(blocklist, family);
++}
++
++
++
++// Deterministic noise for audio sample data (audio fingerprint path).
++// Enabled when FP_CONFIG "audio_data_seed" > 0; amplitude via
++// "audio_data_strength" (float, default 0.0005). Same seed + same content
++// -> identical altered output across sessions. Used on offline render
++// output and AnalyserNode float reads (does not affect playback paths).
++inline void FpApplyAudioDataNoise(float* data, size_t count) {
++  int64_t fp_seed = FpConfigInt64("audio_data_seed", 0);
++  if (fp_seed == 0 || !data || count == 0) {
++    return;
++  }
++  float strength = 0.0005f;
++  std::string fp_strength = FpConfigString("audio_data_strength");
++  if (!fp_strength.empty()) {
++    char* end = nullptr;
++    float v = std::strtof(fp_strength.c_str(), &end);
++    if (end != fp_strength.c_str() && v >= 0.0f && v <= 1.0f) {
++      strength = v;
++    }
++  }
++  const uint64_t state = static_cast<uint64_t>(fp_seed);
++  for (size_t i = 0; i < count; ++i) {
++    uint64_t h = state ^
++                 (static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL);
++    h ^= h >> 30;
++    h *= 0xBF58476D1CE4E5B9ULL;
++    h ^= h >> 27;
++    h *= 0x94D049BB133111EBULL;
++    h ^= h >> 31;
++    float delta = (static_cast<float>(h & 0xFF) / 127.5f - 1.0f) * strength;
++    data[i] += delta;
++  }
++}
++
++
++// Deterministic subpixel perturbation for element rect APIs
++// (getClientRects/getBoundingClientRect) - rasterizer fingerprint
++// defense. Enabled by FP_CONFIG "client_rects_seed" > 0. Offset derives
++// from (seed, rect origin) so the same element keeps the same value
++// across sessions; magnitude < 0.2px so layout logic is unaffected.
++inline void FpPerturbRectF(gfx::RectF& r) {
++  int64_t fp_seed = FpConfigInt64("client_rects_seed", 0);
++  if (fp_seed == 0 || r.IsEmpty()) {
++    return;
++  }
++  uint64_t h = static_cast<uint64_t>(fp_seed) ^
++               (static_cast<uint64_t>(static_cast<int>(r.x() * 16.0f)) *
++                0x9E3779B97F4A7C15ULL);
++  h ^= (static_cast<uint64_t>(static_cast<int>(r.y() * 16.0f)) *
++        0xBF58476D1CE4E5B9ULL);
++  h ^= h >> 30;
++  h *= 0xBF58476D1CE4E5B9ULL;
++  h ^= h >> 27;
++  h *= 0x94D049BB133111EBULL;
++  h ^= h >> 31;
++  double dx = (static_cast<double>(h & 0xFF) / 255.0 - 0.5) * 0.4;
++  double dy = (static_cast<double>((h >> 8) & 0xFF) / 255.0 - 0.5) * 0.4;
++  r.Offset(static_cast<float>(dx), static_cast<float>(dy));
++}
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_FP_CONFIG_HELPERS_H_
+# --- third_party/blink/renderer/core/frame/screen.cc ---
+# RANGE: Screen::width/height/availWidth/availHeight/colorDepth.
+# PURPOSE: spoof screen metrics (screen_width/height/avail_*/color_depth).
+# CONFIG: screen_width, screen_height, screen_avail_width,
+# screen_avail_height, screen_color_depth.
+# MERGE: LOW - stable getter functions.
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -26,6 +26,7 @@
+  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "third_party/blink/renderer/core/frame/screen.h"
+ 
+ #include "base/numerics/safe_conversions.h"
+@@ -81,16 +82,24 @@
+ int Screen::height() const {
+   if (!DomWindow())
+     return 0;
+-  return GetRect(/*available=*/false).height();
++  int h = GetRect(/*available=*/false).height();
++  int fp = FpConfigInt("screen_height", 0);
++  return fp > 0 ? fp : h;
+ }
+ 
+ int Screen::width() const {
+   if (!DomWindow())
+     return 0;
+-  return GetRect(/*available=*/false).width();
++  int w = GetRect(/*available=*/false).width();
++  int fp = FpConfigInt("screen_width", 0);
++  return fp > 0 ? fp : w;
+ }
+ 
+ unsigned Screen::colorDepth() const {
++  int fp = FpConfigInt("screen_color_depth", 0);
++  if (fp > 0) {
++    return static_cast<unsigned>(fp);
++  }
+   // "If the user agent does not know the color depth or does not want to
+   // return it for privacy considerations, it should return 24."
+   //
+@@ -124,13 +133,17 @@
+ int Screen::availHeight() const {
+   if (!DomWindow())
+     return 0;
+-  return GetRect(/*available=*/true).height();
++  int h = GetRect(/*available=*/true).height();
++  int fp = FpConfigInt("screen_avail_height", 0);
++  return fp > 0 ? fp : h;
+ }
+ 
+ int Screen::availWidth() const {
+   if (!DomWindow())
+     return 0;
+-  return GetRect(/*available=*/true).width();
++  int w = GetRect(/*available=*/true).width();
++  int fp = FpConfigInt("screen_avail_width", 0);
++  return fp > 0 ? fp : w;
+ }
+ 
+ void Screen::Trace(Visitor* visitor) const {
+# --- third_party/blink/renderer/core/events/navigator_events.cc ---
+# RANGE: NavigatorEvents::maxTouchPoints.
+# PURPOSE: spoof touch support (max_touch_points).
+# MERGE: LOW.
+--- a/third_party/blink/renderer/core/events/navigator_events.cc
++++ b/third_party/blink/renderer/core/events/navigator_events.cc
+@@ -29,6 +29,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/events/navigator_events.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+@@ -39,7 +40,9 @@
+ 
+ int32_t NavigatorEvents::maxTouchPoints(Navigator& navigator) {
+   LocalDOMWindow* window = navigator.DomWindow();
+-  return window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
++  int real = window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
++  int fp = FpConfigInt("max_touch_points", 0);
++  return fp > 0 ? fp : real;
+ }
+ 
+ }  // namespace blink
+# --- third_party/blink/renderer/modules/webaudio/base_audio_context.h ---
+# RANGE: sample rate plumbing for fp override.
+# PURPOSE: allow audio_sample_rate spoofing.
+# MERGE: MEDIUM - audio module refactors; keep header/impl in sync.
+--- a/third_party/blink/renderer/modules/webaudio/base_audio_context.h
++++ b/third_party/blink/renderer/modules/webaudio/base_audio_context.h
+@@ -26,6 +26,7 @@
+ #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_BASE_AUDIO_CONTEXT_H_
+ #define THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_BASE_AUDIO_CONTEXT_H_
+ 
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "third_party/blink/renderer/bindings/core/v8/active_script_wrappable.h"
+@@ -116,7 +117,10 @@
+   // https://webaudio.github.io/web-audio-api/#BaseAudioContext
+   // Cannot be called from the audio thread.
+   AudioDestinationNode* destination() const;
+-  float sampleRate() const { return destination_handler_->SampleRate(); }
++  float sampleRate() const {
++    int fp = blink::FpConfigInt("audio_sample_rate", 0);
++    return fp > 0 ? static_cast<float>(fp) : destination_handler_->SampleRate();
++  }
+   double currentTime() const { return destination_handler_->CurrentTime(); }
+   AudioListener* listener() { return listener_.Get(); }
+   // Virtual so AudioContext::state() can add UseCounters.
+# --- third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc ---
+# RANGE: getParameter (MAX_TEXTURE/RENDERBUFFER/VIEWPORT_DIMS,
+# ALIASED_POINT/LINE_WIDTH_RANGE, UNMASKED_VENDOR/RENDERER) +
+# getSupportedExtensions append.
+# PURPOSE: spoof GPU fingerprint surface.
+# CONFIG: webgl_max_texture_size, webgl_max_renderbuffer_size,
+# webgl_max_viewport_dims, webgl_aliased_point_size_range,
+# webgl_aliased_line_width_range, webgl_vendor, webgl_renderer,
+# webgl_extensions.
+# MERGE: HIGH risk - WebGL module refactors often; anchor on
+# WebGLRenderingContextBase::getParameter/getSupportedExtensions.
+# NOTE: 151 uses DOMTypedArray (dom_typed_array.h), older versions
+# used per-type headers - adjust includes on merge.
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -23,12 +23,15 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "base/containers/span.h"
+ #include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
++#include "third_party/blink/renderer/core/typed_arrays/dom_typed_array.h"
+ 
+ #include <inttypes.h>
+ 
+ #include <memory>
++#include <cstdlib>
+ #include <cstdio>
+ #include <utility>
+ 
+@@ -99,6 +102,7 @@
+ #include "third_party/blink/renderer/core/typed_arrays/array_buffer/array_buffer_contents.h"
+ #include "third_party/blink/renderer/core/typed_arrays/array_buffer_view_helpers.h"
+ #include "third_party/blink/renderer/core/typed_arrays/dom_array_buffer.h"
++#include "third_party/blink/renderer/core/typed_arrays/dom_typed_array.h"
+ #include "third_party/blink/renderer/modules/webcodecs/video_frame.h"
+ #include "third_party/blink/renderer/modules/webgl/angle_instanced_arrays.h"
+ #include "third_party/blink/renderer/modules/webgl/ext_blend_min_max.h"
+@@ -3983,6 +3987,65 @@
+                                                     GLenum pname) {
+   if (isContextLost())
+     return ScriptValue::CreateNull(script_state->GetIsolate());
++  // fp: spoof common WebGL parameters.
++  {
++    int v = 0;
++    switch (pname) {
++      case GL_MAX_TEXTURE_SIZE:
++        v = FpConfigInt("webgl_max_texture_size", 0);
++        break;
++      case GL_MAX_RENDERBUFFER_SIZE:
++        v = FpConfigInt("webgl_max_renderbuffer_size", 0);
++        break;
++      case GL_MAX_VIEWPORT_DIMS:
++        v = FpConfigInt("webgl_max_viewport_dims", 0);
++        break;
++      default:
++        break;
++    }
++    if (v > 0) {
++      if (pname == GL_MAX_VIEWPORT_DIMS) {
++        // Int32Array with two equal components.
++        std::array<int, 2> vv = {v, v};
++        return WebGLAny(script_state,
++                        DOMInt32Array::Create(base::span(vv)));
++      }
++      return WebGLAny(script_state, static_cast<unsigned>(v));
++    }
++    // ALIASED_POINT_SIZE_RANGE / ALIASED_LINE_WIDTH_RANGE: Float32Array
++    // from "min,max" config strings.
++    if (pname == GL_ALIASED_POINT_SIZE_RANGE ||
++        pname == GL_ALIASED_LINE_WIDTH_RANGE) {
++      std::string fp_rng = FpConfigString(
++          pname == GL_ALIASED_POINT_SIZE_RANGE
++              ? "webgl_aliased_point_size_range"
++              : "webgl_aliased_line_width_range");
++      if (!fp_rng.empty()) {
++        size_t comma = fp_rng.find(',');
++        if (comma != std::string::npos) {
++          std::string a = fp_rng.substr(0, comma);
++          std::string b = fp_rng.substr(comma + 1);
++          char* end_a = nullptr;
++          char* end_b = nullptr;
++          float fa = std::strtof(a.c_str(), &end_a);
++          float fb = std::strtof(b.c_str(), &end_b);
++          if (end_a != a.c_str() && end_b != b.c_str()) {
++            std::array<float, 2> aa = {fa, fb};
++            return WebGLAny(script_state,
++                            DOMFloat32Array::Create(base::span(aa)));
++          }
++        }
++      }
++    }
++    // EXT_debug_renderer_info: UNMASKED_VENDOR_WEBGL / UNMASKED_RENDERER_WEBGL.
++    if (pname == 0x9245 || pname == 0x9246) {
++      std::string fp_str = FpConfigString(pname == 0x9245 ? "webgl_vendor"
++                                                          : "webgl_renderer");
++      if (!fp_str.empty()) {
++        return WebGLAny(script_state, String::FromUtf8(base::as_byte_span(fp_str)));
++      }
++    }
++  }
+   const int kIntZero = 0;
+   switch (pname) {
+     case GL_ACTIVE_TEXTURE:
+@@ -4506,6 +4569,19 @@
+   GLint precision = 0;
+   ContextGL()->GetShaderPrecisionFormat(shader_type, precision_type, range,
+                                         &precision);
++  // fp: override highp precision values (GPU shader precision fingerprint).
++  // Config "webgl_shader_precision_highp" = "rangeMin,rangeMax,precision".
++  if (precision_type == GL_HIGH_FLOAT || precision_type == GL_HIGH_INT) {
++    std::string fp_sp = FpConfigString("webgl_shader_precision_highp");
++    if (!fp_sp.empty()) {
++      int fp_a = 0, fp_b = 0, fp_p = 0;
++      if (sscanf(fp_sp.c_str(), "%d,%d,%d", &fp_a, &fp_b, &fp_p) == 3) {
++        range[0] = fp_a;
++        range[1] = fp_b;
++        precision = fp_p;
++      }
++    }
++  }
+   return MakeGarbageCollected<WebGLShaderPrecisionFormat>(range[0], range[1],
+                                                           precision);
+ }
+@@ -4526,6 +4602,25 @@
+   for (ExtensionTracker* tracker : extensions_) {
+     if (ExtensionSupportedAndAllowed(tracker)) {
+       result.push_back(tracker->ExtensionName());
++    }
++  }
++
++  // fp: append configured extra extensions.
++  {
++    std::string extra = FpConfigString("webgl_extensions");
++    if (!extra.empty()) {
++      size_t start = 0;
++      while (start < extra.size()) {
++        size_t comma = extra.find(',', start);
++        std::string name = extra.substr(
++            start, (comma == std::string::npos ? extra.size() : comma) - start);
++        if (!name.empty() && !result.Contains(String::FromUtf8(base::as_byte_span(name)))) {
++          result.push_back(String::FromUtf8(base::as_byte_span(name)));
++        }
++        if (comma == std::string::npos)
++          break;
++        start = comma + 1;
++      }
+     }
+   }
+ 
+# --- third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc ---
+# RANGE: NavigatorConcurrentHardware::hardwareConcurrency.
+# PURPOSE: spoof CPU core count (hardware_concurrency).
+# MERGE: LOW.
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+@@ -3,12 +3,17 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "base/system/sys_info.h"
+ 
+ namespace blink {
+ 
+ unsigned NavigatorConcurrentHardware::hardwareConcurrency() const {
++  int fp = FpConfigInt("hardware_concurrency", 0);
++  if (fp > 0) {
++    return static_cast<unsigned>(fp);
++  }
+   return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
+ }
+ 
+# --- third_party/blink/renderer/core/frame/navigator_device_memory.cc ---
+# RANGE: NavigatorDeviceMemory::deviceMemory.
+# PURPOSE: spoof device memory (device_memory).
+# MERGE: LOW.
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_device_memory.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
+ #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
+@@ -12,6 +13,10 @@
+ namespace blink {
+ 
+ float NavigatorDeviceMemory::deviceMemory() const {
++  int fp = FpConfigInt("device_memory", 0);
++  if (fp > 0) {
++    return static_cast<float>(fp);
++  }
+   return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
+ }
+ 
+# --- third_party/blink/renderer/modules/webaudio/audio_destination_node.cc ---
+# RANGE: destination maxChannelCount/outputLatency.
+# PURPOSE: spoof audio channels and latency (audio_max_channels,
+# audio_output_latency_ms).
+# MERGE: MEDIUM.
+--- a/third_party/blink/renderer/modules/webaudio/audio_destination_node.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_destination_node.cc
+@@ -27,6 +27,7 @@
+ 
+ #include "third_party/blink/renderer/modules/webaudio/audio_destination_handler.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ namespace blink {
+ 
+@@ -39,6 +40,10 @@
+ }
+ 
+ uint32_t AudioDestinationNode::maxChannelCount() const {
++  int fp = FpConfigInt("audio_max_channels", 0);
++  if (fp > 0) {
++    return static_cast<uint32_t>(fp);
++  }
+   return GetAudioDestinationHandler().MaxChannelCount();
+ }
+ 
+# --- third_party/blink/renderer/modules/webaudio/audio_context.cc ---
+# RANGE: AudioContext::sampleRate.
+# PURPOSE: spoof audio sample rate (audio_sample_rate).
+# MERGE: MEDIUM.
+--- a/third_party/blink/renderer/modules/webaudio/audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_context.cc
+@@ -32,6 +32,7 @@
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_union_audiocontextrendersizecategory_unsignedlong.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_union_audiosinkinfo_string.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/html/media/html_media_element.h"
+ #include "third_party/blink/renderer/core/inspector/console_message.h"
+@@ -1198,6 +1199,10 @@
+ 
+   DeferredTaskHandler::GraphAutoLocker locker(GetDeferredTaskHandler());
+ 
++  int fp_lat = FpConfigInt("audio_output_latency_ms", 0);
++  if (fp_lat > 0) {
++    return static_cast<double>(fp_lat) / 1000.0;
++  }
+   double factor = GetOutputLatencyQuantizingFactor();
+   return std::round(output_position_.hardware_output_latency / factor) * factor;
+ }
+# --- third_party/blink/renderer/modules/donottrack/navigator_do_not_track.cc ---
+# RANGE: NavigatorDoNotTrack::doNotTrack.
+# PURPOSE: spoof DNT header value (do_not_track).
+# MERGE: LOW.
+--- a/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.cc
++++ b/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.cc
+@@ -32,6 +32,7 @@
+ 
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "base/containers/span.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/local_frame_client.h"
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+# --- third_party/blink/renderer/core/geolocation/geolocation.cc ---
+# RANGE: position reporting (GeoPosition).
+# PURPOSE: spoof geolocation (geo_latitude/longitude/accuracy).
+# MERGE: MEDIUM - geolocation permissions refactors.
+--- a/third_party/blink/renderer/core/geolocation/geolocation.cc
++++ b/third_party/blink/renderer/core/geolocation/geolocation.cc
+@@ -25,6 +25,7 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "third_party/blink/renderer/core/geolocation/geolocation.h"
+ 
+ #include <algorithm>
+@@ -630,7 +631,22 @@
+     if (!ValidateGeoposition(*result->get_position())) {
+       return;
+     }
+-    last_position_ = CreateGeoposition(*result->get_position());
++    // fp: spoof coordinates from config.
++    device::mojom::blink::GeopositionPtr fp_pos =
++        result->get_position().Clone();
++    {
++      std::string fp_lat = FpConfigString("geo_latitude");
++      std::string fp_lng = FpConfigString("geo_longitude");
++      if (!fp_lat.empty() && !fp_lng.empty()) {
++        fp_pos->latitude = atof(fp_lat.c_str());
++        fp_pos->longitude = atof(fp_lng.c_str());
++      }
++      std::string fp_acc = FpConfigString("geo_accuracy");
++      if (!fp_acc.empty()) {
++        fp_pos->accuracy = atof(fp_acc.c_str());
++      }
++    }
++    last_position_ = CreateGeoposition(*fp_pos);
+     PositionChanged();
+   } else {
+     DCHECK(result->is_error());
+# --- third_party/blink/renderer/modules/speech/speech_synthesis.cc ---
+# RANGE: GetVoices result (mojom_voices).
+# PURPOSE: limit voice count + override language
+# (speech_voices_count / speech_voices_lang).
+# MERGE: MEDIUM - speech module churn; anchor on
+# SpeechSynthesis::GetVoices.
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+@@ -23,6 +23,8 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
++#include "base/containers/span.h"
+ #include "third_party/blink/renderer/modules/speech/speech_synthesis.h"
+ 
+ #include <tuple>
+@@ -84,6 +86,20 @@
+ 
+ void SpeechSynthesis::OnSetVoiceList(
+     Vector<mojom::blink::SpeechSynthesisVoicePtr> mojom_voices) {
++  // fp: limit voice count and override language.
++  {
++    int fp_count = FpConfigInt("speech_voices_count", 0);
++    std::string fp_lang = FpConfigString("speech_voices_lang");
++    if (fp_count > 0 &&
++        fp_count < static_cast<int>(mojom_voices.size())) {
++      mojom_voices.resize(static_cast<wtf_size_t>(fp_count));
++    }
++    if (!fp_lang.empty()) {
++      for (auto& voice : mojom_voices) {
++        voice->lang = String::FromUtf8(base::as_byte_span(fp_lang));
++      }
++    }
++  }
+   voice_list_.clear();
+   for (auto& mojom_voice : mojom_voices) {
+     voice_list_.push_back(
+# --- third_party/blink/renderer/modules/mediastream/media_devices.cc ---
+# RANGE: DevicesEnumerated - truncate per-type device lists.
+# PURPOSE: cap enumerated audio/video devices
+# (media_devices_audio_input/video_input/audio_output).
+# MERGE: MEDIUM - enumeration param is const; work on a copy
+# (fp_enumeration) and switch the result loop to it.
+--- a/third_party/blink/renderer/modules/mediastream/media_devices.cc
++++ b/third_party/blink/renderer/modules/mediastream/media_devices.cc
+@@ -2,6 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "third_party/blink/renderer/modules/mediastream/media_devices.h"
+ 
+ #include <algorithm>
+@@ -1431,6 +1432,26 @@
+                 mojom::blink::MediaDeviceType::kNumMediaDeviceTypes),
+             enumeration.size());
+ 
++  // fp: limit device enumeration counts (|enumeration| is const, work on a copy).
++  Vector<Vector<WebMediaDeviceInfo>> fp_enumeration = enumeration;
++  {
++    int fp_audio_in = FpConfigInt("media_devices_audio_input", 0);
++    int fp_video_in = FpConfigInt("media_devices_video_input", 0);
++    int fp_audio_out = FpConfigInt("media_devices_audio_output", 0);
++    auto& audio_in = fp_enumeration[static_cast<wtf_size_t>(
++        mojom::blink::MediaDeviceType::kMediaAudioInput)];
++    auto& video_in = fp_enumeration[static_cast<wtf_size_t>(
++        mojom::blink::MediaDeviceType::kMediaVideoInput)];
++    auto& audio_out = fp_enumeration[static_cast<wtf_size_t>(
++        mojom::blink::MediaDeviceType::kMediaAudioOutput)];
++    if (fp_audio_in > 0 && fp_audio_in < static_cast<int>(audio_in.size()))
++      audio_in.resize(static_cast<wtf_size_t>(fp_audio_in));
++    if (fp_video_in > 0 && fp_video_in < static_cast<int>(video_in.size()))
++      video_in.resize(static_cast<wtf_size_t>(fp_video_in));
++    if (fp_audio_out > 0 && fp_audio_out < static_cast<int>(audio_out.size()))
++      audio_out.resize(static_cast<wtf_size_t>(fp_audio_out));
++  }
++
+   if (!video_input_capabilities.empty()) {
+     DCHECK_EQ(enumeration[static_cast<wtf_size_t>(
+                               mojom::blink::MediaDeviceType::kMediaVideoInput)]
+@@ -1450,10 +1471,10 @@
+        i < static_cast<wtf_size_t>(
+                mojom::blink::MediaDeviceType::kNumMediaDeviceTypes);
+        ++i) {
+-    for (wtf_size_t j = 0; j < enumeration[i].size(); ++j) {
++    for (wtf_size_t j = 0; j < fp_enumeration[i].size(); ++j) {
+       mojom::blink::MediaDeviceType device_type =
+           static_cast<mojom::blink::MediaDeviceType>(i);
+-      WebMediaDeviceInfo device_info = enumeration[i][j];
++      WebMediaDeviceInfo device_info = fp_enumeration[i][j];
+       String device_label = String::FromUtf8(device_info.label);
+       if (device_type == mojom::blink::MediaDeviceType::kMediaAudioInput ||
+           device_type == mojom::blink::MediaDeviceType::kMediaVideoInput) {
+# --- third_party/blink/renderer/core/html/canvas/html_canvas_element.cc ---
+# RANGE: ToDataURLInternal + toBlob (post-Snapshot).
+# PURPOSE: deterministic canvas export noise via
+# FpApplyCanvasExportNoise (canvas_noise_seed/strength).
+# MERGE: HIGH risk - canvas refactors frequent; anchor on
+# HTMLCanvasElement::Snapshot call sites.
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+@@ -26,6 +26,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/html/canvas/html_canvas_element.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ 
+ #include <math.h>
+@@ -1292,6 +1293,7 @@
+           mime_type, ImageEncoderUtils::kEncodeReasonToDataURL);
+ 
+   scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(source_buffer);
++  FpApplyCanvasExportNoise(image_bitmap);
+   if (image_bitmap) {
+     std::unique_ptr<ImageDataBuffer> data_buffer =
+         ImageDataBuffer::Create(image_bitmap);
+@@ -1397,6 +1399,7 @@
+ 
+   CanvasAsyncBlobCreator* async_creator = nullptr;
+   scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(kBackBuffer);
++  FpApplyCanvasExportNoise(image_bitmap);
+   if (image_bitmap) {
+     auto* options = ImageEncodeOptions::Create();
+     options->setType(ImageEncoderUtils::MimeTypeName(encoding_mime_type));
+# --- third_party/blink/renderer/core/core_initializer.cc ---
+# RANGE: Initialize() after TimeZoneController::Init().
+# PURPOSE: timezone override (tz_id) via
+# TimeZoneController::SetTimeZoneOverride (RAII handle kept static).
+# MERGE: MEDIUM - init call list changes; re-anchor after
+# TimeZoneController::Init() and before any JS runs.
+--- a/third_party/blink/renderer/core/core_initializer.cc
++++ b/third_party/blink/renderer/core/core_initializer.cc
+@@ -29,6 +29,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/core_initializer.h"
++#include "base/containers/span.h"
+ 
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/public/web/blink.h"
+@@ -60,6 +61,7 @@
+ #include "third_party/blink/renderer/core/script_type_names.h"
+ #include "third_party/blink/renderer/core/svg_names.h"
+ #include "third_party/blink/renderer/core/timezone/timezone_controller.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "third_party/blink/renderer/core/trustedtypes/trusted_type_policy_factory.h"
+ #include "third_party/blink/renderer/core/trustedtypes/trusted_types_names.h"
+@@ -175,6 +177,24 @@
+ 
+   TimeZoneController::Init();
+ 
++  // fp: override default timezone from FP_CONFIG "tz_id" (e.g.
++  // "America/New_York"). Applies to Date/Intl in this renderer process.
++  // Must run after TimeZoneController::Init() so the monitor client is
++  // registered, and before any V8 isolate executes JS.
++  {
++    std::string fp_tz = FpConfigString("tz_id");
++    if (!fp_tz.empty()) {
++      // Keep the RAII handle alive for the process lifetime.
++      static std::unique_ptr<TimeZoneController::TimeZoneOverride>
++          fp_tz_override_handle;
++      auto fp_tz_result = TimeZoneController::SetTimeZoneOverride(
++          String::FromUtf8(base::as_byte_span(fp_tz)));
++      if (fp_tz_result.handle) {
++        fp_tz_override_handle = std::move(fp_tz_result.handle);
++      }
++    }
++  }
++
+   FontGlobalContext::Init();
+ 
+   CSSDefaultStyleSheets::Init();
+# --- third_party/blink/renderer/core/css/font_face_set.cc ---
+# RANGE: FontFaceSet::check() family loop.
+# PURPOSE: hidden fonts (blocklist or whitelist complement) report as
+# missing via unified FpFontFamilyHidden (matches FontCache gate).
+# CONFIG: fonts_blocklist, fonts_whitelist.
+# MERGE: MEDIUM - font API refactors; anchor on check() loop.
+--- a/third_party/blink/renderer/core/css/font_face_set.cc
++++ b/third_party/blink/renderer/core/css/font_face_set.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/css/font_face_set.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "base/task/single_thread_task_runner.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+# --- third_party/blink/renderer/modules/netinfo/network_information.cc ---
+# RANGE: effectiveType/rtt/downlink.
+# PURPOSE: spoof Network Information API
+# (net_effective_type/net_rtt_ms/net_downlink_mbps).
+# MERGE: MEDIUM - netinfo module churn.
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/netinfo/network_information.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include <algorithm>
+ 
+@@ -111,6 +112,26 @@
+ }
+ 
+ V8EffectiveConnectionType NetworkInformation::effectiveType() {
++  // fp: override from FP_CONFIG "net_effective_type" (4g/3g/2g/slow-2g).
++  {
++    std::string fp_ect = FpConfigString("net_effective_type");
++    if (!fp_ect.empty()) {
++      if (fp_ect == "slow-2g") {
++        return V8EffectiveConnectionType(EffectiveConnectionTypeToEnum(
++            WebEffectiveConnectionType::kTypeSlow2G));
++      }
++      if (fp_ect == "2g") {
++        return V8EffectiveConnectionType(EffectiveConnectionTypeToEnum(
++            WebEffectiveConnectionType::kType2G));
++      }
++      if (fp_ect == "3g") {
++        return V8EffectiveConnectionType(EffectiveConnectionTypeToEnum(
++            WebEffectiveConnectionType::kType3G));
++      }
++      return V8EffectiveConnectionType(EffectiveConnectionTypeToEnum(
++          WebEffectiveConnectionType::kType4G));
++    }
++  }
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<WebEffectiveConnectionType> override_ect =
+       GetNetworkStateNotifier().GetWebHoldbackEffectiveType();
+@@ -132,6 +153,13 @@
+ }
+ 
+ uint32_t NetworkInformation::rtt() {
++  // fp: override from FP_CONFIG "net_rtt_ms" (milliseconds).
++  {
++    int fp_rtt = FpConfigInt("net_rtt_ms", 0);
++    if (fp_rtt > 0) {
++      return static_cast<uint32_t>(fp_rtt);
++    }
++  }
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<base::TimeDelta> override_rtt =
+       GetNetworkStateNotifier().GetWebHoldbackHttpRtt();
+@@ -148,6 +176,17 @@
+ }
+ 
+ double NetworkInformation::downlink() {
++  // fp: override from FP_CONFIG "net_downlink_mbps".
++  {
++    std::string fp_dl = FpConfigString("net_downlink_mbps");
++    if (!fp_dl.empty()) {
++      char* end = nullptr;
++      double v = std::strtod(fp_dl.c_str(), &end);
++      if (end != fp_dl.c_str() && v >= 0.0) {
++        return v;
++      }
++    }
++  }
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<double> override_downlink_mbps =
+       GetNetworkStateNotifier().GetWebHoldbackDownlinkThroughputMbps();
+# --- third_party/blink/renderer/modules/permissions/permissions.cc ---
+# RANGE: none (include only) - kept for future use.
+# PURPOSE: include fp_config_helpers (permission override lives in
+# permission_status.cc at the final read path).
+# MERGE: LOW.
+--- a/third_party/blink/renderer/modules/permissions/permissions.cc
++++ b/third_party/blink/renderer/modules/permissions/permissions.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/permissions/permissions.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include <memory>
+ #include <utility>
+# --- third_party/blink/renderer/modules/quota/storage_manager.cc ---
+# RANGE: QueryStorageUsageAndQuotaCallback.
+# PURPOSE: spoof storage estimate (storage_usage_bytes/
+# storage_quota_bytes, int64).
+# MERGE: MEDIUM.
+--- a/third_party/blink/renderer/modules/quota/storage_manager.cc
++++ b/third_party/blink/renderer/modules/quota/storage_manager.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/quota/storage_manager.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "mojo/public/cpp/bindings/callback_helpers.h"
+ #include "third_party/blink/public/mojom/permissions/permission_status.mojom-blink.h"
+@@ -69,6 +70,18 @@
+   }
+ 
+   StorageEstimate* estimate = StorageEstimate::Create();
++  // fp: override usage/quota from FP_CONFIG "storage_usage_bytes" /
++  // "storage_quota_bytes" (bytes).
++  {
++    int64_t fp_usage = FpConfigInt64("storage_usage_bytes", 0);
++    int64_t fp_quota = FpConfigInt64("storage_quota_bytes", 0);
++    if (fp_usage > 0) {
++      usage_in_bytes = fp_usage;
++    }
++    if (fp_quota > 0) {
++      quota_in_bytes = fp_quota;
++    }
++  }
+   estimate->setUsage(usage_in_bytes);
+   estimate->setQuota(quota_in_bytes);
+ 
+# --- third_party/blink/renderer/modules/permissions/permission_status.cc ---
+# RANGE: PermissionStatus::state().
+# PURPOSE: override permission query results (permissions_status:
+# granted/prompt/denied) at the final read path (browser status
+# change events would overwrite earlier injection points).
+# MERGE: MEDIUM.
+--- a/third_party/blink/renderer/modules/permissions/permission_status.cc
++++ b/third_party/blink/renderer/modules/permissions/permission_status.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/permissions/permission_status.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "third_party/blink/public/mojom/frame/lifecycle.mojom-shared.h"
+ #include "third_party/blink/public/mojom/permissions/permission.mojom-shared.h"
+@@ -101,6 +102,21 @@
+     StopListening();
+ }
+ 
++V8PermissionState PermissionStatus::state() const {
++  // fp: override from FP_CONFIG "permissions_status" (granted/prompt/denied)
++  // for all queried permissions. Intercepts the final read path.
++  {
++    std::string fp_ps = FpConfigString("permissions_status");
++    if (!fp_ps.empty()) {
++      if (fp_ps == "granted") {
++        return V8PermissionState(V8PermissionState::Enum::kGranted);
++      }
++      if (fp_ps == "denied") {
++        return V8PermissionState(V8PermissionState::Enum::kDenied);
++      }
++      return V8PermissionState(V8PermissionState::Enum::kPrompt);
++    }
++  }
+   if (!listener_) {
+     return V8PermissionState(V8PermissionState::Enum::kDenied);
+   }
+# --- third_party/blink/renderer/core/timing/performance.cc ---
+# RANGE: Performance::now().
+# PURPOSE: quantize timestamps (perf_now_precision_ms) on a fixed
+# absolute grid (monotonicity preserved).
+# MERGE: MEDIUM.
+--- a/third_party/blink/renderer/core/timing/performance.cc
++++ b/third_party/blink/renderer/core/timing/performance.cc
+@@ -30,6 +30,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/timing/performance.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include <algorithm>
+ #include <optional>
+@@ -1320,7 +1321,15 @@
+ }
+ 
+ DOMHighResTimeStamp Performance::now() const {
+-  return MonotonicTimeToDOMHighResTimeStamp(base::TimeTicks::Now());
++  DOMHighResTimeStamp fp_now =
++      MonotonicTimeToDOMHighResTimeStamp(base::TimeTicks::Now());
++  // fp: reduce timestamp precision from FP_CONFIG "perf_now_precision_ms"
++  // (quantize to fixed absolute grid; monotonicity is preserved).
++  int fp_prec = FpConfigInt("perf_now_precision_ms", 0);
++  if (fp_prec > 1) {
++    fp_now = std::round(fp_now / fp_prec) * fp_prec;
++  }
++  return fp_now;
+ }
+ 
+ // static
+# --- third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc ---
+# RANGE: decodingInfo entry (after validation).
+# PURPOSE: force unsupported for denylisted codecs
+# (media_codecs_denylist, contentType substring match).
+# MERGE: MEDIUM.
+--- a/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc
++++ b/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/media_capabilities/media_capabilities.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include <memory>
+ #include <optional>
+@@ -809,6 +810,38 @@
+   // Validation errors should return above.
+   DCHECK(message.empty());
+ 
++  // fp: force unsupported for codecs listed in FP_CONFIG
++  // "media_codecs_denylist" (comma-separated substrings matched against the
++  // queried content type, e.g. "vp09,av01").
++  {
++    std::string fp_deny = FpConfigString("media_codecs_denylist");
++    if (!fp_deny.empty()) {
++      std::string ct;
++      if (config->hasVideo()) {
++        ct = config->video()->contentType().Utf8();
++      } else if (config->hasAudio()) {
++        ct = config->audio()->contentType().Utf8();
++      }
++      if (!ct.empty()) {
++        size_t start = 0;
++        while (start < fp_deny.size()) {
++          size_t comma = fp_deny.find(',', start);
++          size_t end =
++              (comma == std::string::npos) ? fp_deny.size() : comma;
++          if (end > start && ct.find(fp_deny.substr(start, end - start)) !=
++                                 std::string::npos) {
++            return CreateResolvedPromiseToDecodingInfoWith(false, script_state,
++                                                           config);
++          }
++          if (comma == std::string::npos) {
++            break;
++          }
++          start = comma + 1;
++        }
++      }
++    }
++  }
++
+   if (is_webrtc) {
+     UseCounter::Count(ExecutionContext::From(script_state),
+                       WebFeature::kMediaCapabilitiesDecodingInfoWebrtc);
+# --- third_party/blink/renderer/core/css/media_values.cc ---
+# RANGE: MediaValues::CalculatePreferredColorScheme.
+# PURPOSE: override prefers-color-scheme (prefers_color_scheme
+# light/dark), highest priority.
+# MERGE: MEDIUM.
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -3,12 +3,14 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/css/media_values.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "third_party/blink/public/common/css/scripting.h"
+ #include "third_party/blink/renderer/core/css/css_resolution_units.h"
+ #include "third_party/blink/renderer/core/css/css_to_length_conversion_data.h"
+ #include "third_party/blink/renderer/core/css/media_feature_overrides.h"
+ #include "third_party/blink/renderer/core/css/media_values.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "third_party/blink/renderer/core/css/media_values_cached.h"
+ #include "third_party/blink/renderer/core/css/media_values_dynamic.h"
+ #include "third_party/blink/renderer/core/css/style_engine.h"
+@@ -393,6 +395,18 @@
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame)));
+ }
+ 
++mojom::blink::PreferredColorScheme MediaValues::CalculatePreferredColorScheme(
++    LocalFrame* frame) {
++  // fp: override from FP_CONFIG "prefers_color_scheme" (light/dark).
++  {
++    std::string fp_pcs = FpConfigString("prefers_color_scheme");
++    if (fp_pcs == "dark") {
++      return mojom::blink::PreferredColorScheme::kDark;
++    }
++    if (fp_pcs == "light") {
++      return mojom::blink::PreferredColorScheme::kLight;
++    }
++  }
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
+   DCHECK(frame->GetDocument());
+# --- third_party/blink/renderer/modules/webaudio/offline_audio_context.cc ---
+# RANGE: offline render completion (before event dispatch/resolve).
+# PURPOSE: deterministic noise on rendered buffer (audio fingerprint,
+# fingerprintjs-style OfflineAudioContext path).
+# CONFIG: audio_data_seed (int64), audio_data_strength (float, default
+# 0.0005).
+# MERGE: MEDIUM - anchor on the completion callback block; only touches
+# offline render output, never playback buffers.
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+@@ -24,6 +24,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/modules/webaudio/offline_audio_context.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
+@@ -434,6 +435,14 @@
+ 
+     // Call the offline rendering completion event listener and resolve the
+     // promise too.
++    // fp: deterministic noise on offline render output (audio fingerprint).
++    {
++      unsigned fp_channels = rendered_buffer->numberOfChannels();
++      for (unsigned fp_ch = 0; fp_ch < fp_channels; ++fp_ch) {
++        FpApplyAudioDataNoise(rendered_buffer->getChannelData(fp_ch)->Data(),
++                              rendered_buffer->length());
++      }
++    }
+     DispatchEvent(*OfflineAudioCompletionEvent::Create(rendered_buffer));
+     complete_resolver_->Resolve(rendered_buffer);
+   } else {
+# --- third_party/blink/renderer/modules/webaudio/analyser_node.cc ---
+# RANGE: getFloatFrequencyData / getFloatTimeDomainData.
+# PURPOSE: deterministic noise on analyser float reads (real-time audio
+# fingerprint path; playback unaffected - analyser is read-only).
+# CONFIG: audio_data_seed / audio_data_strength.
+# MERGE: MEDIUM - anchor on the two float getter methods.
+--- a/third_party/blink/renderer/modules/webaudio/analyser_node.cc
++++ b/third_party/blink/renderer/modules/webaudio/analyser_node.cc
+@@ -24,6 +24,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/modules/webaudio/analyser_node.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_analyser_options.h"
+ #include "third_party/blink/renderer/modules/webaudio/analyser_handler.h"
+@@ -119,6 +120,9 @@
+ void AnalyserNode::getFloatFrequencyData(NotShared<DOMFloat32Array> array) {
+   GetAnalyserHandler().GetFloatFrequencyData(array.Get(),
+                                              context()->currentTime());
++
++  // fp: deterministic noise on analyser float output (audio fingerprint).
++  FpApplyAudioDataNoise(array->Data(), array->length());
+ }
+ 
+ void AnalyserNode::getByteFrequencyData(NotShared<DOMUint8Array> array) {
+@@ -128,6 +132,9 @@
+ 
+ void AnalyserNode::getFloatTimeDomainData(NotShared<DOMFloat32Array> array) {
+   GetAnalyserHandler().GetFloatTimeDomainData(array.Get());
++
++  // fp: deterministic noise on analyser float output (audio fingerprint).
++  FpApplyAudioDataNoise(array->Data(), array->length());
+ }
+ 
+ void AnalyserNode::getByteTimeDomainData(NotShared<DOMUint8Array> array) {
+# --- third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc ---
+# RANGE: measureText (post TextMetrics construction).
+# PURPOSE: deterministic per-font-family metric perturbation
+# (measure_text_seed); factor from (seed, family) so relative widths
+# across families drift - metric-based fingerprinting unstable vs
+# real browser, deterministic across sessions.
+# CONFIG: measure_text_seed (int64).
+# MERGE: HIGH risk - canvas module refactors frequent; anchor on
+# BaseRenderingContext2D::measureText.
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include <cmath>
+ #include <cstdint>
+@@ -517,6 +518,19 @@
+     if (read_pixels_successful && RuntimeEnabledFeatures::FingerprintingCanvasImageDataNoiseEnabled()) {
+       StaticBitmapImage::ShuffleSubchannelColorData(image_data_pixmap.addr(), image_data_pixmap.info(), sx, sy);
+     }
++    // fp: deterministic noise on getImageData readback (same scheme as
++    // toDataURL/toBlob export noise, reuse canvas_noise_seed).
++    if (read_pixels_successful) {
++      int64_t fp_seed = FpConfigInt64("canvas_noise_seed", 0);
++      if (fp_seed != 0) {
++        int fp_strength = FpConfigInt("canvas_noise_strength", 2);
++        if (fp_strength < 1) fp_strength = 1;
++        if (fp_strength > 8) fp_strength = 8;
++        FpApplyPixelNoise(
++            static_cast<uint8_t*>(image_data_pixmap.writable_addr()),
++            image_data_pixmap.computeByteSize(),
++            static_cast<uint64_t>(fp_seed), fp_strength);
++      }
+     }
+   }
+ 
+@@ -1160,6 +1174,36 @@
+       font, direction, state.GetTextBaseline(), state.GetTextAlign(), text,
+       host->GetPlainTextPainter());
+ 
++  // fp: deterministic per-font-family metric perturbation (font metric
++  // fingerprint defense). Factor is derived from (measure_text_seed,
++  // family name) so relative widths across families drift apart, making
++  // metric-based fingerprinting unstable vs the real browser, while
++  // staying deterministic across sessions for the same seed.
++  {
++    int64_t fp_mseed = FpConfigInt64("measure_text_seed", 0);
++    if (fp_mseed != 0 && font) {
++      std::string fam_name;
++      const FontFamily* fam = &font->GetFontDescription().Family();
++      if (fam && !fam->FamilyIsGeneric()) {
++        fam_name = fam->FamilyName().Utf8();
++      }
++      uint64_t h = static_cast<uint64_t>(fp_mseed);
++      for (char ch : fam_name) {
++        h ^= static_cast<uint8_t>(ch);
++        h *= 0x9E3779B97F4A7C15ULL;
++      }
++      h ^= h >> 30;
++      h *= 0xBF58476D1CE4E5B9ULL;
++      h ^= h >> 27;
++      h *= 0x94D049BB133111EBULL;
++      h ^= h >> 31;
++      double factor = 1.0 +
++                      (static_cast<double>(h & 0xFFFF) / 32767.5 - 1.0) *
++                          0.0004;
++      text_metrics->Shuffle(factor);
++    }
++  }
++
+   // Scale text metrics if enabled
+   if (RuntimeEnabledFeatures::FingerprintingCanvasMeasureTextNoiseEnabled()) {
+     if (HostAsOffscreenCanvas()) {
+# --- third_party/blink/renderer/platform/fonts/font_cache.cc ---
+# RANGE: FontCache::GetFontData entry.
+# PURPOSE: hide configured fonts at the font-matching source -
+# nullptr triggers the normal fallback chain so check() AND metric
+# probing (span/measureText) both see the font as absent; layout
+# stays self-consistent (no JS hooks). Generic families always
+# exempt; web fonts bypass FontCache.
+# CONFIG: fonts_whitelist (whitelist wins), fonts_blocklist.
+# MERGE: HIGH risk - font matching internals refactor often;
+# anchor on FontCache::GetFontData signature.
+--- a/third_party/blink/renderer/platform/fonts/font_cache.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
+@@ -28,6 +28,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/platform/fonts/font_cache.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include <unicode/uscript.h>
+ 
+@@ -173,6 +174,17 @@
+   LayoutLocale::AcceptLanguagesChanged(accept_languages);
+ }
+ 
++const SimpleFontData* FontCache::GetFontData(
++    const FontDescription& font_description,
++    const AtomicString& family,
++    AlternateFontName altername_font_name) {
++  // fp: hide configured fonts at the font-matching source. Returning
++  // nullptr triggers the normal fallback chain, so check() AND metric
++  // probing (span/measureText width) both see the font as absent, and
++  // layout stays self-consistent (no JS-level hooks).
++  if (FpFontFamilyHidden(family.Utf8())) {
++    return nullptr;
++  }
+   if (const FontPlatformData* platform_data = GetFontPlatformData(
+           font_description,
+           FontFaceCreationParams(
+# --- third_party/blink/renderer/modules/battery/battery_manager.cc ---
+# RANGE: BatteryManager::charging() / level().
+# PURPOSE: spoof Battery API (battery_charging true/false,
+# battery_level 0.0-1.0).
+# MERGE: MEDIUM - battery module churn; anchor on the two getters.
+--- a/third_party/blink/renderer/modules/battery/battery_manager.cc
++++ b/third_party/blink/renderer/modules/battery/battery_manager.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/battery/battery_manager.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "third_party/blink/public/mojom/frame/lifecycle.mojom-blink.h"
+ #include "third_party/blink/renderer/core/dom/dom_exception.h"
+@@ -80,6 +81,13 @@
+ }
+ 
+ bool BatteryManager::charging() {
++  // fp: override from FP_CONFIG "battery_charging" (true/false).
++  {
++    std::string fp_bc = FpConfigString("battery_charging");
++    if (!fp_bc.empty()) {
++      return fp_bc == "true" || fp_bc == "1";
++    }
++  }
+   return battery_status_.Charging();
+ }
+ 
+@@ -92,6 +100,17 @@
+ }
+ 
+ double BatteryManager::level() {
++  // fp: override from FP_CONFIG "battery_level" (0.0-1.0).
++  {
++    std::string fp_bl = FpConfigString("battery_level");
++    if (!fp_bl.empty()) {
++      char* end = nullptr;
++      double v = std::strtod(fp_bl.c_str(), &end);
++      if (end != fp_bl.c_str() && v >= 0.0 && v <= 1.0) {
++        return v;
++      }
++    }
++  }
+   return battery_status_.Level();
+ }
+ 
+# --- third_party/blink/renderer/modules/webgpu/gpu_adapter.cc ---
+# RANGE: adapter info population (vendor/architecture/device/description)
+# + features/limits population in the GPUAdapter ctor.
+# PURPOSE: spoof WebGPU adapter metadata (webgpu_vendor/architecture/
+# device/description). Keep webgpu_vendor consistent with webgl_vendor
+# (cross-API consistency - mismatch is itself a detection signal).
+# Also override the exposed feature set (webgpu_features, REPLACE) and
+# adapter limits (webgpu_limits, MERGE) so the declared GPU model is
+# self-consistent (constraint C17).
+# MERGE: MEDIUM - WebGPU module churn; anchor on GPUAdapter ctor info
+# population.
+--- a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/webgpu/gpu_adapter.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
++#include "base/containers/span.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_split.h"
+ 
+@@ -105,6 +107,27 @@
+   }
+   description_ = String::FromUtf8(info.device);
+   driver_ = String::FromUtf8(info.description);
++  // fp: override WebGPU adapter metadata. Keep webgpu_vendor consistent
++  // with webgl_vendor (cross-API consistency - zendriver warning: a GPU
++  // vendor mismatch across APIs is itself a detection signal).
++  {
++    std::string fp_v = FpConfigString("webgpu_vendor");
++    if (!fp_v.empty()) {
++      vendor_ = String::FromUtf8(base::as_byte_span(fp_v));
++    }
++    std::string fp_a = FpConfigString("webgpu_architecture");
++    if (!fp_a.empty()) {
++      architecture_ = String::FromUtf8(base::as_byte_span(fp_a));
++    }
++    std::string fp_d = FpConfigString("webgpu_device");
++    if (!fp_d.empty()) {
++      device_ = String::FromUtf8(base::as_byte_span(fp_d));
++    }
++    std::string fp_desc = FpConfigString("webgpu_description");
++    if (!fp_desc.empty()) {
++      description_ = String::FromUtf8(base::as_byte_span(fp_desc));
++    }
++  }
+   if (supportsPropertiesD3D) {
+     d3d_shader_model_ = d3dProperties.shaderModel;
+   }
+# --- third_party/blink/renderer/core/dom/element.cc ---
+# RANGE: GetClientRectsNoAdjustment + GetBoundingClientRectNoLifecycle
+# UpdateNoAdjustment.
+# PURPOSE: deterministic subpixel perturbation on rect API output
+# (client_rects_seed) - rasterizer fingerprint defense; layout
+# itself untouched (API-layer only), <0.2px.
+# MERGE: MEDIUM - DOM refactors; anchor on the two rect methods.
+--- a/third_party/blink/renderer/core/dom/element.cc
++++ b/third_party/blink/renderer/core/dom/element.cc
+@@ -25,6 +25,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/dom/element.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include <algorithm>
+ #include <bitset>
+@@ -3483,7 +3484,10 @@
+     if (RuntimeEnabledFeatures::FingerprintingClientRectsNoiseEnabled()) {
+       quad.Scale(GetDocument().GetNoiseFactorX(), GetDocument().GetNoiseFactorY());
+     }
+-    result.emplace_back(quad.BoundingBox());
++    gfx::RectF fp_rect = quad.BoundingBox();
++    // fp: deterministic subpixel perturbation (rasterizer fingerprint).
++    FpPerturbRectF(fp_rect);
++    result.emplace_back(fp_rect);
+   }
+   return result;
+ }
+@@ -3499,6 +3503,8 @@
+   for (auto& quad : quads) {
+     result.Union(quad.BoundingBox());
+   }
++  // fp: deterministic subpixel perturbation (rasterizer fingerprint).
++  FpPerturbRectF(result);
+   return result;
+ }
+ 
+# --- third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc ---
+# RANGE: OffscreenCanvas::convertToBlob (post GetImage).
+# PURPOSE: deterministic export noise on the Worker/OffscreenCanvas
+# fingerprint path - same FpApplyCanvasExportNoise semantics as
+# HTMLCanvasElement (canvas_noise_seed/strength). getImageData and
+# measureText already covered via shared BaseRenderingContext2D.
+# MERGE: MEDIUM - offscreen canvas refactors; anchor on convertToBlob.
+--- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
++++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include <memory>
+ #include <utility>
+@@ -474,6 +475,10 @@
+ 
+   base::TimeTicks start_time = base::TimeTicks::Now();
+   scoped_refptr<StaticBitmapImage> image_bitmap = context_->GetImage();
++  // fp: deterministic export noise on OffscreenCanvas path (Worker/
++  // OffscreenCanvas fingerprint surface; same seed/strength semantics as
++  // HTMLCanvasElement toDataURL/toBlob).
++  FpApplyCanvasExportNoise(image_bitmap);
+   if (image_bitmap) {
+     auto* resolver = MakeGarbageCollected<ScriptPromiseResolver<Blob>>(
+         script_state, exception_state.GetContext());
