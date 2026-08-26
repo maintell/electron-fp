@@ -101,6 +101,20 @@ jobs:
         with:
           override: ${{ inputs.build-image-sha }}
 
+  fingerprint-patch:
+    name: fingerprint patch check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Fingerprint static check (56 keys, isolation, hunks)
+        run: python3 fingerprint/scripts/check.py
+      - name: Fingerprint patch dry-run (no Chromium checkout → graceful skip)
+        run: python3 fingerprint/scripts/apply.py --dry-run
+
   # ---- SISO builders (复用上游，无 repo 门禁，纯 ubuntu-latest 即可) ----
   build-siso-macos:
     needs: setup

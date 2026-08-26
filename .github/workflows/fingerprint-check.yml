@@ -1,0 +1,33 @@
+name: Fingerprint Check
+
+# Fast static gate for fingerprint/ changes (<1min, no container).
+# Triggers only on fingerprint/** to keep PR feedback tight;
+# fork-release.yml's fingerprint-patch job covers release tags separately.
+
+on:
+  pull_request:
+    paths:
+      - 'fingerprint/**'
+      - '.github/workflows/fingerprint-check.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'fingerprint/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fingerprint-check:
+    name: fingerprint static check (<1min)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Static fingerprint patch check (56 keys, isolation, hunks)
+        run: python3 fingerprint/scripts/check.py
+      - name: Fingerprint patch dry-run (no Chromium checkout → graceful skip)
+        run: python3 fingerprint/scripts/apply.py --dry-run
