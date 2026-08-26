@@ -231,6 +231,8 @@ inline constexpr std::string_view kNavigateOnDragDrop = "navigateOnDragDrop";
 inline constexpr std::string_view kEnablePreferredSizeMode =
     "enablePreferredSizeMode";
 
+inline constexpr std::string_view kFingerprint = "fingerprint";
+
 inline constexpr std::string_view kHiddenPage = "hiddenPage";
 
 inline constexpr std::string_view kSpellcheck = "spellcheck";
@@ -310,6 +312,9 @@ inline constexpr base::cstring_view kWidevineCdmVersion =
 
 // Forces the maximum disk space to be used by the disk cache, in bytes.
 inline constexpr base::cstring_view kDiskCacheSize = "disk-cache-size";
+
+// Fingerprint spoofing config (base64-encoded JSON).
+inline constexpr base::cstring_view kFingerprintConfig = "fingerprint-config";
 
 // Ignore the limit of 6 connections per host.
 inline constexpr base::cstring_view kIgnoreConnectionsLimit =

@@ -10,8 +10,10 @@
 #include <utility>
 #include <vector>
 
+#include "base/base64.h"
 #include "base/command_line.h"
 #include "base/containers/fixed_flat_map.h"
+#include "base/json/json_writer.h"
 #include "base/memory/ptr_util.h"
 #include "cc/base/switches.h"
 #include "content/public/browser/render_process_host.h"
@@ -199,6 +201,7 @@ WebContentsPreferences::~WebContentsPreferences() {
 void WebContentsPreferences::Clear() {
   plugins_ = false;
   renderer_ = RendererProcessPreferences();
+  fingerprint_config_.clear();
   node_integration_ = false;
   node_integration_in_worker_ = false;
   disable_html_fullscreen_window_resize_ = false;
@@ -316,6 +319,23 @@ void WebContentsPreferences::SetFromDictionary(
   web_preferences.Get(options::kFocusOnNavigation, &focus_on_navigation_);
 
   web_preferences.Get(options::kDisableWakeLocks, &disable_wake_locks_);
+
+  // Fingerprint: dictionary → JSON → base64 for per-renderer
+  // --fingerprint-config. false/null/empty/absent → empty (native).
+  base::Value fingerprint_value;
+  if (web_preferences.Get(options::kFingerprint, &fingerprint_value)) {
+    if (fingerprint_value.is_dict() && !fingerprint_value.GetDict().empty()) {
+      if (std::optional<std::string> json = base::WriteJson(fingerprint_value)) {
+        fingerprint_config_ = base::Base64Encode(*json);
+      } else {
+        fingerprint_config_.clear();
+      }
+    } else {
+      fingerprint_config_.clear();
+    }
+  } else {
+    fingerprint_config_.clear();
+  }
 
 #if BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
   web_preferences.Get(options::kSpellcheck, &spellcheck_);

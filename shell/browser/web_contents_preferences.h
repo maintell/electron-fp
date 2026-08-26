@@ -124,6 +124,11 @@ class WebContentsPreferences
   bool ShouldFocusOnNavigation() const { return focus_on_navigation_; }
   bool IsSandboxed() const { return renderer_.sandboxed; }
   bool CanUseSpareRenderer() const { return renderer_.CanUseSpareRenderer(); }
+  const std::string& GetFingerprintConfig() const { return fingerprint_config_; }
+  // Alias for Task 4 injection path.
+  const std::string& GetFingerprintConfigBase64() const {
+    return fingerprint_config_;
+  }
 
  private:
   friend class content::WebContentsUserData<WebContentsPreferences>;
@@ -174,6 +179,7 @@ class WebContentsPreferences
   bool deprecated_paste_enabled_ = false;
   bool focus_on_navigation_;
   bool disable_wake_locks_;
+  std::string fingerprint_config_;
 
 #if BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
   bool spellcheck_;
