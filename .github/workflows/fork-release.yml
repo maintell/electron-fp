@@ -1,0 +1,263 @@
+name: Fork Release
+
+# 第一性原理提醒（必读）：
+# 上游 electron/electron 的 CI 强依赖私有基础设施：ARC 自托管大规格 Runner（32 核、100GB 磁盘、/mnt/cross-instance-cache）、
+# ghcr.io/electron/build 镜像、SISO 远端执行、Azure 存储、CHROMIUM_GIT_COOKIE、私有 RBE、sudowoodo 等，fork 默认没有。
+# 本工作流是“最小可发版”移植：移除 `github.repository == 'electron/electron'` 门禁，发布目标改为 `maintell/electron-fp` 自身的
+# GitHub Release（GITHUB_TOKEN），其余编译链路尽量复用上游；fork 专属的缓存/恢复逻辑在 fork-pipeline-electron-build.yml 中处理
+# （cache miss 时回退到完整 gclient sync，慢 30-60min 但可用）。
+# 资源现实：完整 release 编译每平台需 ~80GB 磁盘、32GB+ RAM、3-6h。GitHub 托管 Runner（ubuntu-latest/macos-15/windows-latest）
+# 的标配规格会 OOM/超时/磁盘不足。fork 若无自托管大规格 Runner，建议按需选平台（inputs.skip-*），或自托管并把 build-runs-on
+# 改回 ARC（如 electron-arc-centralus-linux-amd64-32core / garm-windows-x64-32core / macos-15-xlarge）。
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+      - 'v*.*.*-*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag (e.g. v32.0.0-fp.1). Empty = use pushed tag'
+        required: false
+        type: string
+      build-image-sha:
+        description: 'Override ghcr.io/electron/build image SHA'
+        required: false
+        type: string
+      skip-macos:
+        description: 'Skip macOS builds'
+        required: false
+        type: boolean
+        default: false
+      skip-linux:
+        description: 'Skip Linux builds'
+        required: false
+        type: boolean
+        default: false
+      skip-windows:
+        description: 'Skip Windows builds'
+        required: false
+        type: boolean
+        default: false
+      draft:
+        description: 'Create draft release'
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: 'Mark as prerelease'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+      build-image-sha: ${{ steps.img.outputs.build-image-sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Resolve version / tag
+        id: ver
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            TAG="${INPUT_VERSION}"
+          elif [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            if git describe --tags --exact-match HEAD 2>/dev/null; then
+              TAG="$(git describe --tags --exact-match HEAD)"
+            else
+              TAG="v$(node -p "require('./script/lib/get-version').getElectronVersion()" 2>/dev/null || echo "0.0.0-fork.0")"
+              echo "::warning::No tag push and no inputs.version, using $TAG"
+            fi
+          fi
+          [[ "$TAG" == v* ]] || TAG="v$TAG"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=$TAG version=$VERSION"
+      - name: Set Build Image SHA
+        id: img
+        uses: ./.github/actions/build-image-sha
+        with:
+          override: ${{ inputs.build-image-sha }}
+
+  # ---- SISO builders (复用上游，无 repo 门禁，纯 ubuntu-latest 即可) ----
+  build-siso-macos:
+    needs: setup
+    if: ${{ !inputs.skip-macos }}
+    uses: ./.github/workflows/pipeline-segment-build-siso.yml
+    permissions:
+      contents: read
+    with:
+      host: darwin-arm64
+
+  build-siso-linux:
+    needs: setup
+    if: ${{ !inputs.skip-linux }}
+    uses: ./.github/workflows/pipeline-segment-build-siso.yml
+    permissions:
+      contents: read
+    with:
+      host: linux-amd64
+
+  build-siso-windows:
+    needs: setup
+    if: ${{ !inputs.skip-windows }}
+    uses: ./.github/workflows/pipeline-segment-build-siso.yml
+    permissions:
+      contents: read
+    with:
+      host: windows-amd64
+
+  # ---- Release builds (fork-friendly pipeline，带 cache miss 回退) ----
+  macos:
+    name: macos-${{ matrix.target-arch }}-${{ matrix.target-variant }}
+    needs: [setup, build-siso-macos]
+    if: ${{ !inputs.skip-macos }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target-arch: x64
+            target-variant: darwin
+          - target-arch: x64
+            target-variant: mas
+          - target-arch: arm64
+            target-variant: darwin
+          - target-arch: arm64
+            target-variant: mas
+    uses: ./.github/workflows/fork-pipeline-electron-build.yml
+    with:
+      build-runs-on: macos-15
+      target-platform: macos
+      target-arch: ${{ matrix.target-arch }}
+      target-variant: ${{ matrix.target-variant }}
+      is-release: true
+      gn-build-type: release
+      generate-symbols: true
+      generate-test-artifacts: false
+      upload-to-storage: '0'
+    secrets: inherit
+
+  linux:
+    name: linux-${{ matrix.target-arch }}
+    needs: [setup, build-siso-linux]
+    if: ${{ !inputs.skip-linux }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target-arch: x64
+          - target-arch: arm64
+    uses: ./.github/workflows/fork-pipeline-electron-build.yml
+    with:
+      build-runs-on: ubuntu-22.04
+      build-container: '{"image":"ghcr.io/electron/build:${{ needs.setup.outputs.build-image-sha }}","options":"--user root"}'
+      target-platform: linux
+      target-arch: ${{ matrix.target-arch }}
+      is-release: true
+      gn-build-type: release
+      generate-symbols: true
+      generate-test-artifacts: false
+      upload-to-storage: '0'
+    secrets: inherit
+
+  windows:
+    name: windows-${{ matrix.target-arch }}
+    needs: [setup, build-siso-windows]
+    if: ${{ !inputs.skip-windows }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target-arch: x64
+          - target-arch: arm64
+    uses: ./.github/workflows/fork-pipeline-electron-build.yml
+    with:
+      build-runs-on: windows-2022
+      target-platform: win
+      target-arch: ${{ matrix.target-arch }}
+      is-release: true
+      gn-build-type: release
+      generate-symbols: true
+      generate-test-artifacts: false
+      upload-to-storage: '0'
+    secrets: inherit
+
+  # ---- Aggregate + publish to this repo's Release ----
+  publish:
+    name: Publish to GitHub Release
+    needs: [setup, macos, linux, windows]
+    if: always() && (needs.macos.result == 'success' || needs.macos.result == 'skipped') && (needs.linux.result == 'success' || needs.linux.result == 'skipped') && (needs.windows.result == 'success' || needs.windows.result == 'skipped') && needs.setup.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: write
+      artifact-metadata: write
+      id-token: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@d3f86a106a0c654db3be42e56f2f8d251f85952b # v4.3.0
+        with:
+          path: ./artifacts
+          pattern: generated_artifacts_*
+          merge-multiple: false
+
+      - name: List artifacts
+        run: |
+          set -euo pipefail
+          echo "Artifacts tree:"
+          find ./artifacts -type f | head -n 100 || true
+          ls -R ./artifacts | head -n 200 || true
+
+      - name: Collect dist files for release
+        run: |
+          set -euo pipefail
+          mkdir -p ./release-assets
+          find ./artifacts -type f \( -name "*.zip" -o -name "*.tar.xz" -o -name "*.json" -o -name "electron.d.ts" -o -name "electron-api.json" \) -exec cp -v {} ./release-assets/ \; || true
+          ls -lh ./release-assets || true
+          if [ -z "$(ls -A ./release-assets 2>/dev/null)" ]; then
+            echo "::warning::No release assets found — builds may have failed or used test config"
+            find ./artifacts -maxdepth 3 -type d | head -n 50 || true
+          fi
+
+      - name: Create / update GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.setup.outputs.tag }}
+          name: ${{ needs.setup.outputs.tag }}
+          draft: ${{ inputs.draft || false }}
+          prerelease: ${{ inputs.prerelease || false }}
+          generate_release_notes: true
+          files: ./release-assets/*
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          echo "Release $TAG published to https://github.com/${{ github.repository }}/releases/tag/$TAG"
+          echo "Assets:"
+          ls -1 ./release-assets 2>/dev/null || echo "(none)"
