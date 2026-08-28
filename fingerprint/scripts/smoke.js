@@ -10,8 +10,13 @@ const args = process.argv.slice(1);
 const NO_FP = args.includes('--no-fingerprint');
 const ISOLATION = args.includes('--isolation');
 const VERBOSE = args.includes('--verbose') || args.includes('-v');
+const OFFSCREEN = args.includes('--offscreen');
+const HEADLESS = args.includes('--headless');
+// 必须在 ready 之前注入，修复原 `whenReady` 内 no-sandbox 过晚的 bug
+if (process.platform === 'linux' && !app.commandLine.hasSwitch('no-sandbox')) app.commandLine.appendSwitch('no-sandbox'); // ponytail: 仅加已验证需要的开关，不堆砌 --disable-gpu 等，缺了再补
+if (HEADLESS && !app.commandLine.hasSwitch('headless')) app.commandLine.appendSwitch('headless');
 if (args.includes('--help') || args.includes('-h')) {
-  console.log('usage: electron fingerprint/scripts/smoke.js [--no-fingerprint] [--isolation] [--verbose]');
+  console.log('usage: electron fingerprint/scripts/smoke.js [--no-fingerprint] [--isolation] [--verbose] [--offscreen] [--headless]');
   process.exit(0);
 }
 
@@ -123,7 +128,7 @@ function compare(key, expected, got){
 
 async function runSingleWindow(){
   const cfg = NO_FP ? null : EXPECTED;
-  const win = new BrowserWindow({ show:false, width:800, height:600, webPreferences:{ offscreen:false, nodeIntegration:false, contextIsolation:true, ...(cfg?{fingerprint:cfg}:{}) } });
+  const win = new BrowserWindow({ show:false, width:800, height:600, webPreferences:{ offscreen: OFFSCREEN, nodeIntegration:false, contextIsolation:true, ...(cfg?{fingerprint:cfg}:{}) } });
   let actual;
   try{ actual=await evalProbe(win); }catch(e){ log('FAIL probe error:', e.message); win.close(); return false; }
   dbg('actual:', JSON.stringify(actual));
@@ -163,8 +168,8 @@ async function runSingleWindow(){
 async function runIsolation(){
   const cfgA={hardware_concurrency:2, screen_width:1280, screen_height:800, device_memory:4, tz_id:'America/New_York'};
   const cfgB={hardware_concurrency:8, screen_width:1920, screen_height:1080, device_memory:8, tz_id:'Europe/London'};
-  const winA=new BrowserWindow({ show:false, width:400, height:300, webPreferences:{ fingerprint: cfgA }});
-  const winB=new BrowserWindow({ show:false, width:400, height:300, webPreferences:{ fingerprint: cfgB }});
+  const winA=new BrowserWindow({ show:false, width:400, height:300, webPreferences:{ offscreen: OFFSCREEN, fingerprint: cfgA }});
+  const winB=new BrowserWindow({ show:false, width:400, height:300, webPreferences:{ offscreen: OFFSCREEN, fingerprint: cfgB }});
   const [a,b]=await Promise.all([evalProbe(winA), evalProbe(winB)]);
   dbg('isolation A:', JSON.stringify(a));
   dbg('isolation B:', JSON.stringify(b));
@@ -187,8 +192,6 @@ async function runIsolation(){
 }
 
 app.whenReady().then(async ()=>{
-  // headless-friendly: disable gpu sandbox issues
-  if(process.platform==='linux') app.commandLine.appendSwitch('no-sandbox');
   let overall=true;
   try{
     if(ISOLATION){
