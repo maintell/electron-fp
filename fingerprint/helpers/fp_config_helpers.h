@@ -17,6 +17,10 @@
 #include <string>
 #include "base/base64.h"
 #include "base/command_line.h"
+#include "base/containers/span.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
+#include "base/strings/string_number_conversions.h"
 #include "ui/gfx/geometry/rect_f.h"
 #include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
 #include "third_party/skia/include/core/SkBitmap.h"
@@ -60,18 +64,12 @@ inline std::string FpConfigContent() {
     return "";
   }
   std::string path_str = FpTrim(path);
-  FILE* f = fopen(path_str.c_str(), "rb");
-  if (!f) {
-    return "";
-  }
   std::string content;
-  char buf[4096];
-  size_t n;
-  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-    content.append(buf, n);
+  if (base::ReadFileToString(base::FilePath::FromUTF8Unsafe(path_str),
+                             &content)) {
+    return content;
   }
-  fclose(f);
-  return content;
+  return "";
 }
 
 // Find `"key"` in JSON content; returns position after the colon, or npos.
@@ -139,10 +137,9 @@ inline int FpConfigInt(const char* key, int fallback) {
   env_name += key;
   const char* e = getenv(env_name.c_str());
   if (e && *e) {
-    char* end = nullptr;
-    long v = strtol(e, &end, 10);
-    if (end != e) {
-      return static_cast<int>(v);
+    int v = 0;
+    if (base::StringToInt(e, &v)) {
+      return v;
     }
   }
   return fallback;
@@ -175,9 +172,8 @@ inline int64_t FpConfigInt64(const char* key, int64_t fallback) {
   env_name += key;
   const char* e = getenv(env_name.c_str());
   if (e && *e) {
-    char* end = nullptr;
-    long long v = strtoll(e, &end, 10);
-    if (end != e) {
+    int64_t v = 0;
+    if (base::StringToInt64(e, &v)) {
       return v;
     }
   }
@@ -190,14 +186,15 @@ inline int64_t FpConfigInt64(const char* key, int64_t fallback) {
 // SplitMix64 per-pixel hash from (seed, pixel index). Camoufox-style
 // minimal noise: fully transparent pixels untouched (clearRect semantics),
 // only the first non-zero RGB channel perturbed.
-inline void FpApplyPixelNoise(uint8_t* px, size_t total, uint64_t state,
+inline void FpApplyPixelNoise(base::span<uint8_t> pixels, uint64_t state,
                               int strength) {
+  const size_t total = pixels.size();
   for (size_t i = 0; i + 4 <= total; i += 4) {
-    if (px[i + 3] == 0) {  // fully transparent: leave untouched
+    if (pixels[i + 3] == 0) {  // fully transparent: leave untouched
       continue;
     }
     size_t c = 0;
-    while (c < 3 && px[i + c] == 0) {
+    while (c < 3 && pixels[i + c] == 0) {
       ++c;
     }
     if (c == 3) {  // opaque black pixel: leave untouched
@@ -211,8 +208,8 @@ inline void FpApplyPixelNoise(uint8_t* px, size_t total, uint64_t state,
     h *= 0x94D049BB133111EBULL;
     h ^= h >> 31;
     int delta = static_cast<int>(h & 0xFF) % (2 * strength + 1) - strength;
-    int v = px[i + c] + delta;
-    px[i + c] = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+    int v = pixels[i + c] + delta;
+    pixels[i + c] = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
   }
 }
 
@@ -249,7 +246,12 @@ inline void FpApplyCanvasExportNoise(
   uint8_t* px = static_cast<uint8_t*>(bitmap.getPixels());
   const size_t total = bitmap.computeByteSize();
   const uint64_t state = static_cast<uint64_t>(fp_seed);
-  FpApplyPixelNoise(px, total, state, strength);
+  // fp: boundary - we own |px|/|total| from the SkBitmap; span adoption is
+  // intentional and size-bounded here.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+  FpApplyPixelNoise(base::span<uint8_t>(px, total), state, strength);
+#pragma clang diagnostic pop
   sk_sp<SkData> data = SkData::MakeWithCopy(px, total);
   image = blink::StaticBitmapImage::Create(data, info, gfx::HDRMetadata());
 }
@@ -324,21 +326,21 @@ inline bool FpFontFamilyHidden(const std::string& family) {
 // "audio_data_strength" (float, default 0.0005). Same seed + same content
 // -> identical altered output across sessions. Used on offline render
 // output and AnalyserNode float reads (does not affect playback paths).
-inline void FpApplyAudioDataNoise(float* data, size_t count) {
+inline void FpApplyAudioDataNoise(base::span<float> data) {
   int64_t fp_seed = FpConfigInt64("audio_data_seed", 0);
-  if (fp_seed == 0 || !data || count == 0) {
+  if (fp_seed == 0 || data.empty()) {
     return;
   }
   float strength = 0.0005f;
   std::string fp_strength = FpConfigString("audio_data_strength");
   if (!fp_strength.empty()) {
-    char* end = nullptr;
-    float v = std::strtof(fp_strength.c_str(), &end);
-    if (end != fp_strength.c_str() && v >= 0.0f && v <= 1.0f) {
-      strength = v;
+    double vd = 0.0;
+    if (base::StringToDouble(fp_strength, &vd) && vd >= 0.0 && vd <= 1.0) {
+      strength = static_cast<float>(vd);
     }
   }
   const uint64_t state = static_cast<uint64_t>(fp_seed);
+  const size_t count = data.size();
   for (size_t i = 0; i < count; ++i) {
     uint64_t h = state ^
                  (static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL);

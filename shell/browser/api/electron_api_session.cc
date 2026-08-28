@@ -1085,7 +1085,7 @@ v8::Local<v8::Value> Session::GetFingerprintConfig(gin::Arguments* args) {
   if (!base::Base64Decode(b64, &json)) {
     return v8::Null(isolate);
   }
-  std::optional<base::Value> val = base::JSONReader::Read(json);
+  std::optional<base::Value> val = base::JSONReader::Read(json, 0);
   if (!val) {
     return v8::Null(isolate);
   }
