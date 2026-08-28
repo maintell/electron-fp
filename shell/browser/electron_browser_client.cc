@@ -932,6 +932,34 @@ void ElectronBrowserClient::SiteInstanceGotProcessAndSite(
 bool ElectronBrowserClient::IsSuitableHost(
     content::RenderProcessHost* process_host,
     const content::SecurityPrincipal& security_principal) {
+  // ponytail: fingerprint process isolation, per-host, revisit if site-per-process changes
+  // about:blank BrowserWindows share SiteURL and would reuse RenderProcessHost,
+  // losing the second window's --fingerprint-config (native probe). Block reuse
+  // when candidate host already serves a fingerprinted WebContents.
+  {
+    std::string host_fp;
+    if (auto* host_wc = WebContentsPreferences::GetWebContentsFromProcessID(
+            process_host->GetID())) {
+      if (auto* prefs = WebContentsPreferences::From(host_wc))
+        host_fp = prefs->GetFingerprintConfigBase64();
+      if (host_fp.empty()) {
+        if (auto* sp = SessionPreferences::FromBrowserContext(
+                host_wc->GetBrowserContext()))
+          host_fp = sp->GetFingerprintConfigBase64();
+      }
+    }
+    if (host_fp.empty()) {
+      if (auto* sp = SessionPreferences::FromBrowserContext(
+              process_host->GetBrowserContext()))
+        host_fp = sp->GetFingerprintConfigBase64();
+    }
+    if (!host_fp.empty()) {
+      const GURL& site_url = security_principal.GetDeprecatedSiteURL();
+      if (site_url.IsAboutBlank()) {
+        return false;
+      }
+    }
+  }
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
   auto* browser_context = process_host->GetBrowserContext();
   extensions::ProcessMap* process_map =

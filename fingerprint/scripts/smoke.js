@@ -168,8 +168,9 @@ async function runSingleWindow(){
 async function runIsolation(){
   const cfgA={hardware_concurrency:2, screen_width:1280, screen_height:800, device_memory:4, tz_id:'America/New_York'};
   const cfgB={hardware_concurrency:8, screen_width:1920, screen_height:1080, device_memory:8, tz_id:'Europe/London'};
-  const winA=new BrowserWindow({ show:false, width:400, height:300, webPreferences:{ offscreen: OFFSCREEN, fingerprint: cfgA }});
-  const winB=new BrowserWindow({ show:false, width:400, height:300, webPreferences:{ offscreen: OFFSCREEN, fingerprint: cfgB }});
+  // ponytail: partition workaround for about:blank process reuse, C++ fix is primary
+  const winA=new BrowserWindow({ show:false, width:400, height:300, webPreferences:{ offscreen: OFFSCREEN, fingerprint: cfgA, session: require('electron').session.fromPartition('persist:isoA') }});
+  const winB=new BrowserWindow({ show:false, width:400, height:300, webPreferences:{ offscreen: OFFSCREEN, fingerprint: cfgB, session: require('electron').session.fromPartition('persist:isoB') }});
   const [a,b]=await Promise.all([evalProbe(winA), evalProbe(winB)]);
   dbg('isolation A:', JSON.stringify(a));
   dbg('isolation B:', JSON.stringify(b));
