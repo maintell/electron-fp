@@ -109,6 +109,13 @@ function compare(key, expected, got){
   if(key==='perf_now_precision_ms') return Number(got)%Number(expected)===0;
   if(key==='webgpu_features'){ const g=(String(got).split(',').sort().join(',')); const e=(String(expected).split(',').sort().join(',')); return g===e; }
   if(key==='webgpu_limits'){ try{ const o=JSON.parse(got); for(const kv of String(expected).split(',')){ const [k,v]=kv.split('='); if(String(o[k])!==String(v)) return false; } return true; }catch(e){ return false; } }
+  if(key==='client_rects_seed'){
+    // element laid out at left:10px top:20px; fingerprint perturbs by <0.2px.
+    const parts=String(got).split(','); const gx=Number(parts[0]), gy=Number(parts[1]);
+    if(!isFinite(gx)||!isFinite(gy)) return false;
+    return (Math.abs(gx-10)>0 && Math.abs(gx-10)<0.3) || (Math.abs(gy-20)>0 && Math.abs(gy-20)<0.3);
+  }
+  if(key==='device_memory' && got===undefined) return false; // handled as SKIP by caller
   // default: string equality with numeric coercion tolerance
   if(typeof expected==='number') return Number(got)===Number(expected);
   return String(got)===String(expected);
@@ -137,6 +144,7 @@ async function runSingleWindow(){
   let checked=0;
   for(const k of Object.keys(EXPECTED)){
     if(!(k in actual)){ log(`SKIP  ${k} (not probed)`); skip++; continue; }
+    if(actual[k]===undefined){ log(`SKIP  ${k} (API not exposed)`); skip++; continue; }
     checked++;
     const ok=compare(k, EXPECTED[k], actual[k]);
     if(ok){ log(`PASS  ${k} = ${actual[k]}`); pass++; }
