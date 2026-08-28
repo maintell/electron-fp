@@ -38,7 +38,7 @@
  #include <map>
  #include <memory>
  #include <span>
-@@ -631,6 +633,118 @@
+@@ -631,6 +633,148 @@
    RTC_LOG(LS_INFO) << "Network change was observed";
    UpdateNetworksOnce();
  }
@@ -77,7 +77,37 @@
 +  return content.substr(q1 + 1, q2 - q1 - 1);
 +}
 +
++// fp: embedder-supplied override, set via SetCustomWebRtcIpOverride().
++// Deliberately stored outside the resolved/cached pair below: an embedder may
++// inject the value AFTER the first candidate has already been generated (Blink
++// reads it when the network list is built), so the override must always be
++// consultable and must invalidate any previously cached env-derived result.
++namespace {
++IPAddress& CustomWebRtcIpOverrideSlot() {
++  static IPAddress* slot = new IPAddress();
++  return *slot;
++}
++}  // namespace
++
++void SetCustomWebRtcIpOverride(const IPAddress& ip) {
++  IPAddress& slot = CustomWebRtcIpOverrideSlot();
++  if (slot == ip) {
++    return;
++  }
++  slot = ip;
++  // A new override supersedes anything resolved from the environment.
++  RTC_LOG(LS_INFO) << "custom WebRTC IP override "
++                   << (ip.IsNil() ? "cleared" : ("set to " + ip.ToString()));
++}
++
 +IPAddress GetCustomWebRtcIp() {
++  // 0) Embedder override (e.g. --fingerprint-config via Blink) — highest
++  //    priority, checked before the one-shot env cache.
++  const IPAddress& override_ip = CustomWebRtcIpOverrideSlot();
++  if (!override_ip.IsNil()) {
++    return override_ip;
++  }
++
 +  // Resolve once per process (candidate generation calls this frequently).
 +  static IPAddress cached;
 +  static bool resolved = false;
@@ -172,13 +202,21 @@
 # MERGE: HIGH risk (WebRTC), keep in sync with network.cc changes.
 --- a/third_party/webrtc/rtc_base/network.h
 +++ b/third_party/webrtc/rtc_base/network.h
-@@ -478,6 +478,9 @@
+@@ -478,12 +478,23 @@
    friend class NetworkManager;
  };
  
 +// fp: override host candidate IPs (config/env driven).
 +IPAddress GetCustomWebRtcIp();
 +void ApplyCustomWebRtcIp(std::vector<std::unique_ptr<Network>>& list);
++
++// fp: inject a custom IP from an embedder that owns the configuration source
++// (e.g. Blink reading the --fingerprint-config switch). webrtc is a standalone
++// component with no //base dependency, so it cannot read the switch itself;
++// the embedder pushes the resolved value in here instead. Takes priority over
++// the FP_* environment-variable sources consulted by GetCustomWebRtcIp().
++// Passing a nil IPAddress clears the override.
++void SetCustomWebRtcIpOverride(const IPAddress& ip);
  
  // Base class for NetworkManager implementations.
  class RTC_EXPORT NetworkManagerBase : public NetworkManager {
@@ -198,10 +236,23 @@
  #include "third_party/webrtc/rtc_base/socket_address.h"
  
  namespace blink {
-@@ -216,6 +217,8 @@
+@@ -216,10 +217,25 @@
  
    bool changed = false;
    NetworkManager::Stats stats;
++  // fp: the fingerprint config reaches this renderer through the
++  // --fingerprint-config switch, which only Blink can read (webrtc is a
++  // standalone component with no //base dependency). Resolve "webrtc_ip" here
++  // via FpConfigString() — it consults the switch first, then FP_CONFIG_DATA /
++  // FP_CONFIG — and push it into webrtc before candidates are built, so host
++  // and srflx candidates report the spoofed address.
++  {
++    std::string fp_ip = blink::FpConfigString("webrtc_ip");
++    webrtc::IPAddress parsed;
++    if (!fp_ip.empty() && webrtc::IPFromString(fp_ip, &parsed)) {
++      webrtc::SetCustomWebRtcIpOverride(parsed);
++    }
++  }
 +  // fp: override host IPs before merging.
 +  webrtc::ApplyCustomWebRtcIp(networks);
    MergeNetworkList(std::move(networks), &changed, &stats);

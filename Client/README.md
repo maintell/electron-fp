@@ -98,6 +98,9 @@ electron Client/test-ui-groups.js
 # Two-way JSON <-> group field sync (11 checks)
 electron Client/test-ui-sync.js
 
+# webrtc_ip reaches the kernel via --fingerprint-config (4 checks)
+electron Client/test-webrtc-ip.js
+
 # Upstream fingerprint smoke (window-level isolation, 20+ surfaces)
 electron fingerprint/scripts/smoke.js --isolation --verbose
 ```
