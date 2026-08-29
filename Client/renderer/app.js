@@ -29,6 +29,10 @@ const $fpApplyConfig = document.getElementById('fp-apply-config');
 const $fpStatus = document.getElementById('fp-status');
 const $fpGroups = document.getElementById('fp-groups');
 const $fpGroupsSummary = document.getElementById('fp-groups-summary');
+const $fpUaPreset = document.getElementById('fp-ua-preset');
+const $fpUaInput = document.getElementById('fp-ua-input');
+const $fpUaApply = document.getElementById('fp-ua-apply');
+const $fpUaReset = document.getElementById('fp-ua-reset');
 const $statusProfile = document.getElementById('status-profile');
 const $statusInfo = document.getElementById('status-info');
 const $statusVersion = document.getElementById('status-version');
@@ -163,17 +167,64 @@ async function loadCurrentFingerprint() {
   const fp = await window.api.getFingerprint(currentTabId);
   $fpJsonEditor.value = fp ? JSON.stringify(fp, null, 2) : '{\n  \n}';
   $fpStatus.textContent = '';
+  await loadCurrentUserAgent();
   await renderFpGroups();
 }
+
+// --- User-Agent (client-level surface, separate from the 56 kernel keys) ---
+
+async function loadUaPresets() {
+  const presets = await window.api.listUaPresets();
+  $fpUaPreset.innerHTML = '';
+  const blank = document.createElement('option');
+  blank.value = '';
+  blank.textContent = '— preset —';
+  $fpUaPreset.appendChild(blank);
+  for (const p of presets) {
+    const opt = document.createElement('option');
+    opt.value = p.ua;
+    opt.textContent = p.label;
+    $fpUaPreset.appendChild(opt);
+  }
+}
+
+async function loadCurrentUserAgent() {
+  if (!currentTabId) return;
+  const ua = await window.api.getUserAgent(currentTabId);
+  $fpUaInput.value = ua || '';
+}
+
+$fpUaPreset.addEventListener('change', () => {
+  if ($fpUaPreset.value) $fpUaInput.value = $fpUaPreset.value;
+  $fpUaPreset.value = '';
+});
+
+$fpUaApply.addEventListener('click', async () => {
+  if (!currentTabId) return;
+  const ok = await window.api.setUserAgent(currentTabId, $fpUaInput.value);
+  $fpStatus.textContent = ok ? 'UA applied' : 'Failed to apply UA';
+  setTimeout(() => { $fpStatus.textContent = ''; }, 2000);
+});
+
+$fpUaReset.addEventListener('click', async () => {
+  if (!currentTabId) return;
+  await window.api.setUserAgent(currentTabId, '');
+  $fpUaInput.value = '';
+  $fpStatus.textContent = 'UA reset to native';
+  setTimeout(() => { $fpStatus.textContent = ''; }, 2000);
+});
 
 $fpApplyProfile.addEventListener('click', async () => {
   const profileId = $fpProfileSelect.value;
   if (!profileId || !currentTabId) return;
   const profile = profiles.find(p => p.id === profileId);
   if (!profile) return;
-  const ok = await window.api.setFingerprint(currentTabId, profile.fingerprint);
+  // The profile's UA travels alongside the fingerprint, not inside it: it is an
+  // Electron-level surface, and fpNormalizeConfig() would drop it if nested.
+  const ok = await window.api.setFingerprint(currentTabId, profile.fingerprint, profile.userAgent);
   $fpStatus.textContent = ok ? `Applied: ${profile.name}` : 'Failed to apply';
   $statusProfile.textContent = `Profile: ${profile.name}`;
+  await loadCurrentUserAgent();
   await renderFpGroups();
   setTimeout(() => { $fpStatus.textContent = ''; }, 2000);
 });
@@ -185,6 +236,7 @@ $fpRandomize.addEventListener('click', async () => {
   await window.api.createProfile(randomProfile);
   await loadProfilesIntoSelect();
   $fpProfileSelect.value = randomProfile.id;
+  $fpUaInput.value = randomProfile.userAgent || '';
   $fpStatus.textContent = `Generated: ${randomProfile.name}`;
   await renderFpGroups();
 });
@@ -193,9 +245,12 @@ $fpApplyConfig.addEventListener('click', async () => {
   if (!currentTabId) return;
   try {
     const config = JSON.parse($fpJsonEditor.value);
-    const ok = await window.api.setFingerprint(currentTabId, config);
+    // undefined => keep the tab's current UA, so editing the 56 kernel keys
+    // alone does not silently wipe a UA the operator set in the UA box.
+    const ok = await window.api.setFingerprint(currentTabId, config, undefined);
     $fpStatus.textContent = ok ? 'Applied!' : 'Failed to apply';
     $statusProfile.textContent = 'Profile: Custom';
+    await loadCurrentUserAgent();
     await renderFpGroups();
     setTimeout(() => { $fpStatus.textContent = ''; }, 2000);
   } catch (e) {
@@ -509,6 +564,8 @@ async function init() {
 
   // Open the fingerprint sidebar by default and load the active tab's config
   setPanelState(true);
+  await loadUaPresets();
+  await loadCurrentUserAgent();
   await renderFpGroups();
 }
 

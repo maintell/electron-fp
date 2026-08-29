@@ -22,6 +22,10 @@ out/Release/electron.exe Client/
   - Unique `BrowserView` with independent renderer
   - Unique `partition` for full cookie/session/storage isolation
   - Independent 56-key fingerprint config
+  - Independent User-Agent
+- **User-Agent coverage** (client-level) — per-tab UA applied via
+  `session.setUserAgent()`, covering **both** `navigator.userAgent` and the HTTP
+  `User-Agent` header. Presets, a preset dropdown, and free-form entry.
 - **5 preset profiles**: Default, Windows 10/Chrome, macOS/Safari, Linux/Firefox, Mobile/Android
 - **Random profile generator** — one-click randomize all fingerprint parameters
 - **JSON editor** — edit fingerprint config directly
@@ -61,7 +65,18 @@ Client/
 Each tab creates a `BrowserView` with:
 - `partition: fp-tab-{tabId}` — full cookie/session/storage isolation
 - `fingerprint: { ... }` — 56-key config injected per-renderer via `--fingerprint-config`
+- `userAgent` — applied per-partition via `session.setUserAgent()`
 - Separate renderer process — no shared JS heap
+
+The User-Agent lives **beside** `fingerprint` in a profile, never inside it.
+`fpNormalizeConfig()` drops every key the kernel does not know, so a UA nested
+in the fingerprint object would be silently discarded. It is also a different
+layer: the 56 keys are read by Blink, whereas the UA is applied by Electron.
+
+**Ordering matters:** `setUserAgent()` must be called **before** the
+`BrowserView` is constructed. Measured: setting it on an already-open session
+does not reach existing views even after a reload, but a **new** view on the
+same partition does pick it up. Passing `''` reverts to the native UA.
 
 **Runtime profile switching:** fingerprint is fixed at renderer startup, so applying a
 new profile recreates the tab's `BrowserView` (same `partition`, new renderer) and
@@ -138,3 +153,37 @@ Disabled defaults are deliberate: a profile must never claim a fingerprint surfa
 it cannot back. Inconsistent surfaces are themselves a detection signal, so the
 randomizer keeps `webgl_vendor` == `webgpu_vendor`, geo coordinates aligned with
 `tz_id`, and touch points consistent with the screen form factor.
+
+## Known Limitations
+
+The User-Agent is covered, but the surfaces below are **not**. They are stated
+explicitly so a deployment does not assume more protection than it has.
+
+| Surface | Covered | Note |
+|---|---|---|
+| `navigator.userAgent` | yes | via `session.setUserAgent()` |
+| HTTP `User-Agent` header | yes | same call covers both |
+| `navigator.platform` | **no** | stays `Win32`. Unaffected by `setUserAgent()`; Electron exposes no setter. Needs a kernel key (`navigator_platform`), tracked separately |
+| `Sec-CH-UA` client hints | **no** | would need to stay consistent with the UA |
+| TLS / JA3 / JA4 | **no** | network-stack fingerprint; see `fingerprint/README.md` |
+
+Note on the randomizer: the UA is drawn from its **own** pool, independent of the
+platform archetype, so a random profile can carry a Mac screen with a Windows
+UA. This is deliberate but it is a cross-group inconsistency — worth reviewing
+per profile rather than assuming the generator keeps them aligned.
+
+## Testing
+
+```bash
+# Static (no browser)
+node Client/test-schema.js     # 56-key schema vs kernel (15 checks)
+node Client/test-random.js     # randomizer invariants (20 checks)
+
+# Live (needs the built Electron; rename out/Default/resources/app first)
+node Client/test-ua.js         # UA: JS + HTTP header, isolation, reset (8 checks)
+node Client/test-fonts.js      # font blocklist via text metrics (6 checks)
+node Client/test-webgpu.js     # WebGPU features/limits (10 checks)
+```
+
+`test-ua.js` guards the ordering rule above: moving `setUserAgent()` to after
+view construction fails it immediately (verified by mutation).

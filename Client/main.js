@@ -4,7 +4,8 @@ const { app, BrowserWindow, BrowserView, ipcMain, session, protocol, net } = req
 const path = require('path');
 const fs = require('fs');
 const { fpDefaultConfig, fpNormalizeConfig, fpCoverage, fpKeysInGroup, fpIsActive,
-        FP_KEYS, FP_KEY_NAMES, FP_SCHEMA_VERSION, FP_GROUPS, FP_GROUP_IDS } = require('./fp-schema');
+        FP_KEYS, FP_KEY_NAMES, FP_SCHEMA_VERSION, FP_GROUPS, FP_GROUP_IDS,
+        FP_UA_PRESETS, fpRandomUserAgent, fpNormalizeUserAgent } = require('./fp-schema');
 
 // --- Profile Store ---
 const PROFILES_PATH = path.join(__dirname, 'profiles.json');
@@ -55,6 +56,31 @@ function resizeActiveView() {
 }
 
 /**
+ * Apply a tab's User-Agent.
+ *
+ * IMPORTANT — this MUST be called before the tab's BrowserView is created.
+ * Measured on Electron: session.setUserAgent() on an already-open session does
+ * NOT reach existing views, even after a reload. A NEW view created on the same
+ * partition afterwards does pick it up. Since both createTabView() and
+ * recreateTabView() construct a fresh view, calling this first is what makes
+ * the UA take effect.
+ *
+ * Passing '' reverts to the native UA (measured: setUserAgent('') falls back
+ * to Chromium's own UA rather than sending a blank one).
+ *
+ * UA is per-partition, and every tab already owns a unique partition, so
+ * per-tab UA isolation comes for free.
+ */
+function applyTabUserAgent(partition, userAgent) {
+  try {
+    session.fromPartition(partition).setUserAgent(
+      typeof userAgent === 'string' ? userAgent.trim() : '');
+  } catch (e) {
+    console.warn('[fp] failed to set user agent: ' + e.message);
+  }
+}
+
+/**
  * Create a BrowserView for a tab with the given fingerprint profile.
  * Each tab gets a unique partition for full cookie/storage isolation.
  */
@@ -65,6 +91,9 @@ function createTabView(tabId, profileId) {
 
   // Unique partition per tab for full cookie/session/storage isolation
   const partition = `fp-tab-${tabId}`;
+
+  // UA must be set before the view is constructed — see applyTabUserAgent().
+  applyTabUserAgent(partition, profile.userAgent);
 
   const view = new BrowserView({
     webPreferences: {
@@ -103,7 +132,8 @@ function createTabView(tabId, profileId) {
     }
   });
 
-  return { view, profileId, profileName: profile.name, url: 'about:blank', title: 'New Tab' };
+  return { view, profileId, profileName: profile.name, url: 'about:blank',
+           title: 'New Tab', userAgent: profile.userAgent || '' };
 }
 
 /**
@@ -112,7 +142,7 @@ function createTabView(tabId, profileId) {
  * process is respawned so the new --fingerprint-config takes effect.
  * Returns the new view.
  */
-function recreateTabView(tabId, fingerprint, keepUrl) {
+function recreateTabView(tabId, fingerprint, keepUrl, userAgent) {
   const tab = tabs.get(tabId);
   if (!tab) return null;
 
@@ -121,6 +151,8 @@ function recreateTabView(tabId, fingerprint, keepUrl) {
   try { tab.view.webContents.close(); } catch {}
 
   const partition = `fp-tab-${tabId}`;
+  // UA must be set before the view is constructed — see applyTabUserAgent().
+  applyTabUserAgent(partition, userAgent);
   const view = new BrowserView({
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -175,8 +207,8 @@ function recreateTabView(tabId, fingerprint, keepUrl) {
 
 function addTab(profileId = 'default') {
   const tabId = createTabId();
-  const { view, profileId: pid, profileName, url, title } = createTabView(tabId, profileId);
-  tabs.set(tabId, { id: tabId, view, profileId: pid, profileName, url, title });
+  const { view, profileId: pid, profileName, url, title, userAgent } = createTabView(tabId, profileId);
+  tabs.set(tabId, { id: tabId, view, profileId: pid, profileName, url, title, userAgent });
 
   mainWindow?.webContents.send('tab:created', { tabId, profileId: pid, profileName, url, title });
   activateTab(tabId);
@@ -310,7 +342,7 @@ function setupIPC() {
       return tab.view.webContents.getFingerprintConfig();
     } catch { return null; }
   });
-  ipcMain.handle('tab:set-fingerprint', (e, { tabId, config }) => {
+  ipcMain.handle('tab:set-fingerprint', (e, { tabId, config, userAgent }) => {
     const tid = tabId || activeTabId;
     const tab = tabs.get(tid);
     if (!tab) return false;
@@ -327,12 +359,50 @@ function setupIPC() {
         }
       }
 
+      // UA travels beside the fingerprint, never inside it: fpNormalizeConfig()
+      // would silently drop it, and it is an Electron-level surface rather than
+      // one of the kernel's 56 keys. undefined means "leave the current UA
+      // alone"; only an explicit value (including '') overrides it.
+      const ua = (userAgent === undefined)
+        ? tab.userAgent
+        : fpNormalizeUserAgent(userAgent);
+      tab.userAgent = ua;
+
       // Recreate the renderer (same partition) so the new fingerprint config
-      // is injected via --fingerprint-config at renderer startup.
-      recreateTabView(tid, apply, tab.url || 'about:blank');
+      // is injected via --fingerprint-config at renderer startup, and the new
+      // UA is picked up by the fresh view.
+      recreateTabView(tid, apply, tab.url || 'about:blank', ua);
       tab.profileId = config ? 'custom' : 'default';
       tab.profileName = config ? 'Custom' : 'Default';
       mainWindow?.webContents.send('tab:profile-changed', { tabId: tid, profileId: tab.profileId, profileName: tab.profileName });
+      return true;
+    } catch { return false; }
+  });
+
+  // User-Agent is a client-level (Electron) surface, kept separate from the
+  // kernel's 56-key fingerprint config. See applyTabUserAgent() for why the
+  // order of operations matters.
+  ipcMain.handle('tab:get-ua', (e, tabId) => {
+    const tab = tabs.get(tabId || activeTabId);
+    if (!tab) return null;
+    try {
+      return session.fromPartition(`fp-tab-${tab.id}`).getUserAgent() || '';
+    } catch { return tab.userAgent || ''; }
+  });
+
+  ipcMain.handle('tab:set-ua', (e, { tabId, userAgent }) => {
+    const tid = tabId || activeTabId;
+    const tab = tabs.get(tid);
+    if (!tab) return false;
+    try {
+      // Same partition as the tab, so cookies/storage survive the respawn.
+      const ua = fpNormalizeUserAgent(userAgent);
+      tab.userAgent = ua;
+      recreateTabView(tid, tab.view.webContents.getFingerprintConfig?.(),
+        tab.url || 'about:blank', ua);
+      mainWindow?.webContents.send('tab:profile-changed', {
+        tabId: tid, profileId: tab.profileId, profileName: tab.profileName
+      });
       return true;
     } catch { return false; }
   });
@@ -397,6 +467,8 @@ function setupIPC() {
   }));
   // Fingerprint schema: lets the renderer build grouped sections and validate
   // the JSON editor against the exact kernel key set (56 keys / 14 groups).
+  ipcMain.handle('ua:presets', () => FP_UA_PRESETS);
+
   ipcMain.handle('fp:schema', () => ({
     version: FP_SCHEMA_VERSION,
     keyCount: FP_KEY_NAMES.length,
@@ -751,6 +823,13 @@ function generateRandomProfile() {
     id: `random-${Date.now()}`,
     name: `Random ${sw}x${sh} / ${tz.split('/')[1]}`,
     fingerprint: fp,
+    // Independent of the platform archetype above, by deliberate choice: the
+    // user asked for the UA to be drawn from its own pool rather than matched
+    // to p.id. The tradeoff is real and is surfaced in the UI: a profile can
+    // therefore carry a Mac screen with a Windows UA, which is a cross-group
+    // inconsistency. It is left visible on purpose instead of being papered
+    // over, so the operator can decide per profile.
+    userAgent: fpRandomUserAgent(),
     createdAt: new Date().toISOString()
   };
 }

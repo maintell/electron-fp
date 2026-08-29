@@ -13,9 +13,24 @@ const src = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
 const start = src.indexOf("function generateRandomProfile()");
 const end = src.indexOf("// --- App Lifecycle ---");
 const fnSrc = src.slice(start, end);
-const mod = new Function("fpDefaultConfig", "FP_KEY_NAMES", fnSrc + "; return generateRandomProfile;")(
-  schema.fpDefaultConfig, schema.FP_KEY_NAMES
-);
+
+// The generator is extracted as source text, so ONLY the names passed below are
+// in scope inside it. Anything generateRandomProfile() references from the
+// module scope must be injected here or it throws ReferenceError at call time
+// (which is exactly what happened when the randomizer gained a UA: the test
+// silently produced zero checks instead of failing loudly).
+const mod = new Function(
+  "fpDefaultConfig", "FP_KEY_NAMES", "fpRandomUserAgent",
+  fnSrc + "; return generateRandomProfile;"
+)(schema.fpDefaultConfig, schema.FP_KEY_NAMES, schema.fpRandomUserAgent);
+
+// Guard against the silent-zero-checks failure above: a ReferenceError thrown
+// here would otherwise abort before any check ran, and a run with 0 checks must
+// never be reported as green.
+if (typeof mod !== "function") {
+  console.log("FAIL  could not extract generateRandomProfile from main.js");
+  process.exit(1);
+}
 
 let pass = 0, fail = 0;
 const check = (n, c, d) => { if (c) { console.log("PASS  " + n + (d ? ": " + d : "")); pass++; } else { console.log("FAIL  " + n + (d ? ": " + d : "")); fail++; } };

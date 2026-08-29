@@ -12,6 +12,13 @@ ipcMain.handle("tab:get-fingerprint", () => null);
 ipcMain.handle("profile:list", () => []);
 ipcMain.handle("panel:set-open", () => true);
 
+// Mirror of main.js's UA handlers (see the note in test-ui-groups.js): app.js
+// init() calls these on boot, and this probe mirrors main.js rather than
+// requiring it, so new channels must be added in both places.
+ipcMain.handle("ua:presets", () => schema.FP_UA_PRESETS);
+ipcMain.handle("tab:get-ua", () => "");
+ipcMain.handle("tab:set-ua", () => true);
+
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ show: false, width: 1400, height: 900,
     webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: false } });

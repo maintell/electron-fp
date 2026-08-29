@@ -187,6 +187,96 @@ function fpNormalizeConfig(input) {
   return { config: out, unknown };
 }
 
+// ============================================================================
+// User-Agent: a CLIENT-level (Electron) surface, deliberately NOT a kernel key.
+//
+// The kernel's 56 keys are read by Blink via --fingerprint-config. The UA is
+// applied by Electron's session.setUserAgent(), which is a different layer
+// entirely. Keeping it out of FP_KEYS is not cosmetic:
+//
+//   * fpNormalizeConfig() drops every key the kernel does not know, so a UA
+//     placed inside `fingerprint` would be silently discarded on apply.
+//   * test-schema.js asserts the client key set equals the kernel key set
+//     exactly, so adding a 57th key here would break that assertion.
+//
+// Measured behaviour this model relies on (2026-08-29, verified on Electron):
+//   * setUserAgent() covers BOTH navigator.userAgent and the HTTP UA header.
+//   * It is per-partition, so per-tab UA isolation is free (tabs already own
+//     a unique partition).
+//   * It MUST be called before the BrowserView is created: setting it on an
+//     already-open session does not reach existing views even after reload,
+//     but a NEW view on the same partition does pick it up.
+//   * setUserAgent("") reverts to the native UA.
+// ============================================================================
+
+/** Platform-appropriate UA presets used by the randomizer and the panel. */
+const FP_UA_PRESETS = [
+  {
+    id: "win-chrome",
+    label: "Windows / Chrome",
+    platform: "win",
+    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+  },
+  {
+    id: "mac-chrome",
+    label: "macOS / Chrome",
+    platform: "mac",
+    ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+  },
+  {
+    id: "mac-safari",
+    label: "macOS / Safari",
+    platform: "mac",
+    ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15"
+  },
+  {
+    id: "linux-chrome",
+    label: "Linux / Chrome",
+    platform: "linux",
+    ua: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+  },
+  {
+    id: "linux-firefox",
+    label: "Linux / Firefox",
+    platform: "linux",
+    ua: "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0"
+  },
+  {
+    id: "win-firefox",
+    label: "Windows / Firefox",
+    platform: "win",
+    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"
+  },
+  {
+    id: "android-chrome",
+    label: "Android / Chrome",
+    platform: "android",
+    ua: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+  },
+  {
+    id: "iphone-safari",
+    label: "iPhone / Safari",
+    platform: "android",
+    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
+  }
+];
+
+/** Pick a random UA preset. Independent of the platform archetype by design. */
+function fpRandomUserAgent() {
+  return FP_UA_PRESETS[Math.floor(Math.random() * FP_UA_PRESETS.length)].ua;
+}
+
+/**
+ * Normalize a user-supplied UA. Anything non-string becomes "" (native), and
+ * a whitespace-only string is treated as "no override" rather than being sent
+ * as a literal blank UA, which would be an obviously broken header.
+ */
+function fpNormalizeUserAgent(value) {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  return trimmed;
+}
+
 module.exports = {
   FP_SCHEMA_VERSION,
   FP_KEYS,
@@ -198,5 +288,9 @@ module.exports = {
   fpKeysInGroup,
   fpCoverage,
   fpIsActive,
+  // UA (client-level surface, not a kernel key)
+  FP_UA_PRESETS,
+  fpRandomUserAgent,
+  fpNormalizeUserAgent,
 };
 

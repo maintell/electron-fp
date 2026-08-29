@@ -40,7 +40,8 @@
         "fonts_blocklist": "",
         "fonts_whitelist": ""
       },
-      "createdAt": "2026-01-01T00:00:00Z"
+      "createdAt": "2026-01-01T00:00:00Z",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     },
     {
       "id": "macos-safari",
@@ -76,7 +77,8 @@
         "fonts_blocklist": "",
         "fonts_whitelist": ""
       },
-      "createdAt": "2026-01-01T00:00:00Z"
+      "createdAt": "2026-01-01T00:00:00Z",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15"
     },
     {
       "id": "linux-firefox",
@@ -112,7 +114,8 @@
         "fonts_blocklist": "",
         "fonts_whitelist": ""
       },
-      "createdAt": "2026-01-01T00:00:00Z"
+      "createdAt": "2026-01-01T00:00:00Z",
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0"
     },
     {
       "id": "mobile-android",
@@ -148,7 +151,8 @@
         "fonts_blocklist": "",
         "fonts_whitelist": ""
       },
-      "createdAt": "2026-01-01T00:00:00Z"
+      "createdAt": "2026-01-01T00:00:00Z",
+      "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
     }
   ]
 }

@@ -368,3 +368,38 @@ body {
 #fp-panel-body::-webkit-scrollbar { width: 6px; }
 #fp-panel-body::-webkit-scrollbar-track { background: transparent; }
 #fp-panel-body::-webkit-scrollbar-thumb { background: #555; border-radius: 3px; }
+
+/* === User-Agent section (client-level surface, not a kernel key) === */
+.fp-ua textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  resize: vertical;
+}
+.fp-ua select {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+}
+.fp-ua-tag {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #2d5a8a;
+  color: #cfe6ff;
+  margin-left: 6px;
+  font-weight: normal;
+}
+.fp-ua-note {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #999;
+}
+.fp-ua-note code {
+  background: #2a2a2a;
+  padding: 0 3px;
+  border-radius: 2px;
+}

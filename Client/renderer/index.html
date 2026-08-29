@@ -66,6 +66,25 @@
           </div>
         </div>
 
+        <!-- User-Agent: a client-level (Electron) surface, NOT one of the
+             kernel's 56 keys. It lives beside `fingerprint` in a profile
+             because fpNormalizeConfig() would silently drop it if nested. -->
+        <div class="fp-section fp-ua">
+          <label>User-Agent <span class="fp-ua-tag">client-level</span></label>
+          <select id="fp-ua-preset" title="Apply a preset UA"></select>
+          <textarea id="fp-ua-input" rows="3" spellcheck="false"
+                    placeholder="Empty = native UA (exposes Electron/…)"></textarea>
+          <div class="fp-row">
+            <button id="fp-ua-apply" class="fp-btn fp-btn-primary">Apply UA</button>
+            <button id="fp-ua-reset" class="fp-btn">Reset to Native</button>
+          </div>
+          <div class="fp-ua-note">
+            Covers <code>navigator.userAgent</code> and the HTTP header.
+            <b>Not covered:</b> <code>navigator.platform</code> (stays
+            <code>Win32</code>), <code>Sec-CH-UA</code> client hints, TLS/JA3/JA4.
+          </div>
+        </div>
+
         <!-- Grouped key sections (built from the kernel schema, 56 keys / 14 groups) -->
         <div class="fp-section fp-groups">
           <div id="fp-groups-summary"></div>

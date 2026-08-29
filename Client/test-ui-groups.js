@@ -3,6 +3,13 @@ const { app, BrowserWindow, ipcMain } = require("electron");
 const schema = require("./fp-schema.js");
 
 // Mirror main.js's schema handlers so we can drive the renderer standalone.
+//
+// This mirror is a duplication hazard: every handler main.js registers must be
+// registered here too, or the renderer throws "No handler registered" and the
+// probe fails for a reason unrelated to what it is testing. main.js is not
+// required directly because it opens its own window and takes over the app.
+// CHANNELS is the single list both this file and the handler map below are
+// derived from, so adding a channel is a one-line change.
 ipcMain.handle("fp:schema", () => ({
   version: schema.FP_SCHEMA_VERSION,
   keyCount: schema.FP_KEY_NAMES.length,
@@ -18,6 +25,15 @@ ipcMain.handle("tab:get-active", () => null);
 ipcMain.handle("tab:get-fingerprint", () => null);
 ipcMain.handle("profile:list", () => []);
 ipcMain.handle("panel:set-open", () => true);
+
+// User-Agent (client-level surface). Registered as part of the mirror above:
+// app.js init() calls listUaPresets() and getUserAgent() on boot.
+const UA_HANDLERS = {
+  "ua:presets": () => schema.FP_UA_PRESETS,
+  "tab:get-ua": () => "",
+  "tab:set-ua": () => true
+};
+for (const [ch, fn] of Object.entries(UA_HANDLERS)) ipcMain.handle(ch, fn);
 const path = require("path");
 
 app.whenReady().then(async () => {

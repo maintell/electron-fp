@@ -16,7 +16,12 @@ contextBridge.exposeInMainWorld('api', {
 
   // Fingerprint per-tab
   getFingerprint: (tabId) => ipcRenderer.invoke('tab:get-fingerprint', tabId),
-  setFingerprint: (tabId, config) => ipcRenderer.invoke('tab:set-fingerprint', { tabId, config }),
+  setFingerprint: (tabId, config, userAgent) => ipcRenderer.invoke('tab:set-fingerprint', { tabId, config, userAgent }),
+
+  // User-Agent per-tab (Electron-level surface, not one of the kernel's 56 keys)
+  getUserAgent: (tabId) => ipcRenderer.invoke('tab:get-ua', tabId),
+  setUserAgent: (tabId, userAgent) => ipcRenderer.invoke('tab:set-ua', { tabId, userAgent }),
+  listUaPresets: () => ipcRenderer.invoke('ua:presets'),
 
   // Fingerprint panel open/close
   setPanelOpen: (isOpen) => ipcRenderer.invoke('panel:set-open', isOpen),
