@@ -100,9 +100,19 @@ python3 fingerprint/scripts/apply.py --dry-run && echo "dry-run ok (or src missi
 允许项：
 - `shell/common/options_switches.h`、`shell/browser/web_contents_preferences.cc`、`shell/browser/electron_browser_client.cc`、`shell/browser/api/electron_api_*.cc`、`lib/browser/api/*.ts`、`typings/internal-electron.d.ts` 的最小粘合（见 `docs/superpowers/specs/2026-08-26-electron-fingerprint-design.md §4.2`）
 
-## 已知未覆盖：网络层指纹（TLS/JA3/JA4）与 User-Agent
+## 已知未覆盖：网络层指纹（TLS/JA3/JA4）
 
-**56 个 key 全部位于渲染层（Blink）与 WebRTC，不含任何网络栈指纹。** 这不是遗漏待补，而是当前架构的边界；此处记录以免被误认为已实现。
+**57 个 key 全部位于渲染层（Blink）与 WebRTC，不含任何网络栈指纹。** 这不是遗漏待补，而是当前架构的边界；此处记录以免被误认为已实现。
+
+> **2026-08-29 更新**：User-Agent 与 `navigator.platform` **已覆盖**，不再是缺口。
+> UA 由客户端 `session.setUserAgent()` 处理（非内核 key，`Client/main.js`）；
+> `navigator.platform` 由第 57 个内核 key `navigator_platform` 处理，注入点为
+> `NavigatorBase::platform()`（**不是** `NavigatorID::platform()`，后者在
+> Windows/macOS/Linux 上是死代码，详见 `10-blink-core.patch` 中的注释）。
+> 两者均需在 `profiles.json` 中显式配置：UA 为 `profile.userAgent`（平级字段），
+> platform 为 `fingerprint.navigator_platform`（默认 `''` 禁用）。
+> 仍需注意二者需**手动保持一致**——内核不会校验 Mac UA 是否配了 `MacIntel`。
+> 见 `Client/README.md` § Known Limitations。
 
 ### 事实（实测确认，非推断）
 
@@ -133,26 +143,41 @@ python3 fingerprint/scripts/apply.py --dry-run && echo "dry-run ok (or src missi
 
 第 1 条是 **per-renderer** 的，这是"每个标签页独立指纹"的实现基础。而 TLS 指纹产生于网络栈，**跨标签页共享**。因此网络层指纹不只是"还没做"，还额外要求解决一个现有架构未覆盖的问题：如何在共享网络栈上做 per-tab 差异化。环境变量（第 2/4 条）网络栈能读到，但那是进程级全局的，做不出 per-tab 隔离。
 
-### 附带泄露：User-Agent（比 TLS 更急）
+### （已解决）User-Agent 与 navigator.platform 泄露
 
-实测 UA：
+> 本节保留原始记录，因为「为什么 UA 不是内核 key」与「为什么注入点在
+> `NavigatorBase` 而非 `NavigatorID`」这两个结论仍然有效。
+
+原实测 UA：
 
 ```
 Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)
 Chrome/154.0.8015.0 Electron/45.0.0-nightly.20260825 Safari/537.36
 ```
 
-- `Electron/45.0.0-nightly.20260825` **直接暴露 Electron 身份**。
-- schema 中 **UA / platform / appVersion 类 key 为 0 个**（注意：`webgl_vendor`、`webgpu_vendor` 是 GPU 厂商名，与 UA 无关，不要误认为 UA 已可控）。
-- 后果：`profiles.json` 的 `macOS / Safari-like` 预设只改了 GPU 与屏幕（`webgl_vendor: Apple`、屏幕 `2560x1600`），UA 仍报 `Windows NT 10.0 ... Electron/45.0.0`。**声称 macOS/Safari 却在网络层报 Windows + Electron，该组合本身即是强检测信号。**
+- `Electron/45.0.0-nightly.20260825` **曾直接暴露 Electron 身份**。
+- 后果：`profiles.json` 的 `macOS / Safari-like` 预设只改了 GPU 与屏幕，UA 仍报
+  `Windows NT 10.0 ... Electron/45.0.0`。**声称 macOS 却在网络层报 Windows + Electron。**
 
-### 可选路径与代价
+**2026-08-29 已解决**（方案 A + platform）：
 
-| 方案 | 解决什么 | 代价 |
+| 方案 | 解决什么 | 状态 |
 |---|---|---|
-| A. 补 UA 覆盖 | 消除 `Electron/` 暴露与预设自相矛盾 | 小。Electron 原生 `session.setUserAgent()`，无需改内核 |
-| B. UA + platform + Sec-CH-UA | 让预设名副其实 | 中。需同步 `navigator.platform` 与 Client Hints，否则仍矛盾 |
-| C. TLS/JA3 定制 | 真正的网络层指纹 | 大。需改 BoringSSL 或拦截 ClientHello 构造；per-tab 隔离需另设计；Chromium 升级合并风险高 |
-| D. 明确不实现 | — | 在本文标注边界，避免误用 |
+| A. UA 覆盖 | 消除 `Electron/` 暴露与预设自相矛盾 | **已完成**。客户端 `session.setUserAgent()`，`profile.userAgent` 平级字段 |
+| B. `navigator.platform` | 让预设名副其实 | **已完成**。内核 key `navigator_platform`（第 57 个） |
+| B′. Sec-CH-UA 客户端提示 | 与 UA 保持一致 | 未做。需与 UA 同步，否则仍矛盾 |
+| C. TLS/JA3 定制 | 真正的网络层指纹 | 未做，见上节 |
+| D. 明确不实现 | — | TLS 仍属此类 |
 
-建议先做 A：成本低，且立刻消除最扎眼的泄露与预设矛盾。C 需先决策：接受全局统一 TLS，还是投入改造网络栈。
+**两个易踩的坑（均已实测）**：
+
+1. **UA 不是内核 key。** `fpNormalizeConfig()` 会丢弃内核不认识的 key，所以 UA
+   若放进 `fingerprint` 对象会被静默丢弃。它必须作为 `profile.userAgent`
+   平级字段存在——UA 属 Electron 层，56/57 个 key 属 Blink 层。
+2. **`setUserAgent()` 必须在创建 `BrowserView` 之前调用。** 实测：对已打开的
+   session 设 UA 后 reload 也不生效，但同 partition 的**新** view 会生效。
+
+### 剩余未决：TLS/JA3 定制（方案 C）
+
+需先决策：接受全局统一 TLS，还是投入改造网络栈做 per-tab 隔离。后者受架构约束——
+配置注入是 per-renderer 的，而 TLS 指纹产生于共享网络栈。
