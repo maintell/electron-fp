@@ -5,7 +5,8 @@ const path = require('path');
 const fs = require('fs');
 const { fpDefaultConfig, fpNormalizeConfig, fpCoverage, fpKeysInGroup, fpIsActive,
         FP_KEYS, FP_KEY_NAMES, FP_SCHEMA_VERSION, FP_GROUPS, FP_GROUP_IDS,
-        FP_UA_PRESETS, fpRandomUserAgent, fpNormalizeUserAgent } = require('./fp-schema');
+        FP_UA_PRESETS, fpRandomUserAgent, fpNormalizeUserAgent,
+        fpPlatformForUserAgent } = require('./fp-schema');
 
 // --- Profile Store ---
 const PROFILES_PATH = path.join(__dirname, 'profiles.json');
@@ -819,17 +820,26 @@ function generateRandomProfile() {
   fp.battery_charging = maybe(0.7, pick(['true', 'false']));
   fp.battery_level = maybe(0.7, String(pick([0.42, 0.67, 0.85, 1.0])));
 
+  // Independent of the platform archetype above, by deliberate choice: the
+  // user asked for the UA to be drawn from its own pool rather than matched
+  // to p.id. The tradeoff is real and is surfaced in the UI: a profile can
+  // therefore carry a Mac screen with a Windows UA, which is a cross-group
+  // inconsistency. It is left visible on purpose instead of being papered
+  // over, so the operator can decide per profile.
+  const ua = fpRandomUserAgent();
+
+  // ...but navigator_platform MUST follow the UA. The two are separate
+  // surfaces with nothing enforcing agreement, and (Mac UA, Win32 platform) is
+  // exactly the contradiction this key was added to remove. Deriving it from
+  // the UA that was actually chosen keeps the pair coherent even though the UA
+  // itself is independent of the platform archetype.
+  fp.navigator_platform = fpPlatformForUserAgent(ua);
+
   return {
     id: `random-${Date.now()}`,
     name: `Random ${sw}x${sh} / ${tz.split('/')[1]}`,
     fingerprint: fp,
-    // Independent of the platform archetype above, by deliberate choice: the
-    // user asked for the UA to be drawn from its own pool rather than matched
-    // to p.id. The tradeoff is real and is surfaced in the UI: a profile can
-    // therefore carry a Mac screen with a Windows UA, which is a cross-group
-    // inconsistency. It is left visible on purpose instead of being papered
-    // over, so the operator can decide per profile.
-    userAgent: fpRandomUserAgent(),
+    userAgent: ua,
     createdAt: new Date().toISOString()
   };
 }

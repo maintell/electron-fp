@@ -168,13 +168,17 @@ explicitly so a deployment does not assume more protection than it has.
 | TLS / JA3 / JA4 | **no** | network-stack fingerprint; see `fingerprint/README.md` |
 
 For consistency, `navigator_platform` should agree with any UA override: a Mac
-UA wants `MacIntel`, Android wants `Linux armv8l`. The two are independent
-settings, so nothing enforces this — a mismatched pair is itself a signal.
+UA wants `MacIntel`, Android wants `Linux armv8l`. The two are **separate
+surfaces with nothing enforcing agreement**, so `fpPlatformForUserAgent()`
+derives the platform from the UA that was actually chosen — in the randomizer
+and when presets were generated. A mismatched pair is itself a signal, so it is
+derived rather than left to the operator.
 
-Note on the randomizer: the UA is drawn from its **own** pool, independent of the
-platform archetype, so a random profile can carry a Mac screen with a Windows
-UA. This is deliberate but it is a cross-group inconsistency — worth reviewing
-per profile rather than assuming the generator keeps them aligned.
+Note the randomizer deliberately draws its UA from an **independent** pool, not
+from the platform archetype, so a random profile can carry a Mac screen with a
+Windows UA. The platform follows the UA (so the pair never contradicts itself),
+but the screen/GPU does not — that cross-group inconsistency is intentional and
+is surfaced here rather than hidden.
 
 ## Testing
 

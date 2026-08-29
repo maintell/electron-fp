@@ -80,6 +80,42 @@ async function uaOf(view) {
       "ua=" + r5.ua.slice(0, 34) + " platform=" + r5.platform);
     check("no Electron token in the UA", !r5.ua.includes("Electron/"));
 
+    // 6. Every shipped preset must be internally consistent: a Mac UA with the
+    // host's real "Win32" is exactly the contradiction this key exists to
+    // remove, and profiles.json is edited by hand so it can drift.
+    const fs = require("fs");
+    const pathm = require("path");
+    const schema = require("./fp-schema.js");
+    const profiles = JSON.parse(fs.readFileSync(
+      pathm.join(__dirname, "profiles.json"), "utf8")).profiles;
+    let bad = [];
+    for (const prof of profiles) {
+      if (!prof.userAgent || !prof.fingerprint) continue;
+      const want = schema.fpPlatformForUserAgent(prof.userAgent);
+      if (prof.fingerprint.navigator_platform !== want) {
+        bad.push(prof.id + " (want " + want + ", got " +
+          JSON.stringify(prof.fingerprint.navigator_platform) + ")");
+      }
+    }
+    check("every preset's platform matches its UA", bad.length === 0, bad.join("; "));
+
+    // 7. The shipped macOS preset, applied for real, must not report Win32.
+    const mac = profiles.find(p => p.id === "macos-safari");
+    if (mac && mac.userAgent) {
+      const part7 = "plat-mac-" + Math.random().toString(36).slice(2);
+      require("electron").session.fromPartition(part7).setUserAgent(mac.userAgent);
+      const v7 = new BrowserView({
+        webPreferences: {
+          partition: part7, sandbox: false, fingerprint: mac.fingerprint
+        }
+      });
+      win.addBrowserView(v7);
+      const r7 = await uaOf(v7);
+      check("macos-safari preset reports MacIntel, not Win32",
+        r7.platform === "MacIntel" && r7.platform !== native.platform,
+        "platform=" + r7.platform);
+    }
+
     console.log("");
     console.log(fail === 0 ? "PASS: " + pass + " checks" : "FAIL: " + fail + " checks");
     app.exit(fail === 0 ? 0 : 1);

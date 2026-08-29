@@ -20,9 +20,10 @@ const fnSrc = src.slice(start, end);
 // (which is exactly what happened when the randomizer gained a UA: the test
 // silently produced zero checks instead of failing loudly).
 const mod = new Function(
-  "fpDefaultConfig", "FP_KEY_NAMES", "fpRandomUserAgent",
+  "fpDefaultConfig", "FP_KEY_NAMES", "fpRandomUserAgent", "fpPlatformForUserAgent",
   fnSrc + "; return generateRandomProfile;"
-)(schema.fpDefaultConfig, schema.FP_KEY_NAMES, schema.fpRandomUserAgent);
+)(schema.fpDefaultConfig, schema.FP_KEY_NAMES, schema.fpRandomUserAgent,
+  schema.fpPlatformForUserAgent);
 
 // Guard against the silent-zero-checks failure above: a ReferenceError thrown
 // here would otherwise abort before any check ran, and a run with 0 checks must
@@ -94,6 +95,7 @@ let gpuMismatch = 0, geoMismatch = 0, touchMismatch = 0, strengthBad = 0, levelB
 let featUnknown = 0, featDup = 0, featNoCore = 0, featSizeBad = 0;
 let limQuoted = 0, limParse = 0, limOver = 0, limUnder = 0;
 let ipBad = 0, ipInconsistent = 0, fontWhitelistSet = 0, fontCountBad = 0;
+let platformMismatch = 0, platformUnset = 0;
 const seenGroups = new Set();
 
 for (let i = 0; i < N; i++) {
@@ -193,6 +195,14 @@ for (let i = 0; i < N; i++) {
   const fonts = fp.fonts_blocklist ? fp.fonts_blocklist.split(",").filter(Boolean) : [];
   if (fonts.length < 1 || fonts.length > 3) fontCountBad++;
   for (const f of fonts) if (!f.trim()) fontCountBad++;
+
+  // UA and navigator.platform are separate surfaces with nothing enforcing
+  // agreement. A Mac UA paired with the host's real "Win32" is precisely the
+  // contradiction navigator_platform exists to remove, so the pair must agree.
+  // Checked against the UA that was actually chosen, not a fixed expectation.
+  const wantPlatform = schema.fpPlatformForUserAgent(prof.userAgent);
+  if (fp.navigator_platform !== wantPlatform) platformMismatch++;
+  if (wantPlatform === "") platformUnset++;
 }
 
 check("schema-complete over " + N + " profiles", bad.length === 0, bad.slice(0, 3).join("; "));
@@ -213,14 +223,20 @@ check("geo matches timezone", geoMismatch === 0, geoMismatch + " mismatches");
 check("touch points match form factor", touchMismatch === 0, touchMismatch + " mismatches");
 check("audio_data_strength in [0,1]", strengthBad === 0, strengthBad + " bad");
 check("battery_level in [0,1]", levelBad === 0, levelBad + " bad");
-check("randomizer exercises most groups", seenGroups.size >= 12, seenGroups.size + "/14 groups populated");
+check("navigator_platform agrees with the UA", platformMismatch === 0, platformMismatch + " mismatches");
+check("navigator_platform always set (never Win32 under a Mac UA)", platformUnset === 0, platformUnset + " unset");
+check("randomizer exercises most groups", seenGroups.size >= 12,
+  seenGroups.size + "/" + schema.FP_GROUP_IDS.length + " groups populated");
 
 const sample = mod();
 console.log("\nsample: " + sample.name);
-console.log("  active keys: " + schema.FP_KEY_NAMES.filter(k => schema.fpIsActive(k, sample.fingerprint[k])).length + "/56");
+console.log("  active keys: " + schema.FP_KEY_NAMES.filter(k => schema.fpIsActive(k, sample.fingerprint[k])).length + "/" + schema.FP_KEY_NAMES.length);
+console.log("  ua: " + String(sample.userAgent).slice(0, 70));
+console.log("  platform: " + sample.fingerprint.navigator_platform);
 console.log("  gpu: " + sample.fingerprint.webgl_vendor + " | " + sample.fingerprint.webgl_renderer);
 console.log("  tz:  " + sample.fingerprint.tz_id + " @ " + sample.fingerprint.geo_latitude + "," + sample.fingerprint.geo_longitude);
 
 console.log("");
-console.log(fail === 0 ? "PASS: randomizer emits coherent 56-key configs" : "FAIL: " + fail);
+console.log(fail === 0 ? "PASS: randomizer emits coherent " + schema.FP_KEY_NAMES.length + "-key configs"
+                       : "FAIL: " + fail);
 process.exit(fail === 0 ? 0 : 1);

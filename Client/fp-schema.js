@@ -276,6 +276,43 @@ function fpRandomUserAgent() {
 }
 
 /**
+ * navigator.platform values matching each preset's platform.
+ *
+ * These are the strings real browsers report, so the pair (UA, platform) reads
+ * as one coherent identity rather than two independent settings that happen to
+ * disagree. The kernel does NOT enforce this: navigator_platform and the UA are
+ * separate surfaces and nothing stops a mismatched pair, which is itself a
+ * detection signal. So it is derived here instead of left to the caller.
+ */
+const FP_PLATFORM_BY_ID = {
+  win: "Win32",
+  mac: "MacIntel",
+  linux: "Linux x86_64",
+  android: "Linux armv8l"
+};
+
+/**
+ * The navigator_platform value matching a UA string, or "" if unknown.
+ *
+ * Returns "" rather than guessing, because an empty value means "disabled" in
+ * the kernel and falls back to the host's real platform. Guessing wrong would
+ * be worse than not setting it.
+ */
+function fpPlatformForUserAgent(ua) {
+  if (typeof ua !== "string" || !ua) return "";
+  const preset = FP_UA_PRESETS.find(p => p.ua === ua);
+  if (preset) return FP_PLATFORM_BY_ID[preset.platform] || "";
+  // Not one of our presets (hand-entered, or imported from another client):
+  // infer from the UA text so a hand-typed Mac UA does not report Win32.
+  if (/Macintosh|Mac OS X/.test(ua)) return "MacIntel";
+  if (/iPhone|iPad/.test(ua)) return "iPhone";
+  if (/Android/.test(ua)) return "Linux armv8l";
+  if (/Windows/.test(ua)) return "Win32";
+  if (/X11|Linux/.test(ua)) return "Linux x86_64";
+  return "";
+}
+
+/**
  * Normalize a user-supplied UA. Anything non-string becomes "" (native), and
  * a whitespace-only string is treated as "no override" rather than being sent
  * as a literal blank UA, which would be an obviously broken header.
@@ -299,7 +336,9 @@ module.exports = {
   fpIsActive,
   // UA (client-level surface, not a kernel key)
   FP_UA_PRESETS,
+  FP_PLATFORM_BY_ID,
   fpRandomUserAgent,
   fpNormalizeUserAgent,
+  fpPlatformForUserAgent,
 };
 
