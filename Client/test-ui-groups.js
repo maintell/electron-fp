@@ -76,9 +76,16 @@ app.whenReady().then(async () => {
   console.log("render error   : " + out.err);
   console.log("console errors : " + (errs.length ? errs.join(" ;; ") : "none"));
 
-  const ok = out.keyCount === 56 && out.groupCount === 14 && out.sections === 14 &&
-             out.fields === 56 && !out.err && errs.length === 0;
-  console.log(ok ? "\nPASS: grouped UI renders 14 sections / 56 fields" : "\nFAIL");
+  // Counts come from the schema rather than being hardcoded: they went 56/14 ->
+  // 57/15 when navigator_platform was added, which silently broke this check.
+  const wantKeys = schema.FP_KEY_NAMES.length;
+  const wantGroups = schema.FP_GROUP_IDS.length;
+  const ok = out.keyCount === wantKeys && out.groupCount === wantGroups &&
+             out.sections === wantGroups && out.fields === wantKeys &&
+             !out.err && errs.length === 0;
+  console.log(ok ? "\nPASS: grouped UI renders " + wantGroups + " sections / " + wantKeys + " fields"
+                 : "\nFAIL (want " + wantGroups + " groups / " + wantKeys + " fields, got " +
+                   out.groupCount + " / " + out.fields + ")");
   win.close();
   app.exit(ok ? 0 : 1);
 });

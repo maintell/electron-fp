@@ -115,6 +115,14 @@ const FP_KEYS = {
   // --- Battery ---
   battery_charging: { group: "battery", kind: "bool", def: "" }, // "true" | "false"
   battery_level:    { group: "battery", kind: "str",  def: "" }, // "0.0" - "1.0"
+
+  // --- Navigator identity ---
+  // navigator.platform. It is NOT affected by Electron's
+  // session.setUserAgent(): overriding the UA leaves platform at "Win32",
+  // which contradicts the UA and is itself a detection signal. This kernel key
+  // is the only way to cover it. Should stay consistent with any UA override:
+  // a Mac UA wants "MacIntel", Android wants "Linux armv8l".
+  navigator_platform: { group: "navigator", kind: "str", def: "" },
 };
 // --- Functional groups -------------------------------------------------------
 // Each of the 56 kernel keys belongs to exactly ONE group. Groups drive the
@@ -135,6 +143,7 @@ const FP_GROUPS = [
   { id: "storage",  label: "Storage & Perf",   desc: "Quota, usage, timestamp precision" },
   { id: "fonts",    label: "Fonts",            desc: "Font family blocklist / whitelist" },
   { id: "battery",  label: "Battery",          desc: "Charging state and level" },
+  { id: "navigator", label: "Navigator ID",    desc: "navigator.platform (not covered by UA override)" },
 ];
 
 const FP_GROUP_IDS = FP_GROUPS.map(function (g) { return g.id; });

@@ -82,7 +82,11 @@ app.whenReady().then(async () => {
   ck("JSON -> field (gpu)", out.gpuField === "Apple", out.gpuField);
   ck("active key highlighted", out.hwActive === true);
   ck("unset key not highlighted", out.unsetActive === false);
-  ck("coverage summary updates", /3\/56/.test(out.summaryAfterJson), out.summaryAfterJson);
+  // Derived from the schema, not hardcoded: adding a kernel key (56 -> 57 when
+  // navigator_platform landed) silently broke this until it was made dynamic.
+  ck("coverage summary updates",
+    new RegExp("3/" + schema.FP_KEY_NAMES.length).test(out.summaryAfterJson),
+    out.summaryAfterJson);
   ck("unknown key surfaced", out.bogusWarning === true);
   ck("field -> JSON (int)", out.jsonAfterEdit === 2560, out.jsonAfterEdit);
   ck("clear removes key", out.keyRemovedOnClear === true);

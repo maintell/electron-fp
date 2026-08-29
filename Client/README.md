@@ -163,9 +163,13 @@ explicitly so a deployment does not assume more protection than it has.
 |---|---|---|
 | `navigator.userAgent` | yes | via `session.setUserAgent()` |
 | HTTP `User-Agent` header | yes | same call covers both |
-| `navigator.platform` | **no** | stays `Win32`. Unaffected by `setUserAgent()`; Electron exposes no setter. Needs a kernel key (`navigator_platform`), tracked separately |
+| `navigator.platform` | yes | kernel key `navigator_platform`. Defaults to disabled (`''`), so a profile opts in explicitly |
 | `Sec-CH-UA` client hints | **no** | would need to stay consistent with the UA |
 | TLS / JA3 / JA4 | **no** | network-stack fingerprint; see `fingerprint/README.md` |
+
+For consistency, `navigator_platform` should agree with any UA override: a Mac
+UA wants `MacIntel`, Android wants `Linux armv8l`. The two are independent
+settings, so nothing enforces this — a mismatched pair is itself a signal.
 
 Note on the randomizer: the UA is drawn from its **own** pool, independent of the
 platform archetype, so a random profile can carry a Mac screen with a Windows

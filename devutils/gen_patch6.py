@@ -894,6 +894,7 @@ EXPECTED_KEYS = [
     "webgpu_vendor", "webgpu_architecture", "webgpu_device", "webgpu_description",
     "webgpu_features", "webgpu_limits",
     "client_rects_seed",
+    "navigator_platform",
 ]
 joined_out = ''.join(out)
 missing = [k for k in EXPECTED_KEYS if k not in joined_out]

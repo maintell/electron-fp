@@ -106,9 +106,14 @@ async function probe(view, url) {
     // does not exist, so `!c` was always true and the check could never fail.
     // Instead, assert positively that a KERNEL key still works while a UA is
     // set, and that the UA is absent from the kernel's own key list.
+    // The UA itself must NOT be a kernel key: it is an Electron-level surface
+    // and nesting it in `fingerprint` would get it dropped by
+    // fpNormalizeConfig(). navigator_platform IS a kernel key by design (it is
+    // the only way to cover navigator.platform), so it is excluded here on
+    // purpose — do not add it back to this assertion.
     const { FP_KEY_NAMES } = require("./fp-schema.js");
-    check("schema exposes no UA key among the kernel keys",
-      !FP_KEY_NAMES.includes("userAgent") && !FP_KEY_NAMES.includes("navigator_platform"),
+    check("UA is not a kernel key (platform is, by design)",
+      !FP_KEY_NAMES.includes("userAgent") && FP_KEY_NAMES.includes("navigator_platform"),
       FP_KEY_NAMES.length + " kernel keys");
 
     const v5 = openView("ua-t5", UA_A);
