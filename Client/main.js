@@ -549,8 +549,102 @@ function generateRandomProfile() {
   fp.webgpu_architecture = gpu.arch;
   fp.webgpu_device = gpu.dev;
   fp.webgpu_description = gpu.r;
-  fp.webgpu_features = '';  // REPLACE semantics: leaving "" keeps native set
-  fp.webgpu_limits = '';    // MERGE semantics: leaving "" keeps native limits
+
+  // webgpu_features is REPLACE: the configured list becomes the adapter's
+  // entire feature set. The kernel drops any name outside the real
+  // GPUFeatureName enum, so an invented name buys nothing and is itself a
+  // detection signal. These are the names this adapter can actually expose.
+  const WEBGPU_FEATURE_NAMES = [
+    'bgra8unorm-storage', 'clip-distances', 'core-features-and-limits',
+    'depth-clip-control', 'depth32float-stencil8', 'dual-source-blending',
+    'float32-blendable', 'float32-filterable', 'indirect-first-instance',
+    'primitive-index', 'rg11b10ufloat-renderable', 'shader-f16',
+    'texture-component-swizzle', 'texture-compression-bc',
+    'texture-compression-bc-sliced-3d', 'texture-formats-tier1',
+    'texture-formats-tier2', 'timestamp-query'
+  ];
+
+  // webgpu_limits is MERGE, and is bounded on BOTH sides:
+  //   ceiling = the native adapter value. Over-reporting makes Dawn reject
+  //             device creation, which breaks WebGPU outright.
+  //   floor   = max(WebGPU spec default, native/2). A page that requests
+  //             nothing still gets the spec defaults, so dropping below them
+  //             breaks device creation too; the native/2 term keeps each
+  //             downgrade modest so pages asking for above-default limits
+  //             keep working.
+  // Values below are [specDefault, nativeCeiling]. Alignment fields
+  // (min*OffsetAlignment) are power-of-two invariants and are deliberately
+  // absent; keys whose default already equals native are omitted as no-ops.
+  const WEBGPU_LIMIT_RANGE = {
+    maxTextureDimension1D: [8192, 16384],
+    maxTextureDimension2D: [8192, 16384],
+    maxTextureArrayLayers: [256, 2048],
+    maxDynamicUniformBuffersPerPipelineLayout: [8, 10],
+    maxDynamicStorageBuffersPerPipelineLayout: [4, 8],
+    maxSampledTexturesPerShaderStage: [16, 48],
+    maxStorageBuffersPerShaderStage: [8, 16],
+    maxStorageTexturesPerShaderStage: [4, 8],
+    maxStorageBufferBindingSize: [134217728, 2147483644],
+    maxBufferSize: [268435456, 2147483648],
+    maxVertexAttributes: [16, 30],
+    maxInterStageShaderVariables: [16, 28],
+    maxColorAttachmentBytesPerSample: [32, 128],
+    maxComputeWorkgroupStorageSize: [16384, 32768],
+    maxComputeInvocationsPerWorkgroup: [256, 1024],
+    maxComputeWorkgroupSizeX: [256, 1024],
+    maxComputeWorkgroupSizeY: [256, 1024],
+    maxImmediateSize: [0, 64]
+  };
+
+  // Real adapter limits are almost always powers of two (or a power of two
+  // minus a small delta). Draw from those inside the window, plus the exact
+  // native value, so the result reads as hardware rather than as noise.
+  const plausibleLimit = (floor, ceil) => {
+    const cands = [];
+    for (let e = 0; e <= 34; e++) {
+      const v = Math.pow(2, e);
+      if (v >= floor && v <= ceil) cands.push(v);
+    }
+    if (cands.indexOf(ceil) === -1) cands.push(ceil);
+    return pick(cands);
+  };
+
+  // A random subset of the real names. 9..16 keeps it plausible: an adapter
+  // exposing every feature, or almost none, looks synthetic.
+  {
+    const pool = WEBGPU_FEATURE_NAMES.slice();
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = randInt(0, i);
+      const t = pool[i]; pool[i] = pool[j]; pool[j] = t;
+    }
+    const want = randInt(9, 16);
+    // Shuffle core-features-and-limits to the front first so forcing it in
+    // can never push the final count past |want|.
+    const ci = pool.indexOf('core-features-and-limits');
+    pool.splice(ci, 1);
+    pool.unshift('core-features-and-limits');
+    fp.webgpu_features = pool.slice(0, want).join(',');
+  }
+
+  // Vary a few limits, each landing inside its own window.
+  {
+    const pool = Object.keys(WEBGPU_LIMIT_RANGE);
+    const n = Math.min(randInt(3, 6), pool.length);
+    const chosen = [];
+    while (chosen.length < n) {
+      chosen.push(pool.splice(randInt(0, pool.length - 1), 1)[0]);
+    }
+    // Keys are deliberately UNQUOTED. FpConfigString() reads the value as a
+    // JSON string and terminates at the first closing quote, so a value like
+    // {"maxBindGroups":4} is truncated to "{" and every key is silently
+    // dropped. The kernel's brace-parser does not require the quotes, so
+    // {maxBindGroups:4} is the format that actually survives the round trip.
+    fp.webgpu_limits = '{' + chosen.map(function (k) {
+      const r = WEBGPU_LIMIT_RANGE[k];
+      return k + ':' +
+        plausibleLimit(Math.max(r[0], Math.ceil(r[1] / 2)), r[1]);
+    }).join(',') + '}';
+  }
 
   // --- Geolocation ---
   fp.geo_latitude = maybe(0.8, geo[0]);
@@ -579,10 +673,44 @@ function generateRandomProfile() {
   fp.do_not_track = pick(['1', '1', '0']);
 
   // --- Network ---
-  fp.net_effective_type = pick(['3g', '4g', '4g']);
-  fp.net_rtt_ms = randInt(20, 150);
-  fp.net_downlink_mbps = String(pick([2, 5, 10, 25, 50]));
-  fp.webrtc_ip = '';  // only set deliberately; a wrong IP is a hard signal
+  // net_* and webrtc_ip must tell ONE consistent story. A mobile radio type
+  // (3g/4g) must not be reported alongside a datacentre IP, and a residential
+  // IP must not claim a datacentre-grade downlink. So pick the network class
+  // first and let it drive rtt, downlink and the IP block together.
+  const netClass = pick(['4g', '4g', '4g', '3g', 'broadband', 'broadband']);
+
+  // Ranges are deliberately wide and overlapping: a fingerprint test comparing
+  // rtt against the class sees an ordinary value, not a tell-tale exact match.
+  let rttRange, downPool, ipPool;
+  if (netClass === '3g') {
+    fp.net_effective_type = '3g';
+    rttRange = [120, 400];
+    downPool = [0.5, 1, 2, 3];
+    // Mobile carriers: RFC 6598 shared space and common carrier NAT pools
+    // are what a real phone handset is seen as on a 3g radio.
+    ipPool = ['100.64', '100.96', '100.100', '10.200'];
+  } else if (netClass === '4g') {
+    fp.net_effective_type = '4g';
+    rttRange = [40, 180];
+    downPool = [5, 10, 20, 30];
+    ipPool = ['100.64', '100.96', '100.100', '10.200'];
+  } else {
+    fp.net_effective_type = '4g';  // navigator.connection has no "broadband"
+    rttRange = [10, 60];
+    downPool = [50, 100, 200, 300, 500];
+    // Residential-looking broadband. These sit inside documented DOCSIS/DSL
+    // ISP ranges. They are NOT validated as reachable: the goal is a value
+    // consistent with the rest of the profile, not a live endpoint.
+    ipPool = ['24.90', '67.160', '71.192', '73.44', '98.192', '174.64'];
+  }
+
+  fp.net_rtt_ms = randInt(rttRange[0], rttRange[1]);
+  fp.net_downlink_mbps = String(pick(downPool));
+
+  // webrtc_ip overrides the ICE host candidate. It must look like it belongs
+  // to the network class above, so draw from the chosen /16 block and avoid
+  // the reserved ends (.0 network, .255 broadcast) plus the router's usual .1.
+  fp.webrtc_ip = pick(ipPool) + '.' + randInt(1, 254) + '.' + randInt(2, 254);
 
   // --- Storage & perf ---
   fp.permissions_status = pick(['granted', 'prompt']);
@@ -591,7 +719,28 @@ function generateRandomProfile() {
   fp.perf_now_precision_ms = pick([0, 0, 100, 200]);
 
   // --- Fonts ---
-  fp.fonts_blocklist = '';
+  // Hide a few fonts, but with restraint. The kernel hides a family from
+  // BOTH FontCache and FontFaceSet.check(), so every name here vanishes from
+  // the usual enumeration probes. Hiding many - or hiding fonts that the
+  // platform always has - is itself a signal, so this picks 1..3 obscure
+  // faces and keeps them consistent with the platform archetype.
+  {
+    const obscureByPlatform = {
+      win: ['Estrangelo Edessa', 'MingLiU-ExtB', 'MS Outlook', 'Marlett'],
+      mac: ['Kohinoor Telugu', 'Luminari', 'Noto Nastaliq Urdu', 'Zapfino'],
+      linux: ['URW Chancery L', 'Z003', 'Kinnari', 'Loma'],
+      android: ['Noto Naskh Arabic UI', 'Noto Serif CJK SC', 'Droid Sans Hebrew']
+    };
+    const pool = (obscureByPlatform[p.id] || []).slice();
+    const n = Math.min(pool.length, randInt(1, 3));
+    const chosen = [];
+    while (chosen.length < n) {
+      chosen.push(pool.splice(randInt(0, pool.length - 1), 1)[0]);
+    }
+    fp.fonts_blocklist = chosen.join(',');
+  }
+  // Whitelist wins over blocklist in the kernel, so setting both would make
+  // fonts_blocklist dead weight. Leave whitelist empty and let blocklist act.
   fp.fonts_whitelist = '';
 
   // --- Battery ---
