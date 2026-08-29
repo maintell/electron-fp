@@ -1,8 +1,13 @@
 # 指纹补丁拆分设计
 
 日期：2026-08-29
-状态：待用户审阅
+状态：**已完成**（实施于 `68f4a1461b`；设计要点见下，实际数据以实施结果为准）
 范围：`electron-fp/fingerprint/patches/` 与 `fingerprint/scripts/`
+
+> **实施结果**：拆分完成并全部验证通过。最终为 36 文件 / +1239 行（比设计预估多，
+> 因为 `20-blink-modules` 在本轮同时补上了原本缺失的 webgpu_features/limits 实现）。
+> `apply.py` / `check.py` 均按设计改造，另新增 `split_patch.js` 与 `revert_webrtc.js`。
+> 验证：拆分后补丁按序施加到还原树上，36/36 文件与工作树逐字节一致。
 
 ## 1. 目标与动机
 
