@@ -245,6 +245,33 @@ def main():
                 if "fingerprint" not in readme.lower():
                     failures.append("fingerprint/README.md does not mention fingerprint isolation")
 
+        # 8d. BOUNDARY: network-stack files must not enter the patch set.
+        #
+        # TLS/JA3/JA4 are NOT implemented and cannot be reached from here: the
+        # only config entry point (fp_config_helpers.h) lives under blink/, so
+        # net/ and BoringSSL cannot read it. Verified by live HTTPS probe: the
+        # config has zero effect on JA4.
+        #
+        # This is a boundary, not a bug - but it IS a documented one, and the
+        # docs would silently go stale if someone patched net/ without also
+        # updating fingerprint/README.md. Fail loudly so the doc must follow.
+        # If you are deliberately implementing network-layer fingerprinting,
+        # update the README section and then extend the allowlist below.
+        NET_STACK_PREFIXES = (
+            "net/",
+            "third_party/boringssl/",
+            "third_party/boringssl/src/",
+        )
+        net_files = [f for f in all_files
+                     if f.startswith(NET_STACK_PREFIXES)]
+        if net_files:
+            failures.append(
+                "patch set now touches the network stack (TLS/JA3/JA4 "
+                "territory): %s -- fingerprint/README.md section "
+                "'已知未覆盖：网络层指纹' must be updated, and the "
+                "NET_STACK_PREFIXES allowlist in check.py extended"
+                % net_files)
+
     if failures:
         print("PATCH CHECK FAILED:")
         for f in failures:

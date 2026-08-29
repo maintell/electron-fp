@@ -99,3 +99,60 @@ python3 fingerprint/scripts/apply.py --dry-run && echo "dry-run ok (or src missi
 
 允许项：
 - `shell/common/options_switches.h`、`shell/browser/web_contents_preferences.cc`、`shell/browser/electron_browser_client.cc`、`shell/browser/api/electron_api_*.cc`、`lib/browser/api/*.ts`、`typings/internal-electron.d.ts` 的最小粘合（见 `docs/superpowers/specs/2026-08-26-electron-fingerprint-design.md §4.2`）
+
+## 已知未覆盖：网络层指纹（TLS/JA3/JA4）与 User-Agent
+
+**56 个 key 全部位于渲染层（Blink）与 WebRTC，不含任何网络栈指纹。** 这不是遗漏待补，而是当前架构的边界；此处记录以免被误认为已实现。
+
+### 事实（实测确认，非推断）
+
+- 补丁触及 36 个文件：`third_party/blink` 32 个 + `third_party/webrtc` 4 个。**无 `net/`、`ssl/`、`boringssl/` 文件。**
+- 全文关键词命中数为 0：`boringssl`、`SSL_`、`cipher`、`client_hello`、`alpn`、`grease`、`ja3`、`ja4`、`quic`、`http2`、`tls`。
+- 唯一配置入口 `fp_config_helpers.h` 位于 `third_party/blink/renderer/core/frame/`，只能被 Blink 包含；TLS 指纹由网络栈产生，该头文件进不去。
+
+实测（真实 HTTPS 请求，由对端读取 ClientHello）：
+
+```
+空配置   x4 → JA4 = t13d1517h2_8daaf6152771_a87ad97598a9
+明确配置 x4 → JA4 = t13d1517h2_8daaf6152771_a87ad97598a9
+不同 JA4 数量：1   ⇒ fingerprint 配置对 TLS 指纹零影响
+```
+
+测法说明：**首次连接必须丢弃**。Chromium 按 RFC 8701 插入 GREASE 随机保留值，首个 ClientHello 的 JA4 为 `t13d1516h2_...`，之后稳定为 `t13d1517h2_...`。若不预热，会把 GREASE 噪声误读成"配置生效了"。
+
+### 为什么不能套用现有机制
+
+配置优先级见 `fp_config_helpers.h`：
+
+```
+1) --fingerprint-config  (base64 JSON, Electron per-renderer)
+2) FP_CONFIG_DATA        (env)
+3) FP_CONFIG             (file)
+4) FP_<KEY>              (env)
+```
+
+第 1 条是 **per-renderer** 的，这是"每个标签页独立指纹"的实现基础。而 TLS 指纹产生于网络栈，**跨标签页共享**。因此网络层指纹不只是"还没做"，还额外要求解决一个现有架构未覆盖的问题：如何在共享网络栈上做 per-tab 差异化。环境变量（第 2/4 条）网络栈能读到，但那是进程级全局的，做不出 per-tab 隔离。
+
+### 附带泄露：User-Agent（比 TLS 更急）
+
+实测 UA：
+
+```
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)
+Chrome/154.0.8015.0 Electron/45.0.0-nightly.20260825 Safari/537.36
+```
+
+- `Electron/45.0.0-nightly.20260825` **直接暴露 Electron 身份**。
+- schema 中 **UA / platform / appVersion 类 key 为 0 个**（注意：`webgl_vendor`、`webgpu_vendor` 是 GPU 厂商名，与 UA 无关，不要误认为 UA 已可控）。
+- 后果：`profiles.json` 的 `macOS / Safari-like` 预设只改了 GPU 与屏幕（`webgl_vendor: Apple`、屏幕 `2560x1600`），UA 仍报 `Windows NT 10.0 ... Electron/45.0.0`。**声称 macOS/Safari 却在网络层报 Windows + Electron，该组合本身即是强检测信号。**
+
+### 可选路径与代价
+
+| 方案 | 解决什么 | 代价 |
+|---|---|---|
+| A. 补 UA 覆盖 | 消除 `Electron/` 暴露与预设自相矛盾 | 小。Electron 原生 `session.setUserAgent()`，无需改内核 |
+| B. UA + platform + Sec-CH-UA | 让预设名副其实 | 中。需同步 `navigator.platform` 与 Client Hints，否则仍矛盾 |
+| C. TLS/JA3 定制 | 真正的网络层指纹 | 大。需改 BoringSSL 或拦截 ClientHello 构造；per-tab 隔离需另设计；Chromium 升级合并风险高 |
+| D. 明确不实现 | — | 在本文标注边界，避免误用 |
+
+建议先做 A：成本低，且立刻消除最扎眼的泄露与预设矛盾。C 需先决策：接受全局统一 TLS，还是投入改造网络栈。
