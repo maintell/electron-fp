@@ -14,9 +14,31 @@ import re
 import sys
 
 REPO = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-PATCH = os.path.join(REPO, "fingerprint", "patches", "fp-fingerprint.patch")
+PATCH_DIR = os.path.join(REPO, "fingerprint", "patches")
+PATCH = os.path.join(PATCH_DIR, "fp-fingerprint.patch")
 HELPERS = os.path.join(REPO, "fingerprint", "helpers", "fp_config_helpers.h")
 README = os.path.join(REPO, "fingerprint", "README.md")
+
+# The patch set is split by runtime subsystem so a Chromium upgrade only needs
+# the one subsystem re-anchored. Checks that used to run against the single
+# monolith now run against the SET: per-file checks apply to each patch, and
+# whole-set checks (56-key coverage, no duplicate file ownership) run across
+# all of them. Falls back to the monolith if no split patches exist yet.
+SPLIT_NAMES = ["00-core", "10-blink-core", "20-blink-modules", "30-webrtc"]
+
+
+def discover_patches():
+    """Return [(label, path)] for the patch set, split first then monolith."""
+    found = []
+    for n in SPLIT_NAMES:
+        p = os.path.join(PATCH_DIR, n + ".patch")
+        if os.path.exists(p):
+            found.append((n, p))
+    if found:
+        return found, "split"
+    if os.path.exists(PATCH):
+        return [("fp-fingerprint", PATCH)], "monolith"
+    return [], "none"
 
 EXPECTED_KEYS = [
     "hardware_concurrency", "device_memory", "max_touch_points",
@@ -55,9 +77,12 @@ def main():
 
     failures = []
 
-    # 1. patch exists (and helpers/README for isolation)
-    if not os.path.exists(PATCH):
-        failures.append("patch file missing: fingerprint/patches/fp-fingerprint.patch")
+    # 1. patch set exists (and helpers/README for isolation)
+    patches, mode = discover_patches()
+    if not patches:
+        failures.append(
+            "no patches found in fingerprint/patches/ "
+            f"(expected {', '.join(SPLIT_NAMES)} or fp-fingerprint.patch)")
     if not os.path.exists(HELPERS):
         failures.append("helpers missing: fingerprint/helpers/fp_config_helpers.h")
     if not os.path.exists(README):
@@ -89,12 +114,14 @@ def main():
             pass
 
     if args.helpers_only:
-        # helpers-only minimal gate: just keys completeness in helpers/patch if present
-        if os.path.exists(PATCH):
-            p = io.open(PATCH, encoding="utf-8", errors="replace").read()
-            missing = [k for k in EXPECTED_KEYS if k not in p]
+        # helpers-only minimal gate: 56-key completeness across the whole SET.
+        # A key may live in any one patch, so union them before checking.
+        if patches:
+            joined = "".join(io.open(p, encoding="utf-8", errors="replace").read()
+                             for _, p in patches)
+            missing = [k for k in EXPECTED_KEYS if k not in joined]
             if missing:
-                failures.append(f"missing config keys in patch: {missing}")
+                failures.append(f"missing config keys in patch set: {missing}")
         if os.path.exists(HELPERS):
             h = io.open(HELPERS, encoding="utf-8", errors="replace").read()
             # helpers should contain FpConfigContent and 56-key refs or at least switch priority
@@ -108,45 +135,75 @@ def main():
         print(f"PATCH CHECK PASSED (helpers-only): {len(EXPECTED_KEYS)} keys ok")
         return 0
 
-    if os.path.exists(PATCH):
-        p = io.open(PATCH, encoding="utf-8", errors="replace").read()
+    if patches:
+        joined = "".join(io.open(p, encoding="utf-8", errors="replace").read()
+                         for _, p in patches)
+        all_files = []
+        total_hunks = 0
 
-        # 3. header guide
-        if "MERGE/UPGRADE GUIDE" not in p:
-            failures.append("header MERGE/UPGRADE GUIDE missing")
+        for label, ppath in patches:
+            p = io.open(ppath, encoding="utf-8", errors="replace").read()
 
-        # 4. per-file doc blocks vs file segments
-        segs = re.split(r"(?m)^--- a/", p)
-        files = [s.split("\n")[0].strip() for s in segs[1:]]
-        doc_count = len(re.findall(r"(?m)^# --- ", p))
-        if len(files) != doc_count:
-            failures.append(f"doc/segment mismatch: {doc_count} doc blocks vs {len(files)} file segments")
+            # 3. upgrade guide / purpose header in every patch
+            if "MERGE/UPGRADE GUIDE" not in p and "Apply in filename order" not in p:
+                failures.append(f"{label}: missing upgrade/order header")
 
-        # 5. no empty segments
-        for seg in segs[1:]:
-            has_plus = re.search(r"(?m)^\+", seg) is not None
-            has_minus = re.search(r"(?m)^-", seg) is not None
-            if not has_plus and not has_minus:
-                first = seg.split("\n")[0].strip()
-                failures.append(f"empty segment: {first[:60]}")
-                break
+            # 4. per-file doc blocks vs file segments
+            segs = re.split(r"(?m)^--- a/", p)
+            files = [s.split("\n")[0].strip() for s in segs[1:]]
+            all_files.extend(files)
+            doc_count = len(re.findall(r"(?m)^# --- ", p))
+            # 00-core creates fp_config_helpers.h via a 'diff --git' new-file
+            # header, so it has no '--- a/' segment of its own.
+            is_newfile_only = p.count("diff --git ") > 0 and not files
+            if not is_newfile_only and len(files) != doc_count:
+                failures.append(
+                    f"{label}: doc/segment mismatch: {doc_count} doc blocks "
+                    f"vs {len(files)} file segments")
 
-        # 6. completeness: all 56 keys present
-        missing = [k for k in EXPECTED_KEYS if k not in p]
-        if missing:
-            failures.append(f"missing config keys in patch: {missing}")
+            # 5. no empty segments
+            for seg in segs[1:]:
+                has_plus = re.search(r"(?m)^\+", seg) is not None
+                has_minus = re.search(r"(?m)^-", seg) is not None
+                if not has_plus and not has_minus:
+                    first = seg.split("\n")[0].strip()
+                    failures.append(f"{label}: empty segment: {first[:60]}")
+                    break
 
-        # 7. debug residue
-        for pat in DEBUG_PATTERNS:
-            if re.search(pat, p):
-                failures.append(f"debug residue pattern found: {pat}")
+            # 6. completeness across the SET (a key may live in any patch)
+            missing = [k for k in EXPECTED_KEYS if k not in joined]
+            if missing:
+                failures.append(f"missing config keys in patch set: {missing}")
 
-        # 8. hunks present and well-formed
-        hunks = len(re.findall(r"(?m)^@@ ", p))
-        if hunks == 0:
-            failures.append("no hunks in patch")
-        if p.count("\n--- a/") != p.count("\n+++ b/"):
-            failures.append("mismatched --- a/ vs +++ b/ header counts")
+            # 7. debug residue
+            for pat in DEBUG_PATTERNS:
+                if re.search(pat, p):
+                    failures.append(f"{label}: debug residue pattern found: {pat}")
+
+            # 8. hunks present and well-formed
+            hunks = len(re.findall(r"(?m)^@@ ", p))
+            total_hunks += hunks
+            if hunks == 0:
+                failures.append(f"{label}: no hunks in patch")
+            # A new-file diff uses "--- /dev/null" rather than "--- a/", so
+            # count both source spellings before comparing against "+++ b/".
+            n_src = p.count("\n--- a/") + p.count("\n--- /dev/null")
+            n_dst = p.count("\n+++ b/")
+            if n_src != n_dst:
+                failures.append(
+                    f"{label}: mismatched source/target header counts "
+                    f"({n_src} vs {n_dst})")
+
+        # 8a. no file is owned by two patches (a split must partition cleanly)
+        seen = {}
+        for f in all_files:
+            seen[f] = seen.get(f, 0) + 1
+        dupes = [f for f, n in seen.items() if n > 1]
+        if dupes:
+            failures.append(f"file(s) appear in more than one patch: {dupes}")
+
+        if total_hunks == 0:
+            failures.append("no hunks in patch set")
 
         # 8b. INTEGRATION sync: every key must be documented if INTEGRATION.md exists
         integ_candidates = [
@@ -174,7 +231,9 @@ def main():
         print("Fix before committing (--no-verify only for emergencies).")
         return 1
 
-    print(f"PATCH CHECK PASSED: {len(EXPECTED_KEYS)} keys, hunks ok, docs ok, no residue")
+    print(f"PATCH CHECK PASSED: {mode} set ({len(patches)} file(s), "
+          f"{total_hunks} hunks, {len(all_files)} targets), "
+          f"{len(EXPECTED_KEYS)} keys, docs ok, no residue")
     return 0
 
 

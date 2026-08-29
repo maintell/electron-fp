@@ -34,10 +34,14 @@ const PROBE = `(async () => {
   r.tz_id = Intl.DateTimeFormat().resolvedOptions().timeZone;
   r.prefers_color_scheme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   try {
-    const c = document.createElement('canvas'); c.width = 100; c.height = 100;
-    const x = c.getContext('2d');
-    if (x) { x.font = '20px Arial'; r.measure_text = x.measureText('fp-test').width; }
-    r.canvas_noise = c.toDataURL().length;
+      const c = document.createElement('canvas'); c.width = 100; c.height = 100;
+      const x = c.getContext('2d');
+      if (x) { x.font = '20px Arial'; r.measure_text = x.measureText('fp-test').width; }
+      // Draw actual pixels before hashing the export. A blank canvas is fully
+      // transparent, so noise over identical pixels yields a byte-identical
+      // PNG and the two profiles compare equal even with different seeds.
+      if (x) { x.fillStyle = '#3366cc'; x.fillRect(10, 10, 60, 60); }
+      r.canvas_noise = c.toDataURL().length;
   } catch(e) {}
   return r;
 })()`;

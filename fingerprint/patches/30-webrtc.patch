@@ -1,0 +1,332 @@
+# ============================================================================
+# 30-webrtc.patch - WebRTC: custom IP override (webrtc is a separate repo, no //base deps).
+#
+# Part of the fp-fingerprint patch set. Apply in filename order:
+#   00-core.patch -> 10-blink-core.patch -> 20-blink-modules.patch -> 30-webrtc.patch
+#
+# fp_config_helpers.h (00-core) is included by 32 of 36 files, so 00-core
+# MUST be applied first. Any hunk mismatch aborts loudly; nothing is
+# silently skipped.
+#
+# Regenerate with fingerprint/scripts/split_patch.js after adapting hunks.
+# ============================================================================
+
+# fp-fingerprint.patch - fingerprint browser patches
+#
+# PURPOSE: controllable fingerprint spoofing for a multi-language
+# automation browser. Every behavior is driven by FP_CONFIG (JSON via
+# FP_CONFIG_DATA env or FP_CONFIG file, plus FP_<KEY> env fallbacks),
+# see fp_config_helpers.h (OWN FILE - never conflicts on upgrade).
+# With no config, the browser behaves 100% stock (zero intervention).
+#
+# MERGE/UPGRADE GUIDE (new Chromium versions):
+#   - Applied with patch.exe (patches/series). Any hunk mismatch aborts
+#     loudly - nothing is silently skipped.
+#   - After adapting hunks, regenerate with gen_patch6.py: it rewrites
+#     this documentation + per-file docs from the source of truth and
+#     runs a completeness check (all 54 known config keys must be
+#     present in the patch) - missing keys abort generation.
+#   - Risk legend per file below: LOW = stable getter anchors; MEDIUM =
+#     occasionally refactored modules; HIGH = frequently changing
+#     internals (WebGL/Canvas/WebRTC) - expect manual hunk adaptation.
+#   - After merging, run the CDP smoke/regression suite (verifies
+#     behavior, not just compilation).
+# ============================================================================#
+# --- third_party/webrtc/rtc_base/network.cc ---
+# RANGE: NetworkManager::GetCustomWebRtcIp() + helpers (config read).
+# PURPOSE: custom WebRTC IP override source (webrtc_ip).
+# CONFIG: webrtc_ip (JSON or FP_WEBRTC_IP env).
+# MERGE: HIGH risk - WebRTC is a separate repo; network.cc refactors
+# frequently. Re-anchor on NetworkManager class methods.
+--- a/third_party/webrtc/rtc_base/network.cc
++++ b/third_party/webrtc/rtc_base/network.cc
+@@ -14,6 +14,8 @@
+ #include <cerrno>
+ #include <cstdint>
+ #include <cstring>
++#include <cstdio>
++#include <cstdlib>
+ #include <map>
+ #include <memory>
+ #include <span>
+@@ -617,6 +619,143 @@
+   RTC_LOG(LS_INFO) << "Network change was observed";
+   UpdateNetworksOnce();
+ }
++
++// ---- fp: custom WebRTC IP ----
++std::string FpTrimWs(const std::string& s) {
++  std::string r = s;
++  while (!r.empty() && (r.back() == ' ' || r.back() == '\t' ||
++                        r.back() == '\r' || r.back() == '\n')) {
++    r.pop_back();
++  }
++  return r;
++}
++
++// Read a string value for |key| from JSON content.
++std::string ReadConfigValue(const std::string& content, const char* key) {
++  std::string needle = "\"";
++  needle += key;
++  needle += "\"";
++  size_t pos = content.find(needle);
++  if (pos == std::string::npos) {
++    return "";
++  }
++  size_t colon = content.find(':', pos);
++  if (colon == std::string::npos) {
++    return "";
++  }
++  size_t q1 = content.find('"', colon);
++  if (q1 == std::string::npos) {
++    return "";
++  }
++  size_t q2 = content.find('"', q1 + 1);
++  if (q2 == std::string::npos) {
++    return "";
++  }
++  return content.substr(q1 + 1, q2 - q1 - 1);
++}
++
++// fp: embedder-supplied override, set via SetCustomWebRtcIpOverride().
++// Deliberately stored outside the resolved/cached pair below: an embedder may
++// inject the value AFTER the first candidate has already been generated (Blink
++// reads it when the network list is built), so the override must always be
++// consultable and must invalidate any previously cached env-derived result.
++namespace {
++IPAddress& CustomWebRtcIpOverrideSlot() {
++  static IPAddress* slot = new IPAddress();
++  return *slot;
++}
++}  // namespace
++
++void SetCustomWebRtcIpOverride(const IPAddress& ip) {
++  IPAddress& slot = CustomWebRtcIpOverrideSlot();
++  if (slot == ip) {
++    return;
++  }
++  slot = ip;
++  // A new override supersedes anything resolved from the environment.
++  RTC_LOG(LS_INFO) << "custom WebRTC IP override "
++                   << (ip.IsNil() ? "cleared" : ("set to " + ip.ToString()));
++}
++
++IPAddress GetCustomWebRtcIp() {
++  // 0) Embedder override (e.g. --fingerprint-config via Blink) — highest
++  //    priority, checked before the one-shot env cache.
++  const IPAddress& override_ip = CustomWebRtcIpOverrideSlot();
++  if (!override_ip.IsNil()) {
++    return override_ip;
++  }
++
++  static IPAddress cached;
++  static bool resolved = false;
++  if (resolved) {
++    return cached;
++  }
++  const char* data = getenv("FP_CONFIG_DATA");
++  if (data && *data) {
++    std::string ip = ReadConfigValue(std::string(data), "webrtc_ip");
++    IPAddress addr;
++    if (!ip.empty() && IPFromString(ip, &addr)) {
++      resolved = true;
++      cached = addr;
++      return cached;
++    }
++  }
++  const char* config = getenv("FP_CONFIG");
++  if (config) {
++    std::string path = FpTrimWs(config);
++    FILE* f = fopen(path.c_str(), "rb");
++    if (f) {
++      std::string content;
++      char buf[4096];
++      size_t n;
++      while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
++        content.append(buf, n);
++      }
++      fclose(f);
++      std::string ip = ReadConfigValue(content, "webrtc_ip");
++      IPAddress addr;
++      if (!ip.empty() && IPFromString(ip, &addr)) {
++        resolved = true;
++        cached = addr;
++        return cached;
++      }
++    }
++  }
++  const char* ip = getenv("FP_WEBRTC_IP");
++  if (ip) {
++    std::string ipstr = FpTrimWs(ip);
++    in_addr a4;
++    if (inet_pton(AF_INET, ipstr, &a4) == 1) {
++      resolved = true;
++      cached = IPAddress(a4);
++      return cached;
++    }
++    in6_addr a6;
++    if (inet_pton(AF_INET6, ipstr, &a6) == 1) {
++      resolved = true;
++      cached = IPAddress(a6);
++      return cached;
++    }
++    RTC_LOG(LS_ERROR) << "custom webrtc ip parse failed: " << ipstr;
++  }
++  resolved = true;
++  cached = IPAddress();
++  return cached;
++}
++
++void ApplyCustomWebRtcIp(std::vector<std::unique_ptr<Network>>& list) {
++  IPAddress custom = GetCustomWebRtcIp();
++  if (custom.IsNil()) {
++    return;
++  }
++  RTC_LOG(LS_INFO) << "Applying custom WebRTC IP: " << custom.ToString();
++  for (auto& network : list) {
++    network->ClearIPs();
++    network->AddIP(custom);
++    network->set_mdns_responder_provider(nullptr);
++  }
++}
++
+ #if defined(WEBRTC_POSIX)
+ NetworkMonitorInterface::InterfaceInfo BasicNetworkManager::GetInterfaceInfo(
+     struct ifaddrs* cursor) const {
+@@ -1102,6 +1241,8 @@
+   if (!CreateNetworks(false, &list)) {
+     NotifyError();
+   } else {
++    // fp: override host IPs before merging.
++    ApplyCustomWebRtcIp(list);
+     bool changed;
+     MergeNetworkList(std::move(list), &changed);
+     set_default_local_addresses(QueryDefaultLocalAddress(AF_INET),
+
+# --- third_party/webrtc/rtc_base/network.h ---
+# RANGE: NetworkManager interface (GetCustomWebRtcIp exposure).
+# PURPOSE: declare custom IP hook used by network.cc.
+# MERGE: HIGH risk (WebRTC), keep in sync with network.cc changes.
+--- a/third_party/webrtc/rtc_base/network.h
++++ b/third_party/webrtc/rtc_base/network.h
+@@ -469,7 +469,18 @@
+   friend class NetworkManager;
+ };
+ 
++// fp: override host candidate IPs (config/env driven).
++IPAddress GetCustomWebRtcIp();
++void ApplyCustomWebRtcIp(std::vector<std::unique_ptr<Network>>& list);
+ 
++// fp: inject a custom IP from an embedder that owns the configuration source
++// (e.g. Blink reading the --fingerprint-config switch). webrtc is a standalone
++// component with no //base dependency, so it cannot read the switch itself;
++// the embedder pushes the resolved value in here instead. Takes priority over
++// the FP_* environment-variable sources consulted by GetCustomWebRtcIp().
++// Passing a nil IPAddress clears the override.
++void SetCustomWebRtcIpOverride(const IPAddress& ip);
++
+ // Base class for NetworkManager implementations.
+ class RTC_EXPORT NetworkManagerBase : public NetworkManager {
+  public:
+
+# --- third_party/blink/renderer/platform/p2p/ipc_network_manager.cc ---
+# RANGE: network IP list rewrite (IpcNetworkManager).
+# PURPOSE: replace host network IPs with configured webrtc_ip so
+# local-IP leakage via ICE/network enumeration is closed.
+# CONFIG: webrtc_ip.
+# MERGE: MEDIUM - anchor on IpcNetworkManager::GetNetworks.
+diff --git a/third_party/blink/renderer/platform/p2p/ipc_network_manager.cc b/third_party/blink/renderer/platform/p2p/ipc_network_manager.cc
+index ab727b214af1e..cc342d1ae6a91 100644
+--- a/third_party/blink/renderer/platform/p2p/ipc_network_manager.cc
++++ b/third_party/blink/renderer/platform/p2p/ipc_network_manager.cc
+@@ -19,6 +19,8 @@
+ #include "net/base/network_interfaces.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
++#include "third_party/webrtc/rtc_base/network.h"
+ #include "third_party/webrtc/rtc_base/socket_address.h"
+ 
+ namespace blink {
+@@ -215,6 +217,20 @@ void IpcNetworkManager::OnNetworkListChanged(
+   }
+ 
+   bool changed = false;
++  // fp: the fingerprint config reaches this renderer through the
++  // --fingerprint-config switch, which only Blink can read (webrtc is a
++  // standalone component with no //base dependency). Resolve "webrtc_ip" here
++  // via FpConfigString() — it consults the switch first, then FP_CONFIG_DATA /
++  // FP_CONFIG — and push it into webrtc before candidates are built, so host
++  // and srflx candidates report the spoofed address.
++  {
++    std::string fp_ip = blink::FpConfigString("webrtc_ip");
++    webrtc::IPAddress parsed;
++    if (!fp_ip.empty() && webrtc::IPFromString(fp_ip, &parsed)) {
++      webrtc::SetCustomWebRtcIpOverride(parsed);
++    }
++  }
++  webrtc::ApplyCustomWebRtcIp(networks);
+   MergeNetworkList(std::move(networks), &changed);
+   if (changed)
+     NotifyNetworksChanged();
+
+# --- third_party/webrtc/p2p/base/port.cc ---
+# RANGE: candidate local address override (Port::GetLocalAddress).
+# PURPOSE: host candidate IP spoofing (webrtc_ip).
+# MERGE: HIGH risk (WebRTC); anchor on Port class address getters.
+--- a/third_party/webrtc/p2p/base/port.cc
++++ b/third_party/webrtc/p2p/base/port.cc
+@@ -222,6 +222,13 @@
+   // thing for the Candidate class to know the base address and keep it const.
+   Candidate c(component_, protocol, address, 0U, username_fragment(), password_,
+               type, generation_, "", network_->id(), network_cost_);
++  // fp: spoof host candidate address.
++  {
++    IPAddress custom_ip = GetCustomWebRtcIp();
++    if (!custom_ip.IsNil() && c.is_local()) {
++      c.set_address(SocketAddress(custom_ip, address.port()));
++    }
++  }
+   // Set the relay protocol before computing the foundation field.
+   c.set_relay_protocol(relay_protocol);
+   c.ComputeFoundation(base_address, ice_tiebreaker_);
+@@ -251,6 +258,10 @@
+ }
+ 
+ bool Port::MaybeObfuscateAddress(const Candidate& c, bool is_final) {
++  // fp: never obfuscate when a custom IP is active.
++  if (!GetCustomWebRtcIp().IsNil()) {
++    return false;
++  }
+   // TODO(bugs.webrtc.org/9723): Use a config to control the feature of IP
+   // handling with mDNS.
+   if (network_->GetMdnsResponder() == nullptr) {
+
+# --- third_party/webrtc/p2p/base/stun_port.cc ---
+# RANGE: srflx candidate IP override (StunPort).
+# PURPOSE: server-reflexive candidate IP spoofing (webrtc_ip).
+# MERGE: HIGH risk (WebRTC); anchor on StunPort::PrepareAddress.
+--- a/third_party/webrtc/p2p/base/stun_port.cc
++++ b/third_party/webrtc/p2p/base/stun_port.cc
+@@ -41,6 +41,7 @@
+ #include "rtc_base/ip_address.h"
+ #include "rtc_base/logging.h"
+ #include "rtc_base/net_helper.h"
++#include "rtc_base/network.h"
+ #include "rtc_base/network/received_packet.h"
+ #include "rtc_base/network/sent_packet.h"
+ #include "rtc_base/socket.h"
+@@ -566,6 +567,13 @@
+        Network()->GetMdnsResponder() != nullptr) &&
+       !HasStunCandidateWithAddress(stun_reflected_addr)) {
+     SocketAddress related_address = socket_->GetLocalAddress();
++    // fp: spoof srflx related address (leaks the real local IP).
++    {
++      IPAddress fp_ip = GetCustomWebRtcIp();
++      if (!fp_ip.IsNil()) {
++        related_address = SocketAddress(fp_ip, related_address.port());
++      }
++    }
+     // If we can't stamp the related address correctly, empty it to avoid leak.
+     if (!MaybeSetDefaultLocalAddress(&related_address)) {
+       related_address = EmptySocketAddressWithFamily(related_address.family());

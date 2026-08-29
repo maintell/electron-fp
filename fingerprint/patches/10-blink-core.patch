@@ -1,0 +1,500 @@
+# ============================================================================
+# 10-blink-core.patch - Blink core: screen, canvas, timing, fonts, geolocation, DOM.
+#
+# Part of the fp-fingerprint patch set. Apply in filename order:
+#   00-core.patch -> 10-blink-core.patch -> 20-blink-modules.patch -> 30-webrtc.patch
+#
+# fp_config_helpers.h (00-core) is included by 32 of 36 files, so 00-core
+# MUST be applied first. Any hunk mismatch aborts loudly; nothing is
+# silently skipped.
+#
+# Regenerate with fingerprint/scripts/split_patch.js after adapting hunks.
+# ============================================================================
+
+# --- third_party/blink/renderer/core/frame/screen.cc ---
+# RANGE: Screen::width/height/availWidth/availHeight/colorDepth.
+# PURPOSE: spoof screen metrics (screen_width/height/avail_*/color_depth).
+# CONFIG: screen_width, screen_height, screen_avail_width,
+# screen_avail_height, screen_color_depth.
+# MERGE: LOW - stable getter functions.
+diff --git a/third_party/blink/renderer/core/frame/screen.cc b/third_party/blink/renderer/core/frame/screen.cc
+index ed5028943e3d7..dba25f77835c5 100644
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -26,6 +26,7 @@
+  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "third_party/blink/renderer/core/frame/screen.h"
+ 
+ #include "base/numerics/safe_conversions.h"
+@@ -90,16 +91,24 @@ bool Screen::AreWebExposedScreenPropertiesEqual(
+ int Screen::height() const {
+   if (!DomWindow())
+     return 0;
+-  return GetRect(/*available=*/false).height();
++  int h = GetRect(/*available=*/false).height();
++  int fp = FpConfigInt("screen_height", 0);
++  return fp > 0 ? fp : h;
+ }
+ 
+ int Screen::width() const {
+   if (!DomWindow())
+     return 0;
+-  return GetRect(/*available=*/false).width();
++  int w = GetRect(/*available=*/false).width();
++  int fp = FpConfigInt("screen_width", 0);
++  return fp > 0 ? fp : w;
+ }
+ 
+ unsigned Screen::colorDepth() const {
++  int fp = FpConfigInt("screen_color_depth", 0);
++  if (fp > 0) {
++    return static_cast<unsigned>(fp);
++  }
+   // "If the user agent does not know the color depth or does not want to
+   // return it for privacy considerations, it should return 24."
+   //
+@@ -133,13 +142,17 @@ int Screen::availTop() const {
+ int Screen::availHeight() const {
+   if (!DomWindow())
+     return 0;
+-  return GetRect(/*available=*/true).height();
++  int h = GetRect(/*available=*/true).height();
++  int fp = FpConfigInt("screen_avail_height", 0);
++  return fp > 0 ? fp : h;
+ }
+ 
+ int Screen::availWidth() const {
+   if (!DomWindow())
+     return 0;
+-  return GetRect(/*available=*/true).width();
++  int w = GetRect(/*available=*/true).width();
++  int fp = FpConfigInt("screen_avail_width", 0);
++  return fp > 0 ? fp : w;
+ }
+ 
+ void Screen::Trace(Visitor* visitor) const {
+
+# --- third_party/blink/renderer/core/events/navigator_events.cc ---
+# RANGE: NavigatorEvents::maxTouchPoints.
+# PURPOSE: spoof touch support (max_touch_points).
+# MERGE: LOW.
+diff --git a/third_party/blink/renderer/core/events/navigator_events.cc b/third_party/blink/renderer/core/events/navigator_events.cc
+index a57561775c119..2517b63135e40 100644
+--- a/third_party/blink/renderer/core/events/navigator_events.cc
++++ b/third_party/blink/renderer/core/events/navigator_events.cc
+@@ -29,6 +29,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/events/navigator_events.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+@@ -39,7 +40,9 @@ namespace blink {
+ 
+ int32_t NavigatorEvents::maxTouchPoints(Navigator& navigator) {
+   LocalDOMWindow* window = navigator.DomWindow();
+-  return window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
++  int real = window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
++  int fp = FpConfigInt("max_touch_points", 0);
++  return fp > 0 ? fp : real;
+ }
+ 
+ }  // namespace blink
+
+# --- third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc ---
+# RANGE: NavigatorConcurrentHardware::hardwareConcurrency.
+# PURPOSE: spoof CPU core count (hardware_concurrency).
+# MERGE: LOW.
+diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+index f5c0db2d1b58d..e2691d5e5f50d 100644
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+@@ -3,12 +3,17 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "base/system/sys_info.h"
+ 
+ namespace blink {
+ 
+ unsigned NavigatorConcurrentHardware::hardwareConcurrency() const {
++  int fp = FpConfigInt("hardware_concurrency", 0);
++  if (fp > 0) {
++    return static_cast<unsigned>(fp);
++  }
+   return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
+ }
+ 
+
+# --- third_party/blink/renderer/core/frame/navigator_device_memory.cc ---
+# RANGE: NavigatorDeviceMemory::deviceMemory.
+# PURPOSE: spoof device memory (device_memory).
+# MERGE: LOW.
+diff --git a/third_party/blink/renderer/core/frame/navigator_device_memory.cc b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+index 05fa33e4568e8..9cb00468d0773 100644
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_device_memory.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
+ #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
+@@ -12,6 +13,10 @@
+ namespace blink {
+ 
+ float NavigatorDeviceMemory::deviceMemory() const {
++  int fp = FpConfigInt("device_memory", 0);
++  if (fp > 0) {
++    return static_cast<float>(fp);
++  }
+   return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
+ }
+ 
+
+# --- third_party/blink/renderer/core/geolocation/geolocation.cc ---
+# RANGE: position reporting (GeoPosition).
+# PURPOSE: spoof geolocation (geo_latitude/longitude/accuracy).
+# MERGE: MEDIUM - geolocation permissions refactors.
+diff --git a/third_party/blink/renderer/core/geolocation/geolocation.cc b/third_party/blink/renderer/core/geolocation/geolocation.cc
+index 0e1e07b79f272..a76c46f00f4cc 100644
+--- a/third_party/blink/renderer/core/geolocation/geolocation.cc
++++ b/third_party/blink/renderer/core/geolocation/geolocation.cc
+@@ -25,6 +25,8 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include "base/strings/string_number_conversions.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "third_party/blink/renderer/core/geolocation/geolocation.h"
+ 
+ #include <algorithm>
+@@ -700,7 +702,29 @@ void Geolocation::OnPositionUpdated(
+     if (!ValidateGeoposition(*result->get_position())) {
+       return;
+     }
+-    last_position_ = CreateGeoposition(*result->get_position());
++    // fp: spoof coordinates from config.
++    device::mojom::blink::GeopositionPtr fp_pos =
++        result->get_position().Clone();
++    {
++      std::string fp_lat = FpConfigString("geo_latitude");
++      std::string fp_lng = FpConfigString("geo_longitude");
++      if (!fp_lat.empty() && !fp_lng.empty()) {
++        double lat = 0, lng = 0;
++        if (base::StringToDouble(fp_lat, &lat) &&
++            base::StringToDouble(fp_lng, &lng)) {
++          fp_pos->latitude = lat;
++          fp_pos->longitude = lng;
++        }
++      }
++      std::string fp_acc = FpConfigString("geo_accuracy");
++      if (!fp_acc.empty()) {
++        double acc = 0;
++        if (base::StringToDouble(fp_acc, &acc)) {
++          fp_pos->accuracy = acc;
++        }
++      }
++    }
++    last_position_ = CreateGeoposition(*fp_pos);
+     PositionChanged();
+   } else {
+     DCHECK(result->is_error());
+
+# --- third_party/blink/renderer/core/html/canvas/html_canvas_element.cc ---
+# RANGE: ToDataURLInternal + toBlob (post-Snapshot).
+# PURPOSE: deterministic canvas export noise via
+# FpApplyCanvasExportNoise (canvas_noise_seed/strength).
+# MERGE: HIGH risk - canvas refactors frequent; anchor on
+# HTMLCanvasElement::Snapshot call sites.
+diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+index fb2d3e7f4a454..87104a1d6f662 100644
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+@@ -26,6 +26,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/html/canvas/html_canvas_element.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include <math.h>
+ 
+@@ -1299,6 +1300,7 @@ String HTMLCanvasElement::ToDataURLInternal(
+       ImageEncoderUtils::ToEncodingMimeType(mime_type);
+ 
+   scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(source_buffer);
++  FpApplyCanvasExportNoise(image_bitmap);
+   if (image_bitmap) {
+     std::unique_ptr<ImageDataBuffer> data_buffer =
+         ImageDataBuffer::Create(image_bitmap);
+@@ -1403,6 +1405,7 @@ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
+ 
+   CanvasAsyncBlobCreator* async_creator = nullptr;
+   scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(kBackBuffer);
++  FpApplyCanvasExportNoise(image_bitmap);
+   if (image_bitmap) {
+     auto* options = ImageEncodeOptions::Create();
+     options->setType(ImageEncoderUtils::MimeTypeName(encoding_mime_type));
+
+# --- third_party/blink/renderer/core/core_initializer.cc ---
+# RANGE: Initialize() after TimeZoneController::Init().
+# PURPOSE: timezone override (tz_id) via
+# TimeZoneController::SetTimeZoneOverride (RAII handle kept static).
+# MERGE: MEDIUM - init call list changes; re-anchor after
+# TimeZoneController::Init() and before any JS runs.
+diff --git a/third_party/blink/renderer/core/core_initializer.cc b/third_party/blink/renderer/core/core_initializer.cc
+index 948451b578a01..351ed133b28df 100644
+--- a/third_party/blink/renderer/core/core_initializer.cc
++++ b/third_party/blink/renderer/core/core_initializer.cc
+@@ -29,6 +29,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/core_initializer.h"
++#include "base/containers/span.h"
+ 
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/public/web/blink.h"
+@@ -60,6 +61,7 @@
+ #include "third_party/blink/renderer/core/script_type_names.h"
+ #include "third_party/blink/renderer/core/svg_names.h"
+ #include "third_party/blink/renderer/core/timezone/timezone_controller.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "third_party/blink/renderer/core/trustedtypes/trusted_type_policy_factory.h"
+ #include "third_party/blink/renderer/core/trustedtypes/trusted_types_names.h"
+ #include "third_party/blink/renderer/core/workers/worker_thread.h"
+@@ -174,6 +176,26 @@ void CoreInitializer::Initialize() {
+ 
+   TimeZoneController::Init();
+ 
++  // fp: override default timezone from FP_CONFIG "tz_id" (e.g.
++  // "America/New_York"). Applies to Date/Intl in this renderer process.
++  // Must run after TimeZoneController::Init() so the monitor client is
++  // registered, and before any V8 isolate executes JS.
++  {
++    std::string fp_tz = FpConfigString("tz_id");
++    if (!fp_tz.empty()) {
++      // Keep the RAII handle alive for the process lifetime.
++      // ponytail: no_destroy avoids -Wexit-time-destructors (process-lifetime)
++      [[clang::no_destroy]] static std::unique_ptr<
++          TimeZoneController::TimeZoneOverride>
++          fp_tz_override_handle;
++      auto fp_tz_result = TimeZoneController::SetTimeZoneOverride(
++          String::FromUtf8(base::as_byte_span(fp_tz)));
++      if (fp_tz_result.handle) {
++        fp_tz_override_handle = std::move(fp_tz_result.handle);
++      }
++    }
++  }
++
+   FontGlobalContext::Init();
+ 
+   CSSDefaultStyleSheets::Init();
+
+# --- third_party/blink/renderer/core/css/font_face_set.cc ---
+# RANGE: FontFaceSet::check() family loop.
+# PURPOSE: hidden fonts (blocklist or whitelist complement) report as
+# missing via unified FpFontFamilyHidden (matches FontCache gate).
+# CONFIG: fonts_blocklist, fonts_whitelist.
+# MERGE: MEDIUM - font API refactors; anchor on check() loop.
+diff --git a/third_party/blink/renderer/core/css/font_face_set.cc b/third_party/blink/renderer/core/css/font_face_set.cc
+index 783e00a357d57..d0f2925795d98 100644
+--- a/third_party/blink/renderer/core/css/font_face_set.cc
++++ b/third_party/blink/renderer/core/css/font_face_set.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/css/font_face_set.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "base/task/single_thread_task_runner.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+
+# --- third_party/blink/renderer/core/timing/performance.cc ---
+# RANGE: Performance::now().
+# PURPOSE: quantize timestamps (perf_now_precision_ms) on a fixed
+# absolute grid (monotonicity preserved).
+# MERGE: MEDIUM.
+diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
+index 8bdad301b91fd..b6c9aae0b994f 100644
+--- a/third_party/blink/renderer/core/timing/performance.cc
++++ b/third_party/blink/renderer/core/timing/performance.cc
+@@ -30,6 +30,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/timing/performance.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include <algorithm>
+ #include <optional>
+@@ -1352,7 +1353,15 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
+ }
+ 
+ DOMHighResTimeStamp Performance::now() const {
+-  return MonotonicTimeToDOMHighResTimeStamp(base::TimeTicks::Now());
++  DOMHighResTimeStamp fp_now =
++      MonotonicTimeToDOMHighResTimeStamp(base::TimeTicks::Now());
++  // fp: reduce timestamp precision from FP_CONFIG "perf_now_precision_ms"
++  // (quantize to fixed absolute grid; monotonicity is preserved).
++  int fp_prec = FpConfigInt("perf_now_precision_ms", 0);
++  if (fp_prec > 1) {
++    fp_now = std::round(fp_now / fp_prec) * fp_prec;
++  }
++  return fp_now;
+ }
+ 
+ // static
+
+# --- third_party/blink/renderer/core/css/media_values.cc ---
+# RANGE: MediaValues::CalculatePreferredColorScheme.
+# PURPOSE: override prefers-color-scheme (prefers_color_scheme
+# light/dark), highest priority.
+# MERGE: MEDIUM.
+diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+index 0d60244742506..ec701b0d24a39 100644
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -3,12 +3,14 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/css/media_values.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include "third_party/blink/public/common/css/scripting.h"
+ #include "third_party/blink/renderer/core/css/css_resolution_units.h"
+ #include "third_party/blink/renderer/core/css/css_to_length_conversion_data.h"
+ #include "third_party/blink/renderer/core/css/media_feature_overrides.h"
+ #include "third_party/blink/renderer/core/css/media_values.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "third_party/blink/renderer/core/css/media_values_cached.h"
+ #include "third_party/blink/renderer/core/css/media_values_dynamic.h"
+ #include "third_party/blink/renderer/core/css/style_engine.h"
+@@ -395,6 +397,16 @@ ColorSpaceGamut MediaValues::CalculateColorGamut(LocalFrame* frame) {
+ 
+ mojom::blink::PreferredColorScheme MediaValues::CalculatePreferredColorScheme(
+     LocalFrame* frame) {
++  // fp: override from FP_CONFIG "prefers_color_scheme" (light/dark).
++  {
++    std::string fp_pcs = FpConfigString("prefers_color_scheme");
++    if (fp_pcs == "dark") {
++      return mojom::blink::PreferredColorScheme::kDark;
++    }
++    if (fp_pcs == "light") {
++      return mojom::blink::PreferredColorScheme::kLight;
++    }
++  }
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
+   DCHECK(frame->GetDocument());
+
+# --- third_party/blink/renderer/platform/fonts/font_cache.cc ---
+# RANGE: FontCache::GetFontData entry.
+# PURPOSE: hide configured fonts at the font-matching source -
+# nullptr triggers the normal fallback chain so check() AND metric
+# probing (span/measureText) both see the font as absent; layout
+# stays self-consistent (no JS hooks). Generic families always
+# exempt; web fonts bypass FontCache.
+# CONFIG: fonts_whitelist (whitelist wins), fonts_blocklist.
+# MERGE: HIGH risk - font matching internals refactor often;
+# anchor on FontCache::GetFontData signature.
+diff --git a/third_party/blink/renderer/platform/fonts/font_cache.cc b/third_party/blink/renderer/platform/fonts/font_cache.cc
+index 372b10936b23e..06c6e38b3165d 100644
+--- a/third_party/blink/renderer/platform/fonts/font_cache.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
+@@ -28,6 +28,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/platform/fonts/font_cache.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include <unicode/uscript.h>
+ 
+@@ -177,6 +178,10 @@ const SimpleFontData* FontCache::GetFontData(
+     const FontDescription& font_description,
+     const AtomicString& family,
+     AlternateFontName altername_font_name) {
++  // fp: hide configured fonts at the font-matching source.
++  if (FpFontFamilyHidden(family.Utf8())) {
++    return nullptr;
++  }
+   if (const FontPlatformData* platform_data = GetFontPlatformData(
+           font_description,
+           FontFaceCreationParams(
+
+# --- third_party/blink/renderer/core/dom/element.cc ---
+# RANGE: GetClientRectsNoAdjustment + GetBoundingClientRectNoLifecycle
+# UpdateNoAdjustment.
+# PURPOSE: deterministic subpixel perturbation on rect API output
+# (client_rects_seed) - rasterizer fingerprint defense; layout
+# itself untouched (API-layer only), <0.2px.
+# MERGE: MEDIUM - DOM refactors; anchor on the two rect methods.
+diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
+index eb88ce64a571e..d5b6f83d3773a 100644
+--- a/third_party/blink/renderer/core/dom/element.cc
++++ b/third_party/blink/renderer/core/dom/element.cc
+@@ -25,6 +25,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/dom/element.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include <algorithm>
+ #include <bitset>
+@@ -3423,7 +3424,9 @@ Vector<gfx::RectF> Element::GetClientRectsNoAdjustment() {
+   }
+   Vector<gfx::RectF> result;
+   for (auto& quad : quads) {
+-    result.emplace_back(quad.BoundingBox());
++    gfx::RectF fp_rect = quad.BoundingBox();
++    FpPerturbRectF(fp_rect);
++    result.emplace_back(fp_rect);
+   }
+   return result;
+ }
+@@ -3439,6 +3442,8 @@ gfx::RectF Element::GetBoundingClientRectNoLifecycleUpdateNoAdjustment() const {
+   for (auto& quad : quads) {
+     result.Union(quad.BoundingBox());
+   }
++  // fp: deterministic subpixel perturbation (rasterizer fingerprint).
++  FpPerturbRectF(result);
+   return result;
+ }
+ 
+
+# --- third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc ---
+# RANGE: OffscreenCanvas::convertToBlob (post GetImage).
+# PURPOSE: deterministic export noise on the Worker/OffscreenCanvas
+# fingerprint path - same FpApplyCanvasExportNoise semantics as
+# HTMLCanvasElement (canvas_noise_seed/strength). getImageData and
+# measureText already covered via shared BaseRenderingContext2D.
+# MERGE: MEDIUM - offscreen canvas refactors; anchor on convertToBlob.
+diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
+index a5de90e05fad4..4a3f27ef47e61 100644
+--- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
++++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ 
+ #include <memory>
+ #include <utility>
+@@ -475,6 +476,10 @@ ScriptPromise<Blob> OffscreenCanvas::convertToBlob(
+ 
+   base::TimeTicks start_time = base::TimeTicks::Now();
+   scoped_refptr<StaticBitmapImage> image_bitmap = context_->GetImage();
++  // fp: deterministic export noise on OffscreenCanvas path (Worker/
++  // OffscreenCanvas fingerprint surface; same seed/strength semantics as
++  // HTMLCanvasElement toDataURL/toBlob).
++  FpApplyCanvasExportNoise(image_bitmap);
+   if (image_bitmap) {
+     auto* resolver = MakeGarbageCollected<ScriptPromiseResolver<Blob>>(
+         script_state, exception_state.GetContext());
