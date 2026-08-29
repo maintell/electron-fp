@@ -205,6 +205,27 @@ def main():
         if total_hunks == 0:
             failures.append("no hunks in patch set")
 
+        # 8c. every key must be READ BY CODE, not merely mentioned.
+        #
+        # The old check was `k not in joined`, a plain substring test. That is
+        # too weak in two ways: it matches a longer identifier containing the
+        # key as a prefix, and it matches documentation lines such as
+        # "# CONFIG: webrtc_ip". webgpu_features/webgpu_limits passed checks
+        # for a long time with zero implementation precisely because of this.
+        # Require the key to appear as a quoted string in ADDED (+) lines.
+        #
+        # Match any call shape: FpConfigInt("k", ...), and ternaries where the
+        # key follows '?' or ':' on the same line, e.g.
+        #   FpConfigString(p == 0x9245 ? "webgl_vendor" : "webgl_renderer")
+        added_lines = "\n".join(
+            l for l in joined.split("\n")
+            if l.startswith("+") and not l.startswith("+++"))
+        inert = [k for k in EXPECTED_KEYS if '"%s"' % k not in added_lines]
+        if inert:
+            failures.append(
+                "key(s) not read by any added code line (declared but "
+                "unimplemented?): " + ", ".join(inert))
+
         # 8b. INTEGRATION sync: every key must be documented if INTEGRATION.md exists
         integ_candidates = [
             os.path.join(REPO, "fingerprint", "INTEGRATION.md"),
