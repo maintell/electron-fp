@@ -3,9 +3,13 @@
 "use strict";
 const schema = require("./fp-schema.js");
 const fs = require("fs");
+const path = require("path");
 
-// Extract generateRandomProfile from main.js without booting Electron.
-const src = fs.readFileSync("./main.js", "utf8");
+// Resolve main.js against THIS file, not the process CWD. require() is already
+// script-relative, but readFileSync() is CWD-relative, so running this from
+// anywhere but Client/ would silently read the wrong main.js (or throw ENOENT)
+// and the checks below would validate a file that is not the real one.
+const src = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
 const start = src.indexOf("function generateRandomProfile()");
 const end = src.indexOf("// --- App Lifecycle ---");
 const fnSrc = src.slice(start, end);
