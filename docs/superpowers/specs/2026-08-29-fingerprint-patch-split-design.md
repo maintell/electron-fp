@@ -18,6 +18,14 @@
 **非目标**（本次不做）：
 - 不新增/删除任何指纹能力（56 个 key 语义不变）
 - 不实现 TLS/JA3/JA4（属独立工程，需改 BoringSSL 与网络栈）
+  - **已于 2026-08-29 实测确认，非仅推断**：补丁 36 个文件全部位于 `third_party/blink`(32)
+    与 `third_party/webrtc`(4)，无 `net/`、`ssl/`、`boringssl/`；`fp_config_helpers.h` 位于
+    `blink/renderer/core/frame/`，只能被 Blink 包含，网络栈取不到配置。
+    真实 HTTPS 实测：空配置与明确配置各 4 次，JA4 完全相同 → 配置对 TLS 指纹零影响。
+  - 附带确认 UA 存在泄露：实测 UA 含 `Electron/45.0.0-nightly.20260825`，且 schema 中
+    UA/platform 类 key 为 0 个；`macOS / Safari-like` 预设仍报 Windows + Electron，自相矛盾。
+  - 完整结论、测法陷阱（GREASE 需丢弃首次连接）与四条可选路径见
+    `fingerprint/README.md` § 已知未覆盖：网络层指纹（TLS/JA3/JA4）与 User-Agent。
 - 不改 `--fingerprint-config` 的注入机制
 
 ## 2. 现状
