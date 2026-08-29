@@ -128,7 +128,7 @@ marker 定义随补丁配置（脚本内表驱动），新增补丁时同步登�
 ## 6. 风险
 
 - **重编译**：拆分后需重新编译验证（约 25 分钟）
-- **CI 未覆盖**：仓库 `.github/workflows` 中未发现 fingerprint 相关 job，README 提到 `fingerprint-check.yml` 但当前不存在 → 拆分后无 CI 兜底，依赖本地验证
+- **CI 已覆盖（原判断错误，已更正）**：`.github/workflows/fingerprint-check.yml` **确实存在**（此前在 `src` 下找错了路径，该 job 在 `electron-fp` 仓库）。它在 `pull_request` / `push: main` 且 `paths: fingerprint/**` 时运行，执行 `check.py` + `apply.py --dry-run`。另有 `fork-release.yml` 的 `fingerprint-patch` job 作为严格门禁。两个脚本均已在无 Chromium checkout 的环境下验证：check.py exit 0、apply.py 优雅跳过 exit 0。
 - **`src` 中内核改动未纳入 git**：`src` 仓库里 `electron/fingerprint` 未被跟踪，`ipc_network_manager.cc` 与 webrtc 子模块的改动只存在于工作树 → 拆分前需先确认源码改动有留档
 
 ## 7. 执行顺序
