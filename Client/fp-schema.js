@@ -217,11 +217,41 @@ function fpNormalizeConfig(input) {
   const unknown = [];
   if (input && typeof input === "object") {
     for (const [k, v] of Object.entries(input)) {
-      if (Object.prototype.hasOwnProperty.call(FP_KEYS, k)) out[k] = v;
+      if (Object.prototype.hasOwnProperty.call(FP_KEYS, k)) out[k] = fpCoerce(k, v);
       else unknown.push(k);
     }
   }
   return { config: out, unknown };
+}
+
+/**
+ * Coerce a value into the wire encoding the kernel's parser expects.
+ *
+ * kind:"str" MUST be a JSON string. FpConfigString() looks for the opening
+ * quote and returns "" if the next non-space char is not one, so a NUMBER
+ * silently disables the key - no error, no log, the override just does not
+ * happen. Measured: {net_downlink_mbps: 77} was ignored while
+ * {net_downlink_mbps: "77"} worked.
+ *
+ * This bites hardest on the keys that are NATURALLY numeric
+ * (net_downlink_mbps, geo_latitude/longitude/accuracy, battery_level,
+ * audio_data_strength): a JSON editor or a computed value produces a number
+ * and the setting quietly does nothing.
+ *
+ * Coercing here rather than at each call site because fpNormalizeConfig() is
+ * the single funnel every config passes through before reaching the kernel.
+ */
+function fpCoerce(key, value) {
+  const spec = FP_KEYS[key];
+  if (!spec || value === undefined || value === null) return value;
+  if (spec.kind === "str") return String(value);
+  if (spec.kind === "bool") {
+    // Kernel compares to "true"/"1". Accept real booleans too.
+    if (value === true) return "true";
+    if (value === false) return "false";
+    return String(value);
+  }
+  return value;
 }
 
 // ============================================================================
@@ -438,6 +468,7 @@ module.exports = {
   FP_GROUP_IDS,
   fpDefaultConfig,
   fpNormalizeConfig,
+  fpCoerce,
   fpKeysInGroup,
   fpCoverage,
   fpIsActive,
