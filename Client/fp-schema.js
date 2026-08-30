@@ -123,6 +123,34 @@ const FP_KEYS = {
   // is the only way to cover it. Should stay consistent with any UA override:
   // a Mac UA wants "MacIntel", Android wants "Linux armv8l".
   navigator_platform: { group: "navigator", kind: "str", def: "" },
+
+  // --- Sec-CH-UA client hints -------------------------------------------------
+  // navigator.userAgentData and the Sec-CH-UA* request headers are a SECOND,
+  // independent identity surface. Measured: overriding the UA leaves these
+  // reporting the real brand ("Chromium";v="154") and platform ("Windows"), so a
+  // Mac UA ships alongside Windows hints - a glaring contradiction that the UA
+  // override alone does not remove.
+  //
+  // Sec-CH-UA (brand list) is the loudest of the three: it is what actually
+  // announces the browser family, and leaving it at Chromium/brand defeats the
+  // point of spoofing the UA at all.
+  //
+  // Empty = inherit. When ua_platform/ua_mobile are empty and ua_brands is
+  // empty, the kernel derives all three FROM the UA string, so a Mac UA
+  // automatically reports platform "macOS" and Safari-ish brands. Set them
+  // explicitly only to override that derivation.
+  ua_brands: {
+    group: "navigator", kind: "str", def: "",
+    hint: 'Brand list, e.g. {"0":"Not A(Brand";v="99"}. Empty = derive from UA.'
+  },
+  ua_platform: {
+    group: "navigator", kind: "str", def: "",
+    hint: 'Sec-CH-UA-Platform value, e.g. "macOS" / "Windows" / "Linux" / "Android". Empty = derive from UA.'
+  },
+  ua_mobile: {
+    group: "navigator", kind: "str", def: "",
+    hint: '"true" or "false" for Sec-CH-UA-Mobile. Empty = derive from UA.'
+  },
 };
 // --- Functional groups -------------------------------------------------------
 // Each of the 56 kernel keys belongs to exactly ONE group. Groups drive the
@@ -292,6 +320,72 @@ const FP_PLATFORM_BY_ID = {
 };
 
 /**
+ * The UserAgentMetadata values matching a UA string: brand list, platform and
+ * the mobile flag, in the exact wire format Sec-CH-UA uses.
+ *
+ * Chromium does NOT derive these from navigator.userAgent: it keeps its own
+ * brand list, so overriding the UA leaves the hints reporting real Chromium on
+ * the real OS. That contradiction is worse than not spoofing at all, because it
+ * is trivially detectable - hence this table.
+ *
+ * `platform` here is the Sec-CH-UA vocabulary ("macOS"), which is NOT the same
+ * as navigator.platform ("MacIntel"). Both exist and both leak the OS, so both
+ * need covering; fpPlatformForUserAgent() handles the other one.
+ *
+ * Returns null when the UA is unrecognised, meaning "do not override".
+ */
+function fpUaMetadataForUserAgent(ua) {
+  if (typeof ua !== "string" || !ua) return null;
+  const GREASE = '"Not A(Brand";v="99"';
+  const mobile = /Android|iPhone|iPad|Mobile/.test(ua);
+  // Brand tokens keep "Chromium" because that is the engine this build actually
+  // is; only the major version and the ordering follow the impersonated UA.
+  const ver = /(?:Chrome|Chromium|CriOS|Edg|Firefox|Version)\/([\d]+)/.exec(ua);
+  const major = ver ? ver[1] : "131";
+
+  if (/Firefox/.test(ua) && !/Chrome|Chromium/.test(ua)) {
+    // Not hardcoded to Windows: Firefox ships on Linux (X11) and macOS too, and
+    // reporting Windows for a Linux UA is the contradiction we are removing.
+    const p = /Android/.test(ua) ? "Android"
+            : /Macintosh/.test(ua) ? "macOS"
+            : /Windows/.test(ua) ? "Windows"
+            : "Linux";
+    return { brands: [GREASE, '"Firefox";v="' + major + '"'],
+             platform: p, mobile: mobile };
+  }
+  if (/Edg\//.test(ua)) {
+    return { brands: [GREASE, '"Chromium";v="' + major + '"',
+                      '"Microsoft Edge";v="' + major + '"'],
+             platform: /Android/.test(ua) ? "Android" : "Windows", mobile: mobile };
+  }
+  if (/CriOS|Chrome/.test(ua)) {
+    const p = /Android/.test(ua) ? "Android"
+            : /iPhone|iPad/.test(ua) ? "iOS"
+            : /Macintosh/.test(ua) ? "macOS"
+            : /Windows/.test(ua) ? "Windows"
+            : "Linux";
+    return { brands: [GREASE, '"Chromium";v="' + major + '"',
+                      '"Google Chrome";v="' + major + '"'],
+             platform: p, mobile: mobile };
+  }
+  if (/Safari/.test(ua)) {
+    const p = /iPhone|iPad/.test(ua) ? "iOS"
+            : /Macintosh/.test(ua) ? "macOS" : "Windows";
+    // Real Safari sends only its own brand - it does not do GREASE.
+    return { brands: ['"Safari";v="' + major + '"'], platform: p, mobile: mobile };
+  }
+  if (/Android/.test(ua)) {
+    return { brands: [GREASE, '"Chromium";v="' + major + '"'],
+             platform: "Android", mobile: true };
+  }
+  if (/Windows/.test(ua)) {
+    return { brands: [GREASE, '"Chromium";v="' + major + '"'],
+             platform: "Windows", mobile: false };
+  }
+  return null;
+}
+
+/**
  * The navigator_platform value matching a UA string, or "" if unknown.
  *
  * Returns "" rather than guessing, because an empty value means "disabled" in
@@ -340,5 +434,6 @@ module.exports = {
   fpRandomUserAgent,
   fpNormalizeUserAgent,
   fpPlatformForUserAgent,
+  fpUaMetadataForUserAgent,
 };
 

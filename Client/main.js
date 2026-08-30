@@ -470,6 +470,12 @@ function setupIPC() {
   // the JSON editor against the exact kernel key set (56 keys / 14 groups).
   ipcMain.handle('ua:presets', () => FP_UA_PRESETS);
 
+  // Derive navigator_platform from a UA string in the main process rather than
+  // duplicating the mapping in the renderer. Two copies of this table would
+  // drift, and a drifted platform silently contradicts the UA - exactly the
+  // failure mode this whole surface exists to prevent.
+  ipcMain.handle('ua:platform-for', (e, ua) => fpPlatformForUserAgent(ua));
+
   ipcMain.handle('fp:schema', () => ({
     version: FP_SCHEMA_VERSION,
     keyCount: FP_KEY_NAMES.length,

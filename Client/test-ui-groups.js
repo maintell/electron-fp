@@ -30,6 +30,7 @@ ipcMain.handle("panel:set-open", () => true);
 // app.js init() calls listUaPresets() and getUserAgent() on boot.
 const UA_HANDLERS = {
   "ua:presets": () => schema.FP_UA_PRESETS,
+  "ua:platform-for": (e, ua) => schema.fpPlatformForUserAgent(ua),
   "tab:get-ua": () => "",
   "tab:set-ua": () => true
 };

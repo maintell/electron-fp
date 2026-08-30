@@ -22,15 +22,35 @@ README = os.path.join(REPO, "fingerprint", "README.md")
 # The patch set is split by runtime subsystem so a Chromium upgrade only needs
 # the one subsystem re-anchored. Checks that used to run against the single
 # monolith now run against the SET: per-file checks apply to each patch, and
-# whole-set checks (56-key coverage, no duplicate file ownership) run across
+# whole-set checks (60-key coverage, no duplicate file ownership) run across
 # all of them. Falls back to the monolith if no split patches exist yet.
-SPLIT_NAMES = ["00-core", "10-blink-core", "20-blink-modules", "30-webrtc"]
+# Discovered from the directory rather than hardcoded. A hardcoded list silently
+# excluded a newly-added split patch more than once: the file was generated and
+# correct, but every whole-set check skipped it, so new keys looked
+# unimplemented. Deriving the list means adding a split can never again be
+# invisible to the checks.
+def discover_split_names():
+    if not os.path.isdir(PATCH_DIR):
+        return []
+    names = []
+    for fn in os.listdir(PATCH_DIR):
+        # Split patches are the "<nn>-<name>.patch" files; the monolith is
+        # fp-fingerprint.patch and must not be double-counted alongside them.
+        if fn == "fp-fingerprint.patch" or not fn.endswith(".patch"):
+            continue
+        stem = fn[:-len(".patch")]
+        if stem[:1].isdigit() and "-" in stem:
+            names.append(stem)
+    return sorted(names)
+
+
+SPLIT_NAMES = discover_split_names()
 
 
 def discover_patches():
     """Return [(label, path)] for the patch set, split first then monolith."""
     found = []
-    for n in SPLIT_NAMES:
+    for n in discover_split_names():
         p = os.path.join(PATCH_DIR, n + ".patch")
         if os.path.exists(p):
             found.append((n, p))
@@ -63,6 +83,7 @@ EXPECTED_KEYS = [
     "webgpu_features", "webgpu_limits",
     "client_rects_seed",
     "navigator_platform",
+    "ua_brands", "ua_platform", "ua_mobile",
 ]
 
 DEBUG_PATTERNS = [

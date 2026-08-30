@@ -355,7 +355,7 @@ for (const g of ORDER) {
   out += `# ${g}.patch - ${BANNER[g]}\n`;
   out += `#\n`;
   out += `# Part of the fp-fingerprint patch set. Apply in filename order:\n`;
-  out += `#   00-core.patch -> 10-blink-core.patch -> 20-blink-modules.patch -> 30-webrtc.patch\n`;
+  out += `#   ` + ORDER.map(o => o + '.patch').join(' -> ') + `\n`;
   out += `#\n`;
   out += `# fp_config_helpers.h (00-core) is included by 32 of 36 files, so 00-core\n`;
   out += `# MUST be applied first. Any hunk mismatch aborts loudly; nothing is\n`;

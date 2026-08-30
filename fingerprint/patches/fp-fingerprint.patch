@@ -999,51 +999,6 @@
    return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
  }
  
-# --- third_party/blink/renderer/core/execution_context/navigator_base.cc ---
-# RANGE: NavigatorBase::platform.
-# PURPOSE: spoof navigator.platform (navigator_platform).
-# MERGE: HIGH risk - this is THE injection point, not navigator_id.cc.
-#   NavigatorBase::platform() only calls NavigatorID::platform() on Android;
-#   on Windows/macOS/Linux it returns the hardcoded GetReducedNavigatorPlatform()
-#   and never reaches NavigatorID at all, so a hook placed in NavigatorID is
-#   dead code there. Re-verify which function owns the value on merge.
-# NOTE: Electron's session.setUserAgent() does NOT touch navigator.platform,
-#   so a spoofed UA still reports the host's real platform. This key is the
-#   only way to keep the two consistent.
---- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
-+++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
-@@ -20,6 +20,10 @@
- #endif
- 
- namespace blink {
-+
-+// Fingerprint: --fingerprint-config (per-renderer), FP_CONFIG_DATA, FP_CONFIG
-+// file, then FP_* env. See fp_config_helpers.h for the priority order.
-+#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
- 
- namespace {
- 
-@@ -54,6 +58,21 @@
- String NavigatorBase::platform() const {
-+  // navigator.platform is NOT affected by Electron's session.setUserAgent():
-+  // there is no setter for it, so a spoofed UA on a Windows host still reports
-+  // "Win32" and contradicts the UA. This key is the only way to cover it.
-+  //
-+  // It must be checked HERE rather than in NavigatorID::platform() because
-+  // that function is only reached on Android: everywhere else this method
-+  // returns the hardcoded GetReducedNavigatorPlatform() below and never calls
-+  // into NavigatorID at all. Patching NavigatorID::platform() is dead code on
-+  // Windows/macOS/Linux and silently does nothing.
-+  //
-+  // Empty means disabled, and the native value is used unchanged.
-+  std::string fp_platform = FpConfigString("navigator_platform");
-+  if (!fp_platform.empty()) {
-+    return String::FromUtf8(base::as_byte_span(fp_platform));
-+  }
- #if BUILDFLAG(IS_ANDROID)
-   // We need to check the ReduceUserAgentMinorVersion feature flag for
-   // Android WebView, which does not currently ship a reduced User-Agent.
-
 # --- third_party/blink/renderer/core/frame/navigator_device_memory.cc ---
 # RANGE: NavigatorDeviceMemory::deviceMemory.
 # PURPOSE: spoof device memory (device_memory).
@@ -1997,3 +1952,438 @@
    if (image_bitmap) {
      auto* resolver = MakeGarbageCollected<ScriptPromiseResolver<Blob>>(
          script_state, exception_state.GetContext());
+
+# --- electron/fingerprint/helpers/fp_ua_helpers.h ---
+# RANGE: whole file (new).
+# PURPOSE: Sec-CH-UA derivation shared by content/ and blink/ - platform,
+#   mobile and brand list from a UA string, plus the wire-format parser.
+# CONFIG: (none - pure helpers, no config reads).
+# MERGE: LOW risk - OWN FILE, never conflicts on upgrade. Dependency-free
+#   on purpose: including fp_config_helpers.h from content/renderer pulls
+#   Skia/blink-platform headers and breaks the build.
+--- /dev/null
++++ b/electron/fingerprint/helpers/fp_ua_helpers.h
+@@ -0,0 +1,232 @@
++// Copyright 2026 The Electron Authors. All rights reserved.
++// Use of this source code is governed by the BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef ELECTRON_FINGERPRINT_HELPERS_FP_UA_HELPERS_H_
++#define ELECTRON_FINGERPRINT_HELPERS_FP_UA_HELPERS_H_
++
++// --- Sec-CH-UA client hint derivation ----------------------------------------
++//
++// navigator.userAgentData and the Sec-CH-UA* request headers are a SECOND
++// identity surface, and Chromium does NOT derive them from navigator.userAgent:
++// it keeps its own brand list. Measured with a Mac UA override - the hints
++// still reported brand "Chromium";v="154" and platform "Windows", i.e. the real
++// browser on the real OS. That contradiction is trivially detectable and worse
++// than not spoofing at all, so the hints must follow the UA.
++//
++// The ua_platform / ua_brands / ua_mobile keys override this derivation when
++// set; when empty, these functions infer values from the UA string in effect.
++// Keeping the inference here means a config that sets only a UA stays coherent.
++//
++// THIS HEADER IS DELIBERATELY DEPENDENCY-FREE (no blink, no skia, no
++// base/containers). It is included from content/renderer, and pulling in
++// blink's platform headers there triggers cppgc/Oilpan template constraint
++// errors in RenderFrameImpl ("invalid application of 'sizeof' to an incomplete
++// type 'void'"). fp_config_helpers.h cannot be included from content because it
++// needs SkBitmap/StaticBitmapImage for the canvas noise helpers. Keep the split:
++// string-only helpers here, bitmap helpers there.
++
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++
++namespace fp_ua {
++
++// --- Minimal config reader ---------------------------------------------------
++// Duplicates the string-reading half of FpConfigString() from
++// fp_config_helpers.h, because that header cannot be included here (see the
++// note at the top of this file) and content/renderer otherwise has no way to
++// read the fingerprint config. Same priority order:
++// --fingerprint-config (base64 JSON) > FP_CONFIG_DATA > FP_CONFIG file >
++// FP_<KEY> env. Keep in sync if the priority order ever changes.
++inline std::string ConfigString(const char* key) {
++  // 1) --fingerprint-config=<base64 json> (per-renderer, used by Electron)
++  const char* b64 = getenv("FP_CONFIG_DATA");
++  std::string content;
++  if (b64 && *b64) {
++    content = b64;
++  } else {
++    const char* path = getenv("FP_CONFIG");
++    if (path && *path) {
++      // base::ReadFileToString rather than fread: raw buffer reads trip
++      // -Wunsafe-buffer-usage-in-libc-call, which is -Werror in this build.
++      base::ReadFileToString(base::FilePath::FromUTF8Unsafe(path), &content);
++    }
++  }
++  if (content.empty()) {
++    // 4) FP_<KEY> env fallback
++    std::string env = std::string("FP_") + key;
++    // Upper-case the key for the env var name.
++    for (auto& ch : env) if (ch >= 'a' && ch <= 'z') ch -= 32;
++    const char* v = getenv(env.c_str());
++    return v ? std::string(v) : std::string();
++  }
++  // Find "key":"value" in the JSON. Quote-aware enough for flat config JSON.
++  std::string pat = std::string("\"") + key + "\"";
++  size_t k = content.find(pat);
++  if (k == std::string::npos) return "";
++  k = content.find(':', k + pat.size());
++  if (k == std::string::npos) return "";
++  k++;
++  while (k < content.size() && (content[k] == ' ' || content[k] == '\n' ||
++                                content[k] == '\r' || content[k] == '\t')) k++;
++  if (k >= content.size() || content[k] != '"') return "";
++  size_t q2 = content.find('"', k + 1);
++  if (q2 == std::string::npos) return "";
++  return content.substr(k + 1, q2 - k - 1);
++}
++
++inline bool IsMobile(const std::string& ua) {
++  return ua.find("Android") != std::string::npos ||
++         ua.find("iPhone") != std::string::npos ||
++         ua.find("iPad") != std::string::npos ||
++         ua.find("Mobile") != std::string::npos;
++}
++
++// Sec-CH-UA-Platform vocabulary - note this is NOT navigator.platform:
++// "macOS" here vs "MacIntel" there. Same leak, different spelling, both sent.
++inline std::string Platform(const std::string& ua) {
++  if (ua.find("Android") != std::string::npos) return "Android";
++  if (ua.find("iPhone") != std::string::npos) return "iOS";
++  if (ua.find("iPad") != std::string::npos) return "iOS";
++  if (ua.find("Macintosh") != std::string::npos ||
++      ua.find("Mac OS X") != std::string::npos) return "macOS";
++  if (ua.find("Windows") != std::string::npos) return "Windows";
++  if (ua.find("X11") != std::string::npos ||
++      ua.find("Linux") != std::string::npos) return "Linux";
++  return "";
++}
++
++// Major version pulled from the UA, used for the brand list. Falls back to a
++// fixed version so the brand list is never empty-looking.
++inline std::string MajorVersion(const std::string& ua) {
++  static const char* kTokens[] = {"Chrome/", "Chromium/", "CriOS/", "Edg/",
++                                  "Firefox/", "Version/"};
++  for (const char* tok : kTokens) {
++    size_t i = ua.find(tok);
++    if (i == std::string::npos) continue;
++    size_t s = i + strlen(tok);
++    size_t e = s;
++    while (e < ua.size() && ua[e] >= '0' && ua[e] <= '9') e++;
++    if (e > s) return ua.substr(s, e - s);
++  }
++  return "131";
++}
++
++// Sec-CH-UA brand list in structured-header wire form. Keeps "Chromium" because
++// that IS the engine this build ships; only the version and ordering follow the
++// impersonated browser. GREASE (RFC 8701) is emitted for Chromium-family UAs
++// because real Chromium does, and its absence is itself a signal.
++inline std::string Brands(const std::string& ua) {
++  const std::string major = MajorVersion(ua);
++  const std::string grease = "\"Not A(Brand\";v=\"99\"";
++  const std::string chromium = "\"Chromium\";v=\"" + major + "\"";
++
++  bool is_firefox = ua.find("Firefox/") != std::string::npos &&
++                    ua.find("Chrome/") == std::string::npos &&
++                    ua.find("Chromium/") == std::string::npos;
++
++  if (is_firefox) {
++    return grease + ", \"Firefox\";v=\"" + major + "\"";
++  }
++  if (ua.find("Edg/") != std::string::npos) {
++    return grease + ", " + chromium + ", \"Microsoft Edge\";v=\"" + major + "\"";
++  }
++  if (ua.find("CriOS/") != std::string::npos ||
++      ua.find("Chrome/") != std::string::npos) {
++    return grease + ", " + chromium + ", \"Google Chrome\";v=\"" + major + "\"";
++  }
++  if (ua.find("Safari/") != std::string::npos) {
++    // Real Safari sends only its own brand and does not GREASE.
++    return "\"Safari\";v=\"" + major + "\"";
++  }
++  return grease + ", " + chromium;
++}
++
++// Parse a Sec-CH-UA brand list into (brand, version) pairs.
++//
++// Accepts BOTH the structured-header wire form and a quote-free form:
++//   "Not A(Brand";v="99", "Chromium";v="131"     <- what browsers send
++//   Not A(Brand)=99, Chromium=131                <- what config can carry
++//
++// The quote-free form matters because FpConfigString() stops at the first
++// closing quote, so a value containing quotes is silently truncated to nothing
++// (the same trap that forced webgpu_limits to use unquoted keys). Accepting
++// both means a hand-written config works, and values copied verbatim off the
++// wire still parse.
++//
++// Splitting is hand-rolled rather than using UserAgentMetadata::Demarshal()
++// because that parses a whole encoded UserAgentMetadata blob and would silently
++// discard the platform/mobile fields set alongside it. Plain pairs (not blink
++// structs) so this header stays dependency-free and usable from content/.
++inline std::vector<std::pair<std::string, std::string>> ParseBrands(
++    const std::string& wire) {
++  std::vector<std::pair<std::string, std::string>> out;
++  // Quote-aware scan: GREASE brand names contain parentheses, so splitting on
++  // plain punctuation would corrupt "Not A(Brand".
++  auto trim = [](std::string s) {
++    while (!s.empty() && (s.front() == ' ' || s.front() == '"')) s.erase(0, 1);
++    while (!s.empty() && (s.back() == ' ' || s.back() == '"')) s.pop_back();
++    return s;
++  };
++
++  // Split the list on top-level commas (outside quotes), then each entry on its
++  // separator: ';' in the wire form ("Brand";v="99") or '=' in the config form
++  // (Brand=99). Requiring ';' alone made the quote-free form parse to nothing.
++  std::vector<std::string> entries;
++  {
++    std::string cur;
++    bool in_q = false;
++    for (char ch : wire) {
++      if (ch == '"') { in_q = !in_q; cur += ch; }
++      else if (ch == ',' && !in_q) { entries.push_back(cur); cur.clear(); }
++      else cur += ch;
++    }
++    if (!trim(cur).empty() || !entries.empty()) entries.push_back(cur);
++  }
++
++  for (const std::string& entry : entries) {
++    std::string e = trim(entry);
++    if (e.empty()) continue;
++
++    std::string brand;
++    std::string ver;
++    // Wire form: "Brand";v="99"  - the brand is a quoted string.
++    // Config form: Brand=99      - no quotes (FpConfigString truncates them).
++    // Detect on the RAW entry, before trimming strips the leading quote.
++    size_t first_q = entry.find('"');
++    if (first_q != std::string::npos) {
++      size_t close_q = entry.find('"', first_q + 1);
++      if (close_q != std::string::npos) {
++        brand = entry.substr(first_q + 1, close_q - first_q - 1);
++        // Version follows ';' as v="99".
++        size_t semi = entry.find(';', close_q);
++        if (semi != std::string::npos) {
++          ver = trim(entry.substr(semi + 1));
++          if (ver.size() > 2 && ver[0] == 'v' && ver[1] == '=') {
++            ver = trim(ver.substr(2));
++          }
++        }
++        out.push_back({brand, ver});
++        continue;
++      }
++    }
++    // Unquoted: split on '=' (or ';' as a fallback).
++    size_t eq = e.find('=');
++    size_t sep = (eq != std::string::npos) ? eq : e.find(';');
++    if (sep == std::string::npos) { out.push_back({e, ""}); continue; }
++    brand = trim(e.substr(0, sep));
++    ver = trim(e.substr(sep + 1));
++    if (!brand.empty()) out.push_back({brand, ver});
++  }
++  return out;
++}
++
++}  // namespace fp_ua
++
++#endif  // ELECTRON_FINGERPRINT_HELPERS_FP_UA_HELPERS_H_
+
+# --- third_party/blink/renderer/core/execution_context/navigator_base.cc ---
+# RANGE: NavigatorBase::platform() + NavigatorBase::GetUserAgentMetadata().
+# PURPOSE: navigator.platform override, and the JS-side Sec-CH-UA override so
+#   navigator.userAgentData agrees with the UA.
+# CONFIG: navigator_platform, ua_platform, ua_mobile, ua_brands.
+# MERGE: LOW risk - NavigatorBase::platform() is the REAL injection point on non-
+#   Android (NavigatorID::platform() is never reached there, so a hook in
+#   NavigatorID compiles and links but silently does nothing).
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -4,6 +4,10 @@
+ 
+ #include "third_party/blink/renderer/core/execution_context/navigator_base.h"
+ 
++// Fingerprint: --fingerprint-config (per-renderer), FP_CONFIG_DATA, FP_CONFIG
++// file, then FP_* env. See fp_config_helpers.h for the priority order.
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
++
+ #include "base/feature_list.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/features.h"
+@@ -59,6 +63,24 @@ String NavigatorBase::platform() const {
+     return NavigatorID::platform();
+   }
+ #endif
++
++  // Fingerprint: navigator.platform override.
++  //
++  // THIS is the injection point, not NavigatorID::platform(). On non-Android
++  // this function returns the hardcoded GetReducedNavigatorPlatform() and never
++  // reaches NavigatorID at all - a hook placed in NavigatorID::platform()
++  // compiles and links but silently does nothing.
++  //
++  // navigator.platform must agree with the UA: a Mac UA beside the host's real
++  // "Win32" is a contradiction that is trivial to detect. Empty means disabled,
++  // and falls back to the real platform below.
++  {
++    std::string fp_platform = FpConfigString("navigator_platform");
++    if (!fp_platform.empty()) {
++      return String::FromUtf8(fp_platform);
++    }
++  }
++
+   return GetReducedNavigatorPlatform();
+ }
+ 
+@@ -84,8 +106,54 @@ ExecutionContext* NavigatorBase::GetUAExecutionContext() const {
+ 
+ UserAgentMetadata NavigatorBase::GetUserAgentMetadata() const {
+   ExecutionContext* execution_context = GetExecutionContext();
+-  return execution_context ? execution_context->GetUserAgentMetadata()
+-                           : blink::UserAgentMetadata();
++  UserAgentMetadata m = execution_context
++                            ? execution_context->GetUserAgentMetadata()
++                            : blink::UserAgentMetadata();
++
++  // Fingerprint: Sec-CH-UA client hints must agree with the UA. Chromium does
++  // NOT derive userAgentData/Sec-CH-UA* from navigator.userAgent - it keeps its
++  // own brand list - so a UA override alone left the hints announcing real
++  // Chromium on the real OS (measured: Mac UA, but brand "Chromium";v="154" and
++  // platform "Windows"). Trivially detectable, and worse than not spoofing.
++  //
++  // This feeds navigator.userAgentData (via navigator_ua.cc). The Sec-CH-UA*
++  // request headers come from a DIFFERENT path - LocalFrameClientImpl - which
++  // is patched the same way; fixing only one leaves the other leaking.
++  const std::string cfg_platform = FpConfigString("ua_platform");
++  const std::string cfg_mobile = FpConfigString("ua_mobile");
++  const std::string cfg_brands = FpConfigString("ua_brands");
++
++  if (!cfg_platform.empty()) m.platform = cfg_platform;
++  if (!cfg_mobile.empty()) m.mobile = (cfg_mobile == "true");
++  if (!cfg_brands.empty()) {
++    m.brand_version_list.clear();
++    for (const auto& b : FpParseBrands(cfg_brands)) {
++      m.brand_version_list.push_back(
++          blink::UserAgentBrandVersion(b.first, b.second));
++    }
++  }
++  // Nothing explicitly configured: derive from the UA actually in effect, so a
++  // config that sets only a UA stays coherent instead of leaking the host.
++  if (cfg_platform.empty() && cfg_mobile.empty() && cfg_brands.empty()) {
++    if (execution_context) {
++      const String ua = execution_context->UserAgent();
++      if (!ua.empty()) {
++        const std::string ua_str = ua.Utf8();
++        const std::string platform = FpUaPlatform(ua_str);
++        if (!platform.empty()) m.platform = platform;
++        m.mobile = FpUaIsMobile(ua_str);
++        const std::string brands = FpUaBrands(ua_str);
++        if (!brands.empty()) {
++          m.brand_version_list.clear();
++          for (const auto& b : FpParseBrands(brands)) {
++            m.brand_version_list.push_back(
++                blink::UserAgentBrandVersion(b.first, b.second));
++          }
++        }
++      }
++    }
++  }
++  return m;
+ }
+ 
+ }  // namespace blink
+
+
+# --- third_party/blink/renderer/core/frame/local_frame_client_impl.cc ---
+# RANGE: LocalFrameClientImpl::UserAgentMetadata() (~L979).
+# PURPOSE: the Sec-CH-UA* REQUEST HEADER override. This is a SEPARATE surface from
+#   navigator.userAgentData - fixing only one leaves the other leaking the
+#   real browser/OS.
+# CONFIG: ua_platform, ua_mobile, ua_brands (same keys, same semantics as the JS
+#   path).
+# MERGE: MEDIUM risk - re-anchor on LocalFrameClientImpl::UserAgentMetadata().
+--- a/third_party/blink/renderer/core/frame/local_frame_client_impl.cc
++++ b/third_party/blink/renderer/core/frame/local_frame_client_impl.cc
+@@ -31,6 +31,11 @@
+ 
+ #include "third_party/blink/renderer/core/frame/local_frame_client_impl.h"
+ 
++// Fingerprint: --fingerprint-config (per-renderer), FP_CONFIG_DATA, FP_CONFIG
++// file, then FP_* env. Used here for the Sec-CH-UA client-hint keys so the
++// request headers agree with the UA.
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
++
+ #include <utility>
+ #include <vector>
+ 
+@@ -974,6 +979,61 @@ std::optional<UserAgentMetadata> LocalFrameClientImpl::UserAgentMetadata() {
+       ua_override_on ? web_frame_->Client()->UserAgentMetadataOverride()
+                      : Platform::Current()->UserAgentMetadata();
+ 
++  // Fingerprint: the Sec-CH-UA* request headers are built from this value by
++  // FrameFetchContext, and it is NOT the same value the JS surface sees: with
++  // no embedder UA override it falls back to Platform::Current(), which is the
++  // process-wide metadata from RenderThreadImpl - while the UA itself is set
++  // per partition. So the headers announced the real browser on the real OS
++  // (measured: Mac UA, but Sec-CH-UA-Platform "Windows" and Chromium brands)
++  // even after navigator.userAgentData was corrected.
++  //
++  // Mirror the derivation done in NavigatorBase::GetUserAgentMetadata() so both
++  // surfaces agree. The effective UA for this frame is used as the source of
++  // truth, since that is what the hints must be consistent with.
++  if (user_agent_metadata) {
++    // LocalFrameClientImpl is in blink/core/frame, where fp_config_helpers.h is
++    // already the established include for fingerprint config.
++    const std::string cfg_platform = FpConfigString("ua_platform");
++    const std::string cfg_mobile = FpConfigString("ua_mobile");
++    const std::string cfg_brands = FpConfigString("ua_brands");
++    if (!cfg_platform.empty() || !cfg_mobile.empty() || !cfg_brands.empty()) {
++      if (!cfg_platform.empty()) user_agent_metadata->platform = cfg_platform;
++      if (!cfg_mobile.empty()) {
++        user_agent_metadata->mobile = (cfg_mobile == "true");
++      }
++      if (!cfg_brands.empty()) {
++        user_agent_metadata->brand_version_list.clear();
++        for (const auto& b : FpParseBrands(cfg_brands)) {
++          user_agent_metadata->brand_version_list.push_back(
++              blink::UserAgentBrandVersion(b.first, b.second));
++        }
++      }
++    } else {
++      // Derive from the UA this frame actually uses. Client()->UserAgent()
++      // returns empty when there is no override, in which case the UA in
++      // effect is the one UserAgent() resolves to - same source the JS path
++      // uses via ExecutionContext::UserAgent().
++      WebString frame_ua = web_frame_->Client()
++                               ? web_frame_->Client()->UserAgentOverride()
++                               : WebString();
++      String ua = frame_ua.IsEmpty() ? UserAgent() : String(frame_ua);
++      if (!ua.empty()) {
++        const std::string ua_str = ua.Utf8();
++        const std::string platform = FpUaPlatform(ua_str);
++        if (!platform.empty()) user_agent_metadata->platform = platform;
++        user_agent_metadata->mobile = FpUaIsMobile(ua_str);
++        const std::string brands = FpUaBrands(ua_str);
++        if (!brands.empty()) {
++          user_agent_metadata->brand_version_list.clear();
++          for (const auto& b : FpParseBrands(brands)) {
++            user_agent_metadata->brand_version_list.push_back(
++                blink::UserAgentBrandVersion(b.first, b.second));
++          }
++        }
++      }
++    }
++  }
++
+   Document* document = web_frame_->GetDocument();
+   probe::ApplyUserAgentMetadataOverride(probe::ToCoreProbeSink(document),
+                                         &user_agent_metadata);
+

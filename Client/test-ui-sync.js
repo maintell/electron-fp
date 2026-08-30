@@ -16,8 +16,12 @@ ipcMain.handle("panel:set-open", () => true);
 // init() calls these on boot, and this probe mirrors main.js rather than
 // requiring it, so new channels must be added in both places.
 ipcMain.handle("ua:presets", () => schema.FP_UA_PRESETS);
+ipcMain.handle("ua:platform-for", (e, ua) => schema.fpPlatformForUserAgent(ua));
 ipcMain.handle("tab:get-ua", () => "");
 ipcMain.handle("tab:set-ua", () => true);
+// The UA apply path now also pushes the kernel config (so navigator_platform
+// travels with the UA), which calls this.
+ipcMain.handle("tab:set-fingerprint", () => true);
 
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ show: false, width: 1400, height: 900,
@@ -71,6 +75,33 @@ app.whenReady().then(async () => {
     const head2 = document.querySelectorAll(".fp-group-head")[0];
     res.collapseToggled = head2.textContent !== label;
 
+    // --- F) UA box -> navigator_platform sync.
+    // The two are separate surfaces with nothing enforcing agreement, so the
+    // panel must keep them in step. A Mac UA left beside the host's real
+    // "Win32" is the exact contradiction navigator_platform exists to remove.
+    const uaInput = document.getElementById("fp-ua-input");
+    const jsonOf = () => JSON.parse(document.getElementById("fp-json-editor").value);
+    // The UA handlers guard on currentTabId, which is null in this harness since
+    // it has no real tabs. Set it rather than weakening the production guard.
+    window.__setCurrentTabForTest("tab-sync");
+
+    ta.value = "{}";
+    await window.__renderFpGroupsForTest();
+    uaInput.value = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15";
+    document.getElementById("fp-ua-apply").click();
+    await new Promise(r => setTimeout(r, 400));
+    res.platformAfterMacUa = jsonOf().navigator_platform;
+
+    uaInput.value = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+    document.getElementById("fp-ua-apply").click();
+    await new Promise(r => setTimeout(r, 400));
+    res.platformAfterWinUa = jsonOf().navigator_platform;
+
+    // Reset must not leave a stale MacIntel override behind.
+    document.getElementById("fp-ua-reset").click();
+    await new Promise(r => setTimeout(r, 400));
+    res.platformAfterReset = jsonOf().navigator_platform;
+
     return res;
   })()`, true);
 
@@ -91,6 +122,12 @@ app.whenReady().then(async () => {
   ck("field -> JSON (int)", out.jsonAfterEdit === 2560, out.jsonAfterEdit);
   ck("clear removes key", out.keyRemovedOnClear === true);
   ck("group collapse toggles", out.collapseToggled === true);
+  ck("Mac UA sets navigator_platform to MacIntel",
+    out.platformAfterMacUa === "MacIntel", out.platformAfterMacUa);
+  ck("switching to a Windows UA updates platform to Win32",
+    out.platformAfterWinUa === "Win32", out.platformAfterWinUa);
+  ck("resetting the UA clears navigator_platform",
+    out.platformAfterReset === undefined, JSON.stringify(out.platformAfterReset));
   ck("no console errors", errs.length === 0, errs.join(" ;; "));
 
   console.log(fail === 0 ? "\nPASS: two-way JSON <-> group field sync works" : "\nFAIL: " + fail);

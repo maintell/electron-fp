@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('api', {
   getUserAgent: (tabId) => ipcRenderer.invoke('tab:get-ua', tabId),
   setUserAgent: (tabId, userAgent) => ipcRenderer.invoke('tab:set-ua', { tabId, userAgent }),
   listUaPresets: () => ipcRenderer.invoke('ua:presets'),
+  // Resolved in the main process so the UA->platform mapping has one copy.
+  platformForUserAgent: (ua) => ipcRenderer.invoke('ua:platform-for', ua),
 
   // Fingerprint panel open/close
   setPanelOpen: (isOpen) => ipcRenderer.invoke('panel:set-open', isOpen),

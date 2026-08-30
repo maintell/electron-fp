@@ -201,16 +201,38 @@ $fpUaPreset.addEventListener('change', () => {
 
 $fpUaApply.addEventListener('click', async () => {
   if (!currentTabId) return;
-  const ok = await window.api.setUserAgent(currentTabId, $fpUaInput.value);
+  const ua = $fpUaInput.value;
+  // Keep navigator_platform in step with the UA. The two are separate surfaces
+  // and nothing enforces agreement, so a Mac UA left beside the host's real
+  // "Win32" is exactly the contradiction the key exists to prevent. The JSON
+  // textarea is the source of truth for the kernel config, so rewrite it here
+  // and let the existing apply path carry both across together.
+  const platform = await window.api.platformForUserAgent(ua);
+  if (platform !== null && platform !== undefined) {
+    const cfg = tryParseJson($fpJsonEditor.value) || {};
+    if (platform) cfg.navigator_platform = platform;
+    else delete cfg.navigator_platform;
+    $fpJsonEditor.value = JSON.stringify(cfg, null, 2);
+  }
+  const ok = await window.api.setUserAgent(currentTabId, ua);
+  await window.api.setFingerprint(currentTabId, tryParseJson($fpJsonEditor.value), ua);
   $fpStatus.textContent = ok ? 'UA applied' : 'Failed to apply UA';
+  await renderFpGroups();
   setTimeout(() => { $fpStatus.textContent = ''; }, 2000);
 });
 
 $fpUaReset.addEventListener('click', async () => {
   if (!currentTabId) return;
+  // Resetting the UA means there is nothing to stay consistent with, so drop
+  // navigator_platform too rather than leaving a MacIntel override behind.
+  const cfg = tryParseJson($fpJsonEditor.value) || {};
+  delete cfg.navigator_platform;
+  $fpJsonEditor.value = JSON.stringify(cfg, null, 2);
   await window.api.setUserAgent(currentTabId, '');
+  await window.api.setFingerprint(currentTabId, cfg, '');
   $fpUaInput.value = '';
   $fpStatus.textContent = 'UA reset to native';
+  await renderFpGroups();
   setTimeout(() => { $fpStatus.textContent = ''; }, 2000);
 });
 
@@ -451,6 +473,12 @@ $fpJsonEditor.addEventListener('input', scheduleFpGroupsRender);
 
 // Test hook: lets test-ui-groups.js drive a render without simulating input.
 window.__renderFpGroupsForTest = renderFpGroups;
+
+// Test hook: the UA/panel handlers guard on currentTabId, which is null in the
+// standalone harness because it has no real tabs. Setting it lets those
+// handlers be exercised without weakening the guard in production code.
+window.__setCurrentTabForTest = (id) => { currentTabId = id; };
+window.__clearCurrentTabForTest = () => { currentTabId = null; };
 
 
 // --- Window Controls (frameless window) ---

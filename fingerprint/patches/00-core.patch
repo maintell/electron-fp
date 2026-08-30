@@ -20,7 +20,7 @@ diff --git a/third_party/blink/renderer/core/frame/fp_config_helpers.h b/third_p
 new file mode 100644
 --- /dev/null
 +++ b/third_party/blink/renderer/core/frame/fp_config_helpers.h
-@@ -0,0 +1,385 @@
+@@ -0,0 +1,404 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -45,12 +45,31 @@ new file mode 100644
 +#include "base/files/file_util.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "ui/gfx/geometry/rect_f.h"
++// The Sec-CH-UA derivation lives in its own dependency-free header so that
++// content/renderer can use it too: including THIS file from content pulls in
++// Skia and blink platform headers, which trip cppgc/Oilpan template constraint
++// errors there. One copy of the logic, shared by both layers.
++#include "electron/fingerprint/helpers/fp_ua_helpers.h"
 +#include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
 +#include "third_party/skia/include/core/SkBitmap.h"
 +#include "third_party/skia/include/core/SkImageInfo.h"
 +#include "third_party/skia/include/core/SkData.h"
 +
 +namespace blink {
++
++// Thin wrappers so blink call sites keep the Fp* naming used by the other
++// helpers. The implementation is fp_ua::* in the shared header.
++inline bool FpUaIsMobile(const std::string& ua) { return fp_ua::IsMobile(ua); }
++inline std::string FpUaPlatform(const std::string& ua) {
++  return fp_ua::Platform(ua);
++}
++inline std::string FpUaBrands(const std::string& ua) {
++  return fp_ua::Brands(ua);
++}
++inline std::vector<std::pair<std::string, std::string>> FpParseBrands(
++    const std::string& wire) {
++  return fp_ua::ParseBrands(wire);
++}
 +
 +inline std::string FpTrim(std::string s) {
 +  while (!s.empty() && (s.back() == ' ' || s.back() == '\t' ||
