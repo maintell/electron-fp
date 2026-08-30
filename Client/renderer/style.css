@@ -307,7 +307,7 @@ body {
   color: #4caf50;
 }
 
-/* === Fingerprint grouped sections (56 keys / 14 functional groups) === */
+/* === Fingerprint grouped sections (60 keys / 15 functional groups) === */
 .fp-groups { padding: 0; }
 #fp-groups-summary { padding: 8px 16px; border-bottom: 1px solid #333; }
 .fp-cov { font-size: 11px; color: #9aa0a6; }

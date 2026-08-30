@@ -18,7 +18,7 @@ contextBridge.exposeInMainWorld('api', {
   getFingerprint: (tabId) => ipcRenderer.invoke('tab:get-fingerprint', tabId),
   setFingerprint: (tabId, config, userAgent) => ipcRenderer.invoke('tab:set-fingerprint', { tabId, config, userAgent }),
 
-  // User-Agent per-tab (Electron-level surface, not one of the kernel's 56 keys)
+  // User-Agent per-tab (Electron-level surface, not one of the kernel's 60 keys)
   getUserAgent: (tabId) => ipcRenderer.invoke('tab:get-ua', tabId),
   setUserAgent: (tabId, userAgent) => ipcRenderer.invoke('tab:set-ua', { tabId, userAgent }),
   listUaPresets: () => ipcRenderer.invoke('ua:presets'),
@@ -38,7 +38,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // App info
   getVersions: () => ipcRenderer.invoke('app:versions'),
-  // Fingerprint schema (56 keys in 14 functional groups) + coverage report
+  // Fingerprint schema (60 keys in 15 functional groups) + coverage report
   getFpSchema: () => ipcRenderer.invoke('fp:schema'),
   getFpCoverage: (cfg) => ipcRenderer.invoke('fp:coverage', cfg),
 

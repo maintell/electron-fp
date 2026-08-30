@@ -171,7 +171,7 @@ async function loadCurrentFingerprint() {
   await renderFpGroups();
 }
 
-// --- User-Agent (client-level surface, separate from the 56 kernel keys) ---
+// --- User-Agent (client-level surface, separate from the 60 kernel keys) ---
 
 async function loadUaPresets() {
   const presets = await window.api.listUaPresets();
@@ -267,7 +267,7 @@ $fpApplyConfig.addEventListener('click', async () => {
   if (!currentTabId) return;
   try {
     const config = JSON.parse($fpJsonEditor.value);
-    // undefined => keep the tab's current UA, so editing the 56 kernel keys
+    // undefined => keep the tab's current UA, so editing the 60 kernel keys
     // alone does not silently wipe a UA the operator set in the UA box.
     const ok = await window.api.setFingerprint(currentTabId, config, undefined);
     $fpStatus.textContent = ok ? 'Applied!' : 'Failed to apply';
@@ -351,7 +351,7 @@ function tryParseJson(str) {
 // ============================================================================
 // Grouped fingerprint UI
 //
-// Renders the kernel's 56 keys as collapsible sections, one per functional
+// Renders the kernel's 60 keys as collapsible sections, one per functional
 // group (hardware / screen / audio / webgl / webgpu / geo / speech / media /
 // canvas / env / network / storage / fonts / battery). The JSON textarea remains
 // the source of truth: editing a field rewrites the JSON, and editing the JSON

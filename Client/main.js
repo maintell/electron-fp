@@ -348,7 +348,7 @@ function setupIPC() {
     const tab = tabs.get(tid);
     if (!tab) return false;
     try {
-      // Normalize against the canonical 56-key schema: fill missing keys with
+      // Normalize against the canonical 60-key schema: fill missing keys with
       // their disabled default and drop anything the kernel does not parse, so
       // a hand-edited JSON blob can never ship an unknown/no-op field.
       let apply = null;
@@ -362,7 +362,7 @@ function setupIPC() {
 
       // UA travels beside the fingerprint, never inside it: fpNormalizeConfig()
       // would silently drop it, and it is an Electron-level surface rather than
-      // one of the kernel's 56 keys. undefined means "leave the current UA
+      // one of the kernel's 60 keys. undefined means "leave the current UA
       // alone"; only an explicit value (including '') overrides it.
       const ua = (userAgent === undefined)
         ? tab.userAgent
@@ -381,7 +381,7 @@ function setupIPC() {
   });
 
   // User-Agent is a client-level (Electron) surface, kept separate from the
-  // kernel's 56-key fingerprint config. See applyTabUserAgent() for why the
+  // kernel's 60-key fingerprint config. See applyTabUserAgent() for why the
   // order of operations matters.
   ipcMain.handle('tab:get-ua', (e, tabId) => {
     const tab = tabs.get(tabId || activeTabId);
@@ -467,7 +467,7 @@ function setupIPC() {
     v8: process.versions.v8
   }));
   // Fingerprint schema: lets the renderer build grouped sections and validate
-  // the JSON editor against the exact kernel key set (56 keys / 14 groups).
+  // the JSON editor against the exact kernel key set (60 keys / 15 groups).
   ipcMain.handle('ua:presets', () => FP_UA_PRESETS);
 
   // Derive navigator_platform from a UA string in the main process rather than
@@ -488,7 +488,7 @@ function setupIPC() {
 
 // --- Random Profile Generator ---
 //
-// Generates a config covering ALL 56 kernel keys, grouped so that related
+// Generates a config covering ALL 60 kernel keys, grouped so that related
 // surfaces agree with each other. Cross-group consistency matters: a GPU vendor
 // that differs between WebGL and WebGPU, or a mobile screen with desktop touch
 // points, is itself a detection signal (constraint C17).

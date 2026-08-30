@@ -21,7 +21,7 @@ out/Release/electron.exe Client/
 - **Per-tab fingerprint isolation** — each tab gets:
   - Unique `BrowserView` with independent renderer
   - Unique `partition` for full cookie/session/storage isolation
-  - Independent 56-key fingerprint config
+  - Independent 60-key fingerprint config
   - Independent User-Agent
 - **User-Agent coverage** (client-level) — per-tab UA applied via
   `session.setUserAgent()`, covering **both** `navigator.userAgent` and the HTTP
@@ -64,14 +64,14 @@ Client/
 
 Each tab creates a `BrowserView` with:
 - `partition: fp-tab-{tabId}` — full cookie/session/storage isolation
-- `fingerprint: { ... }` — 56-key config injected per-renderer via `--fingerprint-config`
+- `fingerprint: { ... }` — 60-key config injected per-renderer via `--fingerprint-config`
 - `userAgent` — applied per-partition via `session.setUserAgent()`
 - Separate renderer process — no shared JS heap
 
 The User-Agent lives **beside** `fingerprint` in a profile, never inside it.
 `fpNormalizeConfig()` drops every key the kernel does not know, so a UA nested
 in the fingerprint object would be silently discarded. It is also a different
-layer: the 56 keys are read by Blink, whereas the UA is applied by Electron.
+layer: the 60 keys are read by Blink, whereas the UA is applied by Electron.
 
 **Ordering matters:** `setUserAgent()` must be called **before** the
 `BrowserView` is constructed. Measured: setting it on an already-open session
@@ -101,13 +101,13 @@ electron Client/test-render.js
 # Verify per-tab isolation + runtime profile switch (10 checks)
 electron Client/test-integration.js
 
-# Client schema vs kernel patch: 56 keys, 14 groups, no orphans (14 checks)
+# Client schema vs kernel patch: 60 keys, 15 groups, no orphans (14 checks)
 node Client/test-schema.js
 
 # Random profile coherence over 300 samples (7 checks)
 node Client/test-random.js
 
-# Grouped panel UI renders 14 sections / 56 fields
+# Grouped panel UI renders 15 sections / 60 fields
 electron Client/test-ui-groups.js
 
 # Two-way JSON <-> group field sync (11 checks)
@@ -120,10 +120,10 @@ electron Client/test-webrtc-ip.js
 electron fingerprint/scripts/smoke.js --isolation --verbose
 ```
 
-### Fingerprint Keys (56 keys / 14 functional groups)
+### Fingerprint Keys (60 keys / 15 functional groups)
 
 Generated from `fp-schema.js`, the single source of truth. Every key is implemented
-in the kernel patch and verified by `test-schema.js` (56/56 exact match).
+in the kernel patch and verified by `test-schema.js` (60/60 exact match).
 
 | Group | Description | Keys |
 |-------|-------------|------|
@@ -184,7 +184,7 @@ is surfaced here rather than hidden.
 
 ```bash
 # Static (no browser)
-node Client/test-schema.js     # 56-key schema vs kernel (15 checks)
+node Client/test-schema.js     # 60-key schema vs kernel (15 checks)
 node Client/test-random.js     # randomizer invariants (20 checks)
 
 # Live (needs the built Electron; rename out/Default/resources/app first)

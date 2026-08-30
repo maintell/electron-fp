@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Verify the client fingerprint schema matches the KERNEL patch exactly (56 keys)
+// Verify the client fingerprint schema matches the KERNEL patch exactly (60 keys)
 // and that functional grouping is complete (every key in exactly one group).
 "use strict";
 
@@ -79,7 +79,7 @@ check("normalize drops unknown", norm.unknown.includes("bogus_key") && !("bogus_
 const cov = schema.fpCoverage({ screen_width: 1920, screen_height: 1080, tz_id: "Asia/Tokyo" });
 check("coverage counts active", cov.reduce((a, c) => a + c.active, 0) === 3,
   JSON.stringify(cov.filter(c => c.active).map(c => c.id + ":" + c.active)));
-check("coverage totals == 56", cov.reduce((a, c) => a + c.total, 0) === schema.FP_KEY_NAMES.length);
+check("coverage totals == 60", cov.reduce((a, c) => a + c.total, 0) === schema.FP_KEY_NAMES.length);
 
 console.log("");
 console.log("groups (" + schema.FP_GROUP_IDS.length + "):");

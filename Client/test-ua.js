@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Verify User-Agent coverage: a client-level (Electron) surface that lives
-// BESIDE the kernel's 56-key fingerprint config, not inside it.
+// BESIDE the kernel's 60-key fingerprint config, not inside it.
 //
 // What is verified here, and why each needs a live browser:
 //   1. navigator.userAgent reflects the configured UA.
@@ -11,7 +11,7 @@
 //   3. Resetting to '' reverts to the native UA.
 //   4. Two tabs on different partitions hold different UAs simultaneously.
 //   5. The kernel fingerprint config is unaffected: setting a UA must not
-//      disturb the 56-key config, and vice versa.
+//      disturb the 60-key config, and vice versa.
 //
 // Ordering trap this test protects: session.setUserAgent() does NOT reach an
 // already-open view, even after reload. It only applies to views created

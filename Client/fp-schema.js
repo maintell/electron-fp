@@ -4,7 +4,15 @@
 // Every key here MUST exist in the kernel patch:
 //   F:\code\src\electron\fingerprint\patches\fp-fingerprint.patch
 // (look for FpConfigString / FpConfigInt / FpConfigInt64 call sites).
-// The kernel README claims "60" keys; the actual parsed count is 56.
+// The kernel README claims "60" keys and that IS the correct count (verified
+// against check.py's 60 EXPECTED_KEYS and the FpConfig* call sites).
+//
+// An earlier note here claimed 56. That undercount came from grepping the
+// patch for FpConfig* call sites: four webgl_* keys are written inside
+// ternary expressions split across lines
+//   pname == 0x9245 ? "webgl_vendor" : "webgl_renderer"
+// so a line-oriented grep missed them. Counting with a paren-balanced parse
+// gives 60, matching check.py. Trust check.py over a regex here.
 //
 // Value encoding rules (from the kernel parser - these are NOT negotiable):
 //   * "int"    -> JSON number, parsed with atoi; must be > 0 to take effect
@@ -153,7 +161,7 @@ const FP_KEYS = {
   },
 };
 // --- Functional groups -------------------------------------------------------
-// Each of the 56 kernel keys belongs to exactly ONE group. Groups drive the
+// Each of the 60 kernel keys belongs to exactly ONE group. Groups drive the
 // client UI (collapsible sections), the randomizer (coherent per-group fills)
 // and the coverage report.
 const FP_GROUPS = [
@@ -257,7 +265,7 @@ function fpCoerce(key, value) {
 // ============================================================================
 // User-Agent: a CLIENT-level (Electron) surface, deliberately NOT a kernel key.
 //
-// The kernel's 56 keys are read by Blink via --fingerprint-config. The UA is
+// The kernel's 60 keys are read by Blink via --fingerprint-config. The UA is
 // applied by Electron's session.setUserAgent(), which is a different layer
 // entirely. Keeping it out of FP_KEYS is not cosmetic:
 //
