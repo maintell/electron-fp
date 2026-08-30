@@ -9,6 +9,13 @@ const { app, BrowserWindow, BrowserView, session } = require("electron");
 const http = require("http");
 const schema = require("./fp-schema.js");
 
+// GPUAdapterInfo omits device/description unless WebGPUDeveloperFeatures is
+// enabled (gpu_adapter.cc L324-326), which made webgpu_device /
+// webgpu_description untestable. Turning the flag on here exercises them for
+// real instead of skipping. Must precede app.whenReady(). Verified: with this
+// flag both keys report their configured values.
+app.commandLine.appendSwitch("enable-blink-features", "WebGPUDeveloperFeatures");
+
 // Several surfaces (navigator.mediaDevices, navigator.storage, geolocation) are
 // gated to secure origins and are simply undefined on data: URLs. Serving from
 // 127.0.0.1 is treated as secure, so the audit runs there instead. An earlier
@@ -379,28 +386,60 @@ async function openWith(fp, opts) {
       "})()"
     ].join("\n");
     // The kernel rewrites the coordinates of a position the platform already
-    // delivered (Geolocation::OnPositionUpdated); it does not fabricate one. A
-    // host with no geolocation provider therefore fails identically WITH and
-    // WITHOUT config - verified: both return "2:Position unavailable". So
-    // compare against the baseline before calling this a failure.
-    const geoBase = await probe({}, geoJs);
-    const geo = await probe(
-      { geo_latitude: -33.8688, geo_longitude: 151.2093, geo_accuracy: 5 }, geoJs);
-    const geoUnavailable = geoBase && (geoBase.err || geoBase.__timeout || geoBase.__err);
-    if (geo && (geo.err || geo.__timeout || geo.__err)) {
-      console.log("SKIP  geo_latitude/longitude/accuracy: " +
-        (geo.err || geo.__err || "timed out") +
-        (geoUnavailable
-          ? " -- baseline fails the same way (" +
-            (geoBase.err || "timeout") + "), so this host has no position provider"
-          : " -- BASELINE OK, so this is a real failure"));
-      // Only a genuine regression when the unconfigured call succeeds.
-      check("geo_*: not a regression (baseline also unavailable)", geoUnavailable === true,
-        "baseline=" + JSON.stringify(geoBase));
+    // delivered (Geolocation::OnPositionUpdated); it does NOT fabricate one.
+    // On a host with no geolocation provider nothing arrives and configured
+    // and unconfigured calls fail identically - which would mask a real bug.
+    //
+    // So feed the platform a real position over CDP and assert the kernel
+    // rewrites it. Two CDP details are load-bearing:
+    //   * Page.enable + setFocusEmulationEnabled - without them the page is
+    //     not "visible" and Geolocation returns early (geolocation.cc L697,
+    //     immediately above the fp spoof block).
+    //   * Emulation.setGeolocationOverride supplies the position to spoof.
+    const geoInjected = { latitude: 1.1111, longitude: 2.2222, accuracy: 111 };
+    async function probeGeo(fp) {
+      const v = await openWith(fp, null);
+      win.addBrowserView(v);
+      await v.webContents.loadURL(ORIGIN);
+      let r;
+      try {
+        const wc = v.webContents;
+        wc.debugger.attach("1.3");
+        await wc.debugger.sendCommand("Page.enable");
+        await wc.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
+        await wc.debugger.sendCommand("Emulation.setGeolocationOverride", geoInjected);
+        r = await Promise.race([
+          wc.executeJavaScript(geoJs),
+          new Promise(res => setTimeout(() => res({ __timeout: true }), 15000))
+        ]);
+      } catch (e) {
+        r = { __err: String(e && e.message) };
+      }
+      win.removeBrowserView(v);
+      return r;
+    }
+
+    const geoBase = await probeGeo({});
+    const geo = await probeGeo(
+      { geo_latitude: -33.8688, geo_longitude: 151.2093, geo_accuracy: 5 });
+    // The kernel requires latitude AND longitude together; either alone is a
+    // no-op (geolocation.cc: if (!fp_lat.empty() && !fp_lng.empty())).
+    const geoPartial = await probeGeo({ geo_latitude: 55.5 });
+
+    const geoOk = geoBase && !geoBase.err && !geoBase.__timeout && !geoBase.__err;
+    if (!geoOk) {
+      console.log("SKIP  geo_latitude/longitude/accuracy: no position available " +
+        JSON.stringify(geoBase) + " (CDP override did not deliver)");
     } else {
+      check("geo_*: unconfigured passes the real position through",
+        geoBase.lat === 1.1111 && geoBase.lon === 2.2222,
+        JSON.stringify(geoBase));
       check("geo_latitude", geo && Math.abs(geo.lat - (-33.8688)) < 0.001, geo && String(geo.lat));
       check("geo_longitude", geo && Math.abs(geo.lon - 151.2093) < 0.001, geo && String(geo.lon));
       check("geo_accuracy", geo && geo.acc === 5, geo && String(geo.acc));
+      check("geo_*: latitude alone is ignored (kernel needs both)",
+        geoPartial && geoPartial.lat === 1.1111 && geoPartial.lon === 2.2222,
+        JSON.stringify(geoPartial));
     }
 
     // ---------- webgpu adapter metadata ----------
