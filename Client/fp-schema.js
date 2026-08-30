@@ -293,8 +293,14 @@ const FP_UA_PRESETS = [
   {
     id: "iphone-safari",
     label: "iPhone / Safari",
-    platform: "android",
+    platform: "ios",
     ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
+  },
+  {
+    id: "ipad-safari",
+    label: "iPad / Safari",
+    platform: "ios",
+    ua: "Mozilla/5.0 (iPad; CPU OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
   }
 ];
 
@@ -316,7 +322,8 @@ const FP_PLATFORM_BY_ID = {
   win: "Win32",
   mac: "MacIntel",
   linux: "Linux x86_64",
-  android: "Linux armv8l"
+  android: "Linux armv8l",
+  ios: "iPhone"
 };
 
 /**
@@ -347,6 +354,7 @@ function fpUaMetadataForUserAgent(ua) {
     // Not hardcoded to Windows: Firefox ships on Linux (X11) and macOS too, and
     // reporting Windows for a Linux UA is the contradiction we are removing.
     const p = /Android/.test(ua) ? "Android"
+            : /iPhone|iPad/.test(ua) ? "iOS"
             : /Macintosh/.test(ua) ? "macOS"
             : /Windows/.test(ua) ? "Windows"
             : "Linux";
@@ -398,8 +406,13 @@ function fpPlatformForUserAgent(ua) {
   if (preset) return FP_PLATFORM_BY_ID[preset.platform] || "";
   // Not one of our presets (hand-entered, or imported from another client):
   // infer from the UA text so a hand-typed Mac UA does not report Win32.
-  if (/Macintosh|Mac OS X/.test(ua)) return "MacIntel";
+  //
+  // iPhone/iPad MUST be tested before the Mac rule: iOS UAs contain the
+  // substring "Mac OS X" ("CPU iPhone OS 18_1 like Mac OS X"), so a
+  // Macintosh-first test reports an iPhone as "MacIntel" - a contradiction
+  // that is trivial to fingerprint. Ordering here is load-bearing.
   if (/iPhone|iPad/.test(ua)) return "iPhone";
+  if (/Macintosh|Mac OS X/.test(ua)) return "MacIntel";
   if (/Android/.test(ua)) return "Linux armv8l";
   if (/Windows/.test(ua)) return "Win32";
   if (/X11|Linux/.test(ua)) return "Linux x86_64";

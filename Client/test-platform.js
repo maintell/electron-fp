@@ -116,6 +116,57 @@ async function uaOf(view) {
         "platform=" + r7.platform);
     }
 
+    // 8. iOS must not be swallowed by the Mac rule.
+    //
+    // iOS UAs contain the substring "Mac OS X" ("CPU iPhone OS 18_1 like Mac OS
+    // X"), so a Macintosh-first test reports an iPhone as "MacIntel" - a
+    // contradiction that is trivial to fingerprint. This asserts the literal
+    // expected value rather than re-deriving it via fpPlatformForUserAgent,
+    // because that function was once its own oracle and so could not catch this.
+    const iosCases = [
+      ["iPhone hand-typed", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1", "iPhone"],
+      ["iPad hand-typed", "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1", "iPhone"],
+      ["Mac hand-typed", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15", "MacIntel"]
+    ];
+    const iosBad = [];
+    for (const [name, ua, want] of iosCases) {
+      const got = schema.fpPlatformForUserAgent(ua);
+      if (got !== want) iosBad.push(name + " (want " + want + ", got " + JSON.stringify(got) + ")");
+    }
+    check("iOS UAs are not misdetected as Mac", iosBad.length === 0, iosBad.join("; "));
+
+    // 9. Every UA preset resolves to a non-empty platform, and the ios id maps
+    // to iPhone (it used to be missing from FP_PLATFORM_BY_ID entirely).
+    const unmapped = schema.FP_UA_PRESETS
+      .filter(p => !schema.fpPlatformForUserAgent(p.ua))
+      .map(p => p.id);
+    check("every UA preset maps to a platform", unmapped.length === 0, unmapped.join(", "));
+    check("ios maps to iPhone", schema.FP_PLATFORM_BY_ID.ios === "iPhone",
+      JSON.stringify(schema.FP_PLATFORM_BY_ID.ios));
+
+    // 10. The Sec-CH-UA derivation must agree with navigator.platform about
+    // iOS. The Firefox branch once had no iOS case at all, so an iOS UA fell
+    // through to "Linux" while navigator.platform said "iPhone" - the two
+    // surfaces contradicting each other again.
+    //
+    // Two vocabularies, both must be right: navigator.platform says "iPhone",
+    // Sec-CH-UA-Platform says "iOS".
+    const metaBad = [];
+    for (const [name, ua, wantPlatform, wantMeta] of [
+      // Must contain the literal "Firefox" to reach the Firefox branch -
+      // FxiOS does NOT (it falls through to the Safari branch instead), so a
+      // UA using FxiOS would silently test the wrong code path.
+      ["iOS Firefox", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Firefox/133.0 Mobile/15E148 Safari/605.1.15", "iPhone", "iOS"],
+      ["iOS Safari", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1", "iPhone", "iOS"],
+      ["Linux Firefox", "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0", "Linux x86_64", "Linux"]
+    ]) {
+      const m = schema.fpUaMetadataForUserAgent(ua);
+      const pl = schema.fpPlatformForUserAgent(ua);
+      if (pl !== wantPlatform) metaBad.push(name + " platform want " + wantPlatform + ", got " + JSON.stringify(pl));
+      if (!m || m.platform !== wantMeta) metaBad.push(name + " metadata want " + wantMeta + ", got " + JSON.stringify(m && m.platform));
+    }
+    check("Sec-CH-UA and navigator.platform agree on iOS/Linux", metaBad.length === 0, metaBad.join("; "));
+
     console.log("");
     console.log(fail === 0 ? "PASS: " + pass + " checks" : "FAIL: " + fail + " checks");
     app.exit(fail === 0 ? 0 : 1);
