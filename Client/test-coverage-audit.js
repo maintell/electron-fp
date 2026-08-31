@@ -263,36 +263,59 @@ async function openWith(fp, opts) {
     check("permissions_status", pm === "granted", String(pm));
 
     // ---------- speech voices ----------
+    // Voices load asynchronously: the first getVoices() call typically returns
+    // an empty list and the real list arrives later via OnSetVoiceList. Wait
+    // for onvoiceschanged AND poll, so the baseline is measured truthfully
+    // rather than reporting 0 and looking like an empty host.
     const spJs = [
       "(function(){",
       "  return new Promise(function(res){",
-      "    var vs = window.speechSynthesis ? speechSynthesis.getVoices() : [];",
-      "    if (vs.length) return res({count: vs.length, lang: vs[0].lang});",
-      "    if (!window.speechSynthesis) return res({count:-1, lang:null});",
-      "    speechSynthesis.onvoiceschanged = function(){",
-      "      var v2 = speechSynthesis.getVoices();",
-      "      res({count: v2.length, lang: v2.length ? v2[0].lang : null});",
-      "    };",
-      "    setTimeout(function(){",
-      "      var v3 = speechSynthesis.getVoices();",
-      "      res({count: v3.length, lang: v3.length ? v3[0].lang : null});",
-      "    }, 1200);",
+      "    var sy = window.speechSynthesis;",
+      "    if(!sy) return res({err:'no speechSynthesis'});",
+      "    function snap(){",
+      "      var v = sy.getVoices();",
+      "      return {count: v.length, lang: v.length ? v[0].lang : null};",
+      "    }",
+      "    if(sy.getVoices().length) return res(snap());",
+      "    var done=false;",
+      "    function fin(){ if(!done){ done=true; res(snap()); } }",
+      "    sy.onvoiceschanged = fin;",
+      "    var tries=0;",
+      "    var iv=setInterval(function(){",
+      "      tries++;",
+      "      if(sy.getVoices().length){ clearInterval(iv); fin(); }",
+      "      else if(tries>50){ clearInterval(iv); fin(); }",
+      "    }, 100);",
       "  });",
       "})()"
     ].join("\n");
-    // The kernel truncates the real voice list and rewrites each voice's lang;
-    // it cannot invent voices. On a host with 0 voices both are no-ops, so
-    // assert only what the host can actually exercise.
+    // The voice list arrives ASYNCHRONOUSLY via OnSetVoiceList, so a probe
+    // that reads getVoices() once immediately reports 0 and looks like "the
+    // host has no voices" - which is how these two keys were wrongly marked
+    // untestable. Wait for onvoiceschanged (and poll as a fallback), then
+    // measure the base count in the SAME way before asserting.
+    // Voice enumeration is LAZY and warms up process-wide: the very first
+    // renderer to touch speechSynthesis sees an empty list (measured: 1st
+    // probe -> 0 voices, 2nd -> 3). Without this warm-up the baseline reads 0,
+    // the "no voices" branch fires, and two working keys get skipped.
+    await probe({}, spJs);
     const spBase = await probe({}, spJs);
-    const sp = await probe({ speech_voices_count: 6, speech_voices_lang: "ja-JP" }, spJs);
+    // Ask for 1: the kernel truncates, so 1 proves it works on any host that
+    // has at least 2 voices. Asking for 6 would be a no-op on a host with 3.
+    const sp1 = await probe({ speech_voices_count: 1 }, spJs);
+    const spLang = await probe({ speech_voices_lang: "ja-JP" }, spJs);
     if (!spBase || !spBase.count) {
-      console.log("SKIP  speech_voices_*: host exposes 0 voices (kernel can only " +
-        "truncate, not invent) " + JSON.stringify(spBase));
+      console.log("SKIP  speech_voices_*: host exposes no voices at all " +
+        JSON.stringify(spBase) + " (kernel truncates, cannot invent)");
     } else {
-      const wantCount = Math.min(6, spBase.count);
-      check("speech_voices_count", sp && sp.count === wantCount,
-        "base=" + spBase.count + " -> " + (sp && sp.count));
-      check("speech_voices_lang", sp && sp.lang === "ja-JP", sp && String(sp.lang));
+      check("speech_voices_count truncates to 1",
+        sp1 && sp1.count === 1, "base=" + spBase.count + " -> " + (sp1 && sp1.count));
+      check("speech_voices_lang overrides every voice",
+        spLang && spLang.lang === "ja-JP", "base=" + spBase.lang + " -> " + (spLang && spLang.lang));
+      // Language rewriting must not silently change the count.
+      check("speech_voices_lang keeps the count intact",
+        spLang && spLang.count === spBase.count,
+        "base=" + spBase.count + " -> " + (spLang && spLang.count));
     }
 
     // ---------- media devices ----------
