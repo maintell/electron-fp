@@ -13,7 +13,7 @@
 // via run-tests.js, or run it under electron directly)
 "use strict";
 
-const path = require("path");
+const fs = require("fs");
 const { app, BrowserWindow, BrowserView } = require("electron");
 const http = require("http");
 const schema = require("./fp-schema.js");
@@ -73,6 +73,42 @@ const srv = http.createServer((q, r) => {
     ck("schema has " + k, !!schema.FP_KEYS[k], "kind=" + (schema.FP_KEYS[k] || {}).kind);
   }
   ck("schema key count is 63", schema.FP_KEY_NAMES.length === 63, String(schema.FP_KEY_NAMES.length));
+
+  // 1b) The SHIPPED PRESETS must set these too. The kernel fix is worthless if
+  // a preset omits navigator_vendor: macos-safari originally had a Mac UA and
+  // no vendor, so it reported the host's "Google Inc." - the exact leak this
+  // file exists to prevent. Each preset's value must also match what the UA
+  // derivation would produce, so a preset can never contradict its own UA.
+  const profiles = JSON.parse(fs.readFileSync(__dirname + "/profiles.json", "utf8")).profiles;
+  let presetMissing = [], presetMismatch = [];
+  // Only the four SHIPPED presets are held to this standard. A profile the user
+  // generated before these keys existed is legitimately missing them - the
+  // kernel treats an absent key as "disabled" and falls back to the host, so
+  // old saved profiles keep working. Asserting on them would fail every user
+  // who generated a profile before the upgrade.
+  const SHIPPED = ["win10-chrome", "macos-safari", "linux-firefox", "mobile-android"];
+  for (const p of profiles) {
+    if (!p.fingerprint) continue; // 'default' = deliberately no fingerprint
+    if (SHIPPED.indexOf(p.id) === -1) continue;
+    const ua = p.userAgent || "";
+    const isApple = /Macintosh|iPhone|iPad/.test(ua);
+    const isMobile = /Android|iPhone|iPad/.test(ua);
+    const f = p.fingerprint;
+
+    for (const k of ["navigator_vendor", "navigator_languages", "device_pixel_ratio"]) {
+      if (f[k] === undefined || f[k] === null || f[k] === "") presetMissing.push(p.id + "." + k);
+    }
+    const wantVendor = isApple ? "Apple Computer, Inc." : "Google Inc.";
+    if (f.navigator_vendor && f.navigator_vendor !== wantVendor) {
+      presetMismatch.push(p.id + ": " + f.navigator_vendor + " under a " + (isApple ? "Apple" : "non-Apple") + " UA");
+    }
+    const dpr = parseFloat(f.device_pixel_ratio);
+    if (f.device_pixel_ratio && isMobile && !(dpr > 1)) {
+      presetMismatch.push(p.id + ": mobile UA with dpr " + f.device_pixel_ratio);
+    }
+  }
+  ck("shipped presets set all three new keys", presetMissing.length === 0, presetMissing.join(", "));
+  ck("shipped presets agree with their own UA", presetMismatch.length === 0, presetMismatch.join("; "));
 
   // 2) Defaults must be empty => disabled => real value passthrough.
   const def = schema.fpDefaultConfig();

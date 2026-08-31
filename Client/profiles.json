@@ -42,7 +42,10 @@
         "navigator_platform": "Win32",
         "ua_platform": "",
         "ua_mobile": "",
-        "ua_brands": ""
+        "ua_brands": "",
+        "navigator_vendor": "Google Inc.",
+        "navigator_languages": "en-US,en",
+        "device_pixel_ratio": "1"
       },
       "createdAt": "2026-01-01T00:00:00Z",
       "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -83,7 +86,10 @@
         "navigator_platform": "MacIntel",
         "ua_platform": "",
         "ua_mobile": "",
-        "ua_brands": ""
+        "ua_brands": "",
+        "navigator_vendor": "Apple Computer, Inc.",
+        "navigator_languages": "en-US,en",
+        "device_pixel_ratio": "2"
       },
       "createdAt": "2026-01-01T00:00:00Z",
       "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15"
@@ -124,7 +130,10 @@
         "navigator_platform": "Linux x86_64",
         "ua_platform": "",
         "ua_mobile": "",
-        "ua_brands": ""
+        "ua_brands": "",
+        "navigator_vendor": "Google Inc.",
+        "navigator_languages": "en-US,en",
+        "device_pixel_ratio": "1"
       },
       "createdAt": "2026-01-01T00:00:00Z",
       "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0"
@@ -165,7 +174,10 @@
         "navigator_platform": "Linux armv8l",
         "ua_platform": "",
         "ua_mobile": "",
-        "ua_brands": ""
+        "ua_brands": "",
+        "navigator_vendor": "Google Inc.",
+        "navigator_languages": "en-US,en",
+        "device_pixel_ratio": "2.75"
       },
       "createdAt": "2026-01-01T00:00:00Z",
       "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
