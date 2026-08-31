@@ -84,6 +84,9 @@ EXPECTED_KEYS = [
     "client_rects_seed",
     "navigator_platform",
     "ua_brands", "ua_platform", "ua_mobile",
+    # 61-63: surfaces that leaked the host during an external audit against
+    # browserleaks.com and creepjs (each disagreed with the spoofed UA).
+    "navigator_vendor", "navigator_languages", "device_pixel_ratio",
 ]
 
 DEBUG_PATTERNS = [

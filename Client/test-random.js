@@ -21,9 +21,11 @@ const fnSrc = src.slice(start, end);
 // silently produced zero checks instead of failing loudly).
 const mod = new Function(
   "fpDefaultConfig", "FP_KEY_NAMES", "fpRandomUserAgent", "fpPlatformForUserAgent",
+  "fpVendorForUserAgent", "fpPixelRatioForUserAgent", "fpLanguagesForUserAgent",
   fnSrc + "; return generateRandomProfile;"
 )(schema.fpDefaultConfig, schema.FP_KEY_NAMES, schema.fpRandomUserAgent,
-  schema.fpPlatformForUserAgent);
+  schema.fpPlatformForUserAgent, schema.fpVendorForUserAgent,
+  schema.fpPixelRatioForUserAgent, schema.fpLanguagesForUserAgent);
 
 // Guard against the silent-zero-checks failure above: a ReferenceError thrown
 // here would otherwise abort before any check ran, and a run with 0 checks must
@@ -96,6 +98,8 @@ let featUnknown = 0, featDup = 0, featNoCore = 0, featSizeBad = 0;
 let limQuoted = 0, limParse = 0, limOver = 0, limUnder = 0;
 let ipBad = 0, ipInconsistent = 0, fontWhitelistSet = 0, fontCountBad = 0;
 let platformMismatch = 0, platformUnset = 0;
+let vendorMismatch = 0, dprBad = 0, dprMobileMismatch = 0;
+let langsEmpty = 0, langsMalformed = 0;
 const seenGroups = new Set();
 
 for (let i = 0; i < N; i++) {
@@ -203,6 +207,35 @@ for (let i = 0; i < N; i++) {
   const wantPlatform = schema.fpPlatformForUserAgent(prof.userAgent);
   if (fp.navigator_platform !== wantPlatform) platformMismatch++;
   if (wantPlatform === "") platformUnset++;
+
+  // Keys 61-63. These were the three surfaces an external audit against
+  // browserleaks.com and creepjs found still leaking the host. They are derived
+  // from the UA (not the archetype) precisely so they can never contradict it,
+  // and this asserts that guarantee - the archetype and the UA are drawn from
+  // independent pools, so without the derivation about half of all profiles
+  // came out as "iPhone UA + Google Inc.".
+  const ua = prof.userAgent;
+  const isApple = /Macintosh|iPhone|iPad/.test(ua);
+  const isMobile = /Android|iPhone|iPad/.test(ua);
+
+  const wantVendor = isApple ? "Apple Computer, Inc." : "Google Inc.";
+  if (fp.navigator_vendor !== wantVendor) vendorMismatch++;
+
+  const dpr = parseFloat(fp.device_pixel_ratio);
+  if (!(dpr > 0)) dprBad++;
+  // A mobile UA reporting a desktop ratio of 1 is the contradiction that got
+  // these keys added in the first place.
+  if (isMobile && !(dpr > 1)) dprMobileMismatch++;
+
+  // languages is deliberately left empty by the UA derivation (locale is not
+  // reliably inferable from a UA, and fabricating one is no better than
+  // leaking), so the generator falls back to the archetype list. It must
+  // therefore be non-empty and well-formed.
+  const langs = String(fp.navigator_languages || "");
+  if (!langs) langsEmpty++;
+  else if (!/^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*(,\s*[a-z]{2,3}(-[A-Za-z0-9]{2,8})*)*$/.test(langs)) {
+    langsMalformed++;
+  }
 }
 
 check("schema-complete over " + N + " profiles", bad.length === 0, bad.slice(0, 3).join("; "));
@@ -225,6 +258,14 @@ check("audio_data_strength in [0,1]", strengthBad === 0, strengthBad + " bad");
 check("battery_level in [0,1]", levelBad === 0, levelBad + " bad");
 check("navigator_platform agrees with the UA", platformMismatch === 0, platformMismatch + " mismatches");
 check("navigator_platform always set (never Win32 under a Mac UA)", platformUnset === 0, platformUnset + " unset");
+check("navigator_vendor agrees with the UA (no iPhone+Google)", vendorMismatch === 0,
+  vendorMismatch + " contradictions");
+check("device_pixel_ratio is a positive number", dprBad === 0, dprBad + " bad");
+check("device_pixel_ratio > 1 whenever the UA is mobile", dprMobileMismatch === 0,
+  dprMobileMismatch + " mobile profiles at ratio 1");
+check("navigator_languages is set", langsEmpty === 0, langsEmpty + " empty");
+check("navigator_languages is well-formed BCP-47 list", langsMalformed === 0,
+  langsMalformed + " malformed");
 check("randomizer exercises most groups", seenGroups.size >= 12,
   seenGroups.size + "/" + schema.FP_GROUP_IDS.length + " groups populated");
 

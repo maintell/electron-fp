@@ -2387,3 +2387,134 @@
    probe::ApplyUserAgentMetadataOverride(probe::ToCoreProbeSink(document),
                                          &user_agent_metadata);
 
+
+# --- third_party/blink/renderer/core/frame/navigator.cc ---
+# RANGE: Navigator::vendor().
+# PURPOSE: navigator.vendor override. An external audit against browserleaks.com
+#   and creepjs found this still reporting the host's "Google Inc." under an
+#   iPhone UA while webgl_vendor was already spoofed - two vendor surfaces
+#   contradicting each other, which is flagged as a lie immediately.
+# CONFIG: navigator_vendor.
+# MERGE: LOW risk. vendor() is a plain NON-VIRTUAL member of Navigator, so it
+#   can only be hooked here - marking an override in NavigatorID or
+#   NavigatorBase fails to compile ("only virtual member functions can be
+#   marked 'override'"). Empty config means disabled and returns the real value.
+--- a/third_party/blink/renderer/core/frame/navigator.cc
++++ b/third_party/blink/renderer/core/frame/navigator.cc
+@@ -24,6 +24,7 @@
+ #include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/execution_context/navigator_base.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/settings.h"
+@@ -43,6 +44,20 @@
+ 
+ String Navigator::vendor() const {
++  // Fingerprint: navigator.vendor override.
++  //
++  // vendor() lives on Navigator, NOT on NavigatorID or NavigatorBase - it is a
++  // plain non-virtual member, so it can only be hooked here (an `override`
++  // anywhere else fails to compile: "only virtual member functions can be
++  // marked 'override'").
++  //
++  // This is a separate surface from platform() and the UA with nothing
++  // enforcing agreement. Under a Mac or iPhone UA the hardcoded "Google Inc."
++  // is a direct contradiction - measured on creepjs: an iPhone profile still
++  // reported vendor "Google Inc." while webgl_vendor was already spoofed to
++  // "Apple Computer, Inc.", so the two vendor surfaces disagreed with each
++  // other and the profile was flagged as a lie.
++  //
++  // Empty means disabled and falls back to the real vendor below.
++  std::string fp_vendor = FpConfigString("navigator_vendor");
++  if (!fp_vendor.empty()) {
++    return String::FromUtf8(fp_vendor);
++  }
++
+   // Do not change without good cause. History:
+   // https://code.google.com/p/chromium/issues/detail?id=276813
+   // https://www.w3.org/Bugs/Public/show_bug.cgi?id=27786
+
+# --- third_party/blink/renderer/core/frame/navigator_language.cc ---
+# RANGE: NavigatorLanguage::EnsureUpdatedLanguage().
+# PURPOSE: navigator.language and navigator.languages override. The audit found
+#   these pinned to the host's real locale ("zh-CN") regardless of the spoofed
+#   timezone and UA.
+# CONFIG: navigator_languages.
+# MERGE: LOW risk. language() is just languages().front(), so overriding the
+#   vector here covers BOTH surfaces with one hook. Placed before the
+#   devtools accept-language override so an explicit fingerprint config wins.
+--- a/third_party/blink/renderer/core/frame/navigator_language.cc
++++ b/third_party/blink/renderer/core/frame/navigator_language.cc
+@@ -9,6 +9,7 @@
+ #include "third_party/blink/public/common/switches.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "third_party/blink/renderer/core/frame/web_feature.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/platform/language.h"
+@@ -62,6 +63,18 @@
+ void NavigatorLanguage::EnsureUpdatedLanguage() {
++  // Fingerprint: navigator.language / navigator.languages override.
++  //
++  // language() is just languages().front(), so overriding the vector here
++  // covers both surfaces with one hook. These are independent of the
++  // timezone: a profile claiming Australia/Sydney still reported the
++  // host's "zh-CN" (measured on browserleaks and creepjs), which pins the
++  // machine's real locale regardless of every other setting.
++  //
++  // Empty means disabled and falls through to the real languages below.
++  std::string fp_languages = FpConfigString("navigator_languages");
++  if (!fp_languages.empty()) {
++    languages_ = ParseAndSanitize(String::FromUtf8(fp_languages));
++    languages_dirty_ = true;
++    return;
++  }
++
+   String accept_languages_override;
+   probe::ApplyAcceptLanguageOverride(execution_context_,
+                                      &accept_languages_override);
+
+# --- third_party/blink/renderer/core/frame/local_dom_window.cc ---
+# RANGE: LocalDOMWindow::devicePixelRatio().
+# PURPOSE: window.devicePixelRatio override. A mobile UA reporting the host's
+#   desktop ratio of 1 was the third contradiction the external audit caught.
+# CONFIG: device_pixel_ratio.
+# MERGE: LOW risk, and deliberately hooked at the WINDOW level rather than in
+#   LocalFrame::DevicePixelRatio(). The latter is the scale the compositor and
+#   layout use for the real backing store; changing it would rescale actual
+#   rendering and blur or break pages. Overriding only the JS-visible value
+#   leaves rendering on the true device scale.
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -91,6 +91,7 @@
+ #include "third_party/blink/renderer/core/frame/document_policy_violation_report_body.h"
+ #include "third_party/blink/renderer/core/frame/dom_viewport.h"
++#include "third_party/blink/renderer/core/frame/fp_config_helpers.h"
+ #include "third_party/blink/renderer/core/frame/frame_console.h"
+@@ -1931,6 +1932,20 @@
+ double LocalDOMWindow::devicePixelRatio() const {
+   if (!GetFrame()) {
+     return 0.0;
+   }
++
++  // Fingerprint: window.devicePixelRatio override.
++  //
++  // Deliberately hooked HERE rather than in LocalFrame::DevicePixelRatio(),
++  // which is the value the compositor and layout use to size the real
++  // backing store. Changing that would rescale actual rendering and blur
++  // or break pages; overriding only the JS-visible value in the window
++  // leaves rendering on the true device scale.
++  //
++  // A mobile UA reporting the host's desktop DPR of 1 is a contradiction
++  // detection sites flag (measured: an iPhone profile still reported 1).
++  // Empty or 0 means disabled and falls through to the real ratio.
++  std::string fp_dpr = FpConfigString("device_pixel_ratio");
++  if (!fp_dpr.empty()) {
++    double v = atof(fp_dpr.c_str());
++    if (v > 0.0) {
++      return v;
++    }
++  }
+ 
+   return GetFrame()->DevicePixelRatio();
+ }

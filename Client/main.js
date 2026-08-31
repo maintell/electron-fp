@@ -5,8 +5,10 @@ const path = require('path');
 const fs = require('fs');
 const { fpDefaultConfig, fpNormalizeConfig, fpCoverage, fpKeysInGroup, fpIsActive,
         FP_KEYS, FP_KEY_NAMES, FP_SCHEMA_VERSION, FP_GROUPS, FP_GROUP_IDS,
-        FP_UA_PRESETS, fpRandomUserAgent, fpNormalizeUserAgent,
-        fpPlatformForUserAgent } = require('./fp-schema');
+FP_UA_PRESETS, fpRandomUserAgent, fpNormalizeUserAgent,
+      fpPlatformForUserAgent,
+      fpVendorForUserAgent, fpPixelRatioForUserAgent,
+      fpLanguagesForUserAgent } = require('./fp-schema');
 
 // --- Profile Store ---
 const PROFILES_PATH = path.join(__dirname, 'profiles.json');
@@ -33,6 +35,14 @@ let panelOpen = true; // fingerprint panel is a permanent sidebar — open by de
 const PANEL_WIDTH = 420; // must match #fp-panel width in renderer/style.css
 const TOP_HEIGHT = 72;   // tab bar (36) + address bar (36) — must match #top-bar in DOM
 const STATUS_HEIGHT = 22;// status bar height — must match #status-bar in DOM
+
+// Sites opened automatically at startup. These two are the references the
+// fingerprint leak audit was validated against, and they are what an operator
+// wants to see the moment the client starts.
+const FP_AUDIT_SITES = [
+  'https://browserleaks.com/',
+  'https://abrahamjuliot.github.io/creepjs/'
+];
 
 function createTabId() {
   return `tab-${++tabIdCounter}`;
@@ -313,9 +323,24 @@ function createMainWindow() {
     mainWindow = null;
   });
 
-  // Wait for UI to be ready before attaching BrowserView
+  // Wait for UI to be ready before attaching BrowserView.
+  //
+  // Opens the two fingerprint-detection sites as the default tabs: this client
+  // exists to be checked against them, so making the operator navigate there by
+  // hand every launch is wasted work. Both are the references the leak audit
+  // was run against.
+  //
+  // They are opened AFTER the first tab so the normal "New Tab" flow stays the
+  // first thing that happens - addTab() also activates whatever it creates, so
+  // opening the sites afterwards would steal focus from it. We therefore add
+  // them and then hand focus back to tab 1.
   mainWindow.webContents.once('did-finish-load', () => {
-    addTab('default');
+    const first = addTab('default');
+    for (const site of FP_AUDIT_SITES) {
+      const id = addTab('default');
+      if (id) navigateTab(id, site);
+    }
+    if (first) activateTab(first);
   });
 }
 
@@ -514,6 +539,11 @@ function generateRandomProfile() {
       exts: 'EXT_texture_filter_anisotropic,WEBKIT_EXT_texture_filter_anisotropic,OES_texture_float_linear',
       maxTex: [8192, 16384],
       speechLang: 'en-US', voices: [4, 6, 8],
+      // Must agree with the UA: a Chrome-on-Windows UA beside vendor
+      // "Apple Computer, Inc." is the contradiction creepjs flags first.
+      vendor: 'Google Inc.',
+      langs: ['en-US,en', 'en-US,en,es', 'en-GB,en', 'de-DE,de,en'],
+      dpr: [1, 1, 2],
       tzs: ['America/New_York', 'America/Chicago', 'America/Los_Angeles', 'Europe/London', 'Europe/Berlin', 'Asia/Tokyo'],
       battery: true
     },
@@ -530,6 +560,11 @@ function generateRandomProfile() {
       exts: 'EXT_texture_filter_anisotropic,WEBKIT_EXT_texture_filter_anisotropic',
       maxTex: [16384],
       speechLang: 'en-GB', voices: [5, 7],
+      // A Mac UA MUST report Apple here - Safari/Chrome on macOS both do.
+      vendor: 'Apple Computer, Inc.',
+      langs: ['en-GB,en', 'en-US,en', 'en-GB,en,fr', 'ja-JP,ja,en'],
+      // Macs are Retina; 1 would contradict the screen sizes above.
+      dpr: [2],
       tzs: ['America/Los_Angeles', 'Europe/London', 'Asia/Tokyo'],
       battery: true
     },
@@ -545,6 +580,9 @@ function generateRandomProfile() {
       exts: 'EXT_texture_filter_anisotropic,OES_texture_float_linear',
       maxTex: [8192, 16384],
       speechLang: 'en-US', voices: [3, 5],
+      vendor: 'Google Inc.',
+      langs: ['en-US,en', 'de-DE,de,en', 'fr-FR,fr,en', 'en-GB,en'],
+      dpr: [1, 1, 2],
       tzs: ['Europe/Berlin', 'Europe/Paris', 'Asia/Kolkata'],
       battery: true
     },
@@ -560,6 +598,11 @@ function generateRandomProfile() {
       exts: 'EXT_texture_filter_anisotropic,OES_texture_float_linear',
       maxTex: [4096, 8192],
       speechLang: 'en-US', voices: [2, 3],
+      vendor: 'Google Inc.',
+      langs: ['en-US,en', 'zh-CN,zh,en', 'ja-JP,ja,en', 'en-GB,en'],
+      // Phones are always >1; 1 here would contradict the mobile UA and the
+      // small screen sizes. These are the real ratios such devices report.
+      dpr: [2.75, 3, 4],
       tzs: ['Asia/Shanghai', 'Asia/Tokyo', 'Europe/London'],
       battery: true
     }
@@ -859,6 +902,24 @@ function generateRandomProfile() {
   fp.ua_platform = '';
   fp.ua_mobile = '';
   fp.ua_brands = '';
+
+  // --- Keys 61-63: the surfaces that leaked the host in the external audit ---
+  // Found by diffing browserleaks.com / creepjs output between a baseline and a
+  // spoofed run: with every one of the original 60 keys set, navigator.vendor,
+  // navigator.language/languages and window.devicePixelRatio all still reported
+  // the host's real values, each contradicting the UA.
+  //
+  // These are derived FROM THE UA, not from the archetype. The archetype and
+  // the UA are drawn from independent pools (see above), so taking vendor from
+  // the archetype produced "iPhone UA + Google Inc." in about half of all
+  // random profiles - measured 5 of 10. That is the contradiction detection
+  // sites flag first, so for these three the UA is the authority.
+  //
+  // An explicit operator override in the JSON editor still wins verbatim; this
+  // only supplies the generated default.
+  fp.navigator_vendor = fpVendorForUserAgent(ua) || p.vendor;
+  fp.navigator_languages = fpLanguagesForUserAgent(ua) || pick(p.langs);
+  fp.device_pixel_ratio = fpPixelRatioForUserAgent(ua) || String(pick(p.dpr));
 
   return {
     id: `random-${Date.now()}`,

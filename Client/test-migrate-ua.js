@@ -19,7 +19,11 @@ console.log("  old profile keys: " + Object.keys(oldFp).length +
 // 1. userAgent is NOT part of fingerprint, so normalization cannot touch it.
 const norm = schema.fpNormalizeConfig(oldFp);
 ck("old fingerprint normalizes without dropping keys",
-  Object.keys(norm.config).length === 60, Object.keys(norm.config).length + " keys");
+  // Derived, not hardcoded: the kernel key count changes whenever a leak is
+// fixed, and a hardcoded number turns every such change into a false failure
+// here. schema.FP_KEY_NAMES is asserted against check.py by test-schema.js.
+Object.keys(norm.config).length === schema.FP_KEY_NAMES.length,
+  Object.keys(norm.config).length + " keys (schema has " + schema.FP_KEY_NAMES.length + ")");
 ck("no unknown keys reported", norm.unknown.length === 0, norm.unknown.join(","));
 
 // 2. The 3 new keys are backfilled to empty => kernel derives from the UA.

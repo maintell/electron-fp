@@ -4,15 +4,22 @@
 // Every key here MUST exist in the kernel patch:
 //   F:\code\src\electron\fingerprint\patches\fp-fingerprint.patch
 // (look for FpConfigString / FpConfigInt / FpConfigInt64 call sites).
-// The kernel README claims "60" keys and that IS the correct count (verified
-// against check.py's 60 EXPECTED_KEYS and the FpConfig* call sites).
+// There are now 63. Trust check.py's EXPECTED_KEYS as the authoritative
+// count; this file is asserted equal to it by test-schema.js.
 //
-// An earlier note here claimed 56. That undercount came from grepping the
-// patch for FpConfig* call sites: four webgl_* keys are written inside
-// ternary expressions split across lines
-//   pname == 0x9245 ? "webgl_vendor" : "webgl_renderer"
-// so a line-oriented grep missed them. Counting with a paren-balanced parse
-// gives 60, matching check.py. Trust check.py over a regex here.
+// History of the count, because it has been wrong twice and both mistakes
+// cost real time:
+//   56 - an early grep for FpConfig* call sites. Four webgl_* keys are
+//        written inside ternary expressions split across lines
+//          pname == 0x9245 ? "webgl_vendor" : "webgl_renderer"
+//        so a line-oriented grep missed them.
+//   60 - the correct count for a long while (paren-balanced parse, matches
+//        check.py).
+//   63 - three surfaces that an external audit against browserleaks.com and
+//        creepjs found still leaking the host even with every other key set:
+//        navigator.vendor, navigator.language/languages, and
+//        window.devicePixelRatio. Each disagreed with the spoofed UA, which
+//        is exactly the kind of contradiction detection sites flag.
 //
 // Value encoding rules (from the kernel parser - these are NOT negotiable):
 //   * "int"    -> JSON number, parsed with atoi; must be > 0 to take effect
@@ -155,13 +162,45 @@ const FP_KEYS = {
     group: "navigator", kind: "str", def: "",
     hint: 'Sec-CH-UA-Platform value, e.g. "macOS" / "Windows" / "Linux" / "Android". Empty = derive from UA.'
   },
-  ua_mobile: {
-    group: "navigator", kind: "str", def: "",
-    hint: '"true" or "false" for Sec-CH-UA-Mobile. Empty = derive from UA.'
-  },
-};
+    ua_mobile: {
+      group: "navigator", kind: "str", def: "",
+      hint: '"true" or "false" for Sec-CH-UA-Mobile. Empty = derive from UA.'
+    },
+
+    // --- Keys 61-63: surfaces that leaked the host in an external audit ---
+    // Found by diffing browserleaks.com / creepjs output between a baseline
+    // (no config) run and a spoofed run. Every one of these kept reporting the
+    // host's real value while the UA said otherwise - the exact contradiction
+    // detection sites flag first.
+
+    // navigator.vendor. Lives on Navigator (NOT NavigatorID/NavigatorBase),
+    // and is a plain non-virtual member, so it can only be hooked in
+    // Navigator::vendor(). Without this an iPhone profile reports
+    // "Google Inc." - and worse, disagrees with webgl_vendor.
+    navigator_vendor: {
+      group: "navigator", kind: "str", def: "",
+      label: "navigator.vendor",
+      hint: 'e.g. "Google Inc." / "Apple Computer, Inc." / "". Empty = real vendor.'
+    },
+
+    // navigator.language AND navigator.languages: language() is just
+    // languages().front(), so one comma-separated value drives both.
+    navigator_languages: {
+      group: "navigator", kind: "str", def: "",
+      label: "navigator.languages",
+      hint: 'Comma-separated, e.g. "en-US,en". Sets both .language and .languages. Empty = real locale.'
+    },
+
+    // window.devicePixelRatio. Overrides the JS-visible value only; the
+    // compositor keeps the true device scale so rendering is not rescaled.
+    device_pixel_ratio: {
+      group: "screen", kind: "str", def: "",
+      label: "devicePixelRatio",
+      hint: 'e.g. "1" / "2" / "3". Must be > 0. Empty = real ratio (JS value only - rendering is unaffected).'
+    },
+  };
 // --- Functional groups -------------------------------------------------------
-// Each of the 60 kernel keys belongs to exactly ONE group. Groups drive the
+// Each of the 63 kernel keys belongs to exactly ONE group. Groups drive the
 // client UI (collapsible sections), the randomizer (coherent per-group fills)
 // and the coverage report.
 const FP_GROUPS = [
@@ -265,14 +304,14 @@ function fpCoerce(key, value) {
 // ============================================================================
 // User-Agent: a CLIENT-level (Electron) surface, deliberately NOT a kernel key.
 //
-// The kernel's 60 keys are read by Blink via --fingerprint-config. The UA is
+// The kernel's 63 keys are read by Blink via --fingerprint-config. The UA is
 // applied by Electron's session.setUserAgent(), which is a different layer
 // entirely. Keeping it out of FP_KEYS is not cosmetic:
 //
 //   * fpNormalizeConfig() drops every key the kernel does not know, so a UA
 //     placed inside `fingerprint` would be silently discarded on apply.
 //   * test-schema.js asserts the client key set equals the kernel key set
-//     exactly, so adding a 57th key here would break that assertion.
+//     exactly, so adding a 64th key here would break that assertion.
 //
 // Measured behaviour this model relies on (2026-08-29, verified on Electron):
 //   * setUserAgent() covers BOTH navigator.userAgent and the HTTP UA header.
@@ -458,6 +497,54 @@ function fpPlatformForUserAgent(ua) {
 }
 
 /**
+ * Derive the three audit-fix surfaces (navigator.vendor, navigator.languages,
+ * window.devicePixelRatio) from the UA that is actually in effect.
+ *
+ * Why derive instead of drawing them from the random platform archetype: the
+ * archetype and the UA are drawn from two INDEPENDENT pools by deliberate
+ * choice, so a profile can legitimately carry a Mac screen behind a Windows
+ * UA. That may be odd, but it is not self-contradictory in the way that
+ * "iPhone UA + vendor 'Google Inc.'" is - and vendor is the surface detection
+ * sites check first. Deriving these three from the UA guarantees they can
+ * never contradict it, whatever the archetype happened to pick.
+ *
+ * Same ordering caveat as fpPlatformForUserAgent: iPhone/iPad must be tested
+ * before Mac, because iOS UAs contain the substring "Mac OS X".
+ *
+ * Returns "" for anything it cannot determine - empty means "disabled" in the
+ * kernel and falls back to the host's real value. A wrong guess is worse than
+ * no guess.
+ */
+function fpVendorForUserAgent(ua) {
+  if (typeof ua !== "string" || !ua) return "";
+  if (/iPhone|iPad|Macintosh|Mac OS X/.test(ua)) return "Apple Computer, Inc.";
+  // Chrome/Chromium on Windows, Linux and Android all report Google.
+  if (/Windows|Android|X11|Linux/.test(ua)) return "Google Inc.";
+  return "";
+}
+
+function fpPixelRatioForUserAgent(ua) {
+  if (typeof ua !== "string" || !ua) return "";
+  // Phones and tablets are always >1; a mobile UA reporting 1 is the exact
+  // contradiction the external audit caught.
+  if (/iPhone|iPad/.test(ua)) return "3";
+  if (/Android/.test(ua)) return "2.75";
+  // macOS laptops are Retina.
+  if (/Macintosh|Mac OS X/.test(ua)) return "2";
+  return "";
+}
+
+function fpLanguagesForUserAgent(ua) {
+  if (typeof ua !== "string" || !ua) return "";
+  // Deliberately conservative: only override when the UA tells us something we
+  // can trust. A Windows UA can carry any locale, so guessing "en-US" would
+  // replace a real zh-CN with a fabrication - no better than leaking.
+  // Locale is far less correlated with OS than vendor and DPR are, so the safe
+  // move here is to leave the host value alone unless we know better.
+  return "";
+}
+
+/**
  * Normalize a user-supplied UA. Anything non-string becomes "" (native), and
  * a whitespace-only string is treated as "no override" rather than being sent
  * as a literal blank UA, which would be an obviously broken header.
@@ -485,7 +572,10 @@ module.exports = {
   FP_PLATFORM_BY_ID,
   fpRandomUserAgent,
   fpNormalizeUserAgent,
-  fpPlatformForUserAgent,
-  fpUaMetadataForUserAgent,
+fpPlatformForUserAgent,
+fpUaMetadataForUserAgent,
+fpVendorForUserAgent,
+fpPixelRatioForUserAgent,
+fpLanguagesForUserAgent,
 };
 
