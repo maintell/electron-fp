@@ -228,6 +228,27 @@ check("navigator_platform always set (never Win32 under a Mac UA)", platformUnse
 check("randomizer exercises most groups", seenGroups.size >= 12,
   seenGroups.size + "/" + schema.FP_GROUP_IDS.length + " groups populated");
 
+// NOTE: checking that the ua_* keys are PRESENT would be a tautology.
+// fpDefaultConfig() seeds all 60 keys, so fp always carries them whether or
+// not generateRandomProfile() assigns them - the check can never fail. What is
+// load-bearing is that an explicit value survives normalization, since that is
+// the path every operator override takes. Verified by mutation: deleting the
+// fp.ua_* assignments in main.js leaves a presence-check green, while breaking
+// fpNormalizeConfig turns all three checks below red.
+//
+// Empty is the shipped default and means "derive from the UA"; a non-empty
+// value is what the kernel must honour verbatim, with no reference to the UA
+// (the kernel is a pure function of the config - see test-client-hints.js).
+const uaOverride = schema.fpNormalizeConfig({
+  ua_platform: "Plan9", ua_mobile: "true", ua_brands: "AcmeBrowser=42"
+}).config;
+check("fpNormalizeConfig keeps an explicit ua_platform",
+  uaOverride.ua_platform === "Plan9", JSON.stringify(uaOverride.ua_platform));
+check("fpNormalizeConfig keeps an explicit ua_mobile",
+  uaOverride.ua_mobile === "true", JSON.stringify(uaOverride.ua_mobile));
+check("fpNormalizeConfig keeps an explicit ua_brands",
+  uaOverride.ua_brands === "AcmeBrowser=42", JSON.stringify(uaOverride.ua_brands));
+
 const sample = mod();
 console.log("\nsample: " + sample.name);
 console.log("  active keys: " + schema.FP_KEY_NAMES.filter(k => schema.fpIsActive(k, sample.fingerprint[k])).length + "/" + schema.FP_KEY_NAMES.length);

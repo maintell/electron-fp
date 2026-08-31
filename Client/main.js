@@ -834,12 +834,31 @@ function generateRandomProfile() {
   // over, so the operator can decide per profile.
   const ua = fpRandomUserAgent();
 
-  // ...but navigator_platform MUST follow the UA. The two are separate
-  // surfaces with nothing enforcing agreement, and (Mac UA, Win32 platform) is
-  // exactly the contradiction this key was added to remove. Deriving it from
-  // the UA that was actually chosen keeps the pair coherent even though the UA
-  // itself is independent of the platform archetype.
+  // navigator_platform follows the UA so the pair stays coherent. The kernel
+  // does NOT enforce this - it is an application-layer policy, applied here.
   fp.navigator_platform = fpPlatformForUserAgent(ua);
+
+  // --- Sec-CH-UA client hints (keys 58-60) ---
+  // Left EMPTY so the kernel derives them from the UA actually in effect. That
+  // is the default behaviour and it keeps navigator.userAgentData consistent
+  // with navigator.userAgent without the operator having to maintain two
+  // copies of the same fact.
+  //
+  // They are nonetheless full first-class keys and are set explicitly here
+  // (to their empty default) so the generator covers all 60: a key the
+  // generator never mentions cannot be exercised, and coverage is asserted by
+  // test-random.js. An operator who WANTS a specific hint overrides these in
+  // the JSON editor - the kernel honours any non-empty value verbatim, with no
+  // reference to the UA:
+  //     ua_platform: "Plan9", ua_mobile: "true", ua_brands: "AcmeBrowser=42"
+  // measured working with NO userAgent set at all.
+  //
+  // ua_brands must be the QUOTE-FREE config form (Brand=99,Brand2=131). The
+  // wire form ("Brand";v="99") does not survive: FpConfigString() terminates
+  // at the first quote, so the quoted form parses to a single garbage entry.
+  fp.ua_platform = '';
+  fp.ua_mobile = '';
+  fp.ua_brands = '';
 
   return {
     id: `random-${Date.now()}`,

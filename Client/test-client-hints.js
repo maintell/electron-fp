@@ -143,6 +143,24 @@ async function probe(view, u) {
       r5.hints["sec-ch-ua-platform"] === '"Windows"',
       String(r5.hints["sec-ch-ua-platform"]));
 
+    // 6) The kernel is a pure function of the config: explicit ua_* must work
+    // with NO userAgent set at all. Consistency between the UA and the hints is
+    // the APPLICATION layer's concern (main.js derives navigator_platform from
+    // the UA); the kernel must not require a UA to honour an explicit override.
+    const v6 = openView("ch-t6", {
+      ua_platform: "Plan9", ua_mobile: "true", ua_brands: "AcmeBrowser=42"
+    });
+    win.addBrowserView(v6);
+    const r6 = await probe(v6, url);
+    check("explicit ua_platform with NO userAgent set",
+      r6.hints["sec-ch-ua-platform"] === '"Plan9"',
+      String(r6.hints["sec-ch-ua-platform"]));
+    check("explicit ua_mobile with NO userAgent set",
+      r6.hints["sec-ch-ua-mobile"] === "?1", String(r6.hints["sec-ch-ua-mobile"]));
+    check("explicit ua_brands with NO userAgent set",
+      r6.uad && r6.uad.brands.some(b => b === "AcmeBrowser;v=42"),
+      r6.uad ? r6.uad.brands.join(" | ") : "null");
+
     console.log("");
     console.log(fail === 0 ? "PASS: " + pass + " checks" : "FAIL: " + fail + " of " + (pass + fail));
     app.exit(fail === 0 ? 0 : 1);

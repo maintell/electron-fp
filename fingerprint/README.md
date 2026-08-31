@@ -177,6 +177,32 @@ Chrome/154.0.8015.0 Electron/45.0.0-nightly.20260825 Safari/537.36
 2. **`setUserAgent()` 必须在创建 `BrowserView` 之前调用。** 实测：对已打开的
    session 设 UA 后 reload 也不生效，但同 partition 的**新** view 会生效。
 
+#### 内核是纯函数，一致性归应用层
+
+`ua_platform` / `ua_mobile` / `ua_brands` 三个键遵循一条统一原则：
+
+> **内核只负责完成功能——显式配置了什么，就输出什么。UA 与 platform 是否一致，
+> 由应用层决定，内核不做校验、不做纠正。**
+
+实测（`test-client-hints.js` 已覆盖）：
+
+- **显式值无条件生效，完全不参考 UA。** 配置
+  `{ua_platform:"Plan9", ua_mobile:"true", ua_brands:"AcmeBrowser=42"}` 且
+  **不设任何 UA** 时，两个面都照常输出 `Plan9` / `?1` / `AcmeBrowser;v=42`。
+- **显式值压过矛盾 UA。** 同一配置配一条 Windows UA，结果仍是 `Plan9`，
+  不是 `Windows`。
+- **空值 = 从 UA 派生**，这是默认值（`fpDefaultConfig()` 与 `profiles.json`
+  预设都留空），也是让 `navigator.userAgentData` 与 `navigator.userAgent`
+  自动保持一致的便捷路径。
+- `navigator_platform` 的一致性由**客户端** `main.js` 负责：生成器用
+  `fpPlatformForUserAgent(ua)` 从实际选中的 UA 推导。改 UA 忘了同步
+  platform 是应用层的事，内核不管。
+
+**`ua_brands` 必须写成无引号的配置式**（`Brand=99,Chromium=131`）。
+带引号的线上式（`"Brand";v="99"`）传不过去——`FpConfigString()` 遇到第一个
+闭合引号就截断，实测得到的是一个内容为空的垃圾条目。内核解析器同时接受两种
+形式，但引号在到达解析器之前就已经被截断了。
+
 ### 剩余未决：TLS/JA3 定制（方案 C）
 
 需先决策：接受全局统一 TLS，还是投入改造网络栈做 per-tab 隔离。后者受架构约束——
