@@ -164,7 +164,7 @@ explicitly so a deployment does not assume more protection than it has.
 | `navigator.userAgent` | yes | via `session.setUserAgent()` |
 | HTTP `User-Agent` header | yes | same call covers both |
 | `navigator.platform` | yes | kernel key `navigator_platform`. Defaults to disabled (`''`), so a profile opts in explicitly |
-| `Sec-CH-UA` client hints | **no** | would need to stay consistent with the UA |
+| `Sec-CH-UA` client hints | yes | keys 58–60 (`ua_platform`/`ua_mobile`/`ua_brands`); unset derives from the UA, so they cannot drift apart |
 | TLS / JA3 / JA4 | **no** | network-stack fingerprint; see `fingerprint/README.md` |
 
 For consistency, `navigator_platform` should agree with any UA override: a Mac
@@ -180,18 +180,67 @@ Windows UA. The platform follows the UA (so the pair never contradicts itself),
 but the screen/GPU does not — that cross-group inconsistency is intentional and
 is surfaced here rather than hidden.
 
+### Some keys can only shrink, never grow
+
+`media_devices_*` and `speech_voices_count` are applied by **truncating** the
+host's real device/voice list:
+
+```c
+if (fp_count > 0 && fp_count < mojom_voices.size())   // shrink only
+  mojom_voices.resize(fp_count);
+```
+
+Asking for more than the machine actually has is a **silent no-op** — no error,
+no log. A profile requesting 3 audio inputs on a host with 0 still reports 0.
+Set these below the host's real count, or expect them to do nothing.
+
+Verified both ways by `test-coverage-audit.js`: truncation works (2 video
+inputs → 1), and asking for 99 on a host with 0 leaves it at 0.
+
 ## Testing
 
 ```bash
-# Static (no browser)
-node Client/test-schema.js     # 60-key schema vs kernel (15 checks)
-node Client/test-random.js     # randomizer invariants (20 checks)
-
-# Live (needs the built Electron; rename out/Default/resources/app first)
-node Client/test-ua.js         # UA: JS + HTTP header, isolation, reset (8 checks)
-node Client/test-fonts.js      # font blocklist via text metrics (6 checks)
-node Client/test-webgpu.js     # WebGPU features/limits (10 checks)
+npm test                       # every Client test (178 checks, 16 files)
+npm test -- test-ua.js         # just one file
 ```
+
+`run-tests.js` exists because running the files by hand is error-prone in two
+ways that both fail SILENTLY:
+
+1. **`resources/app` shadows the tests.** If `out/Default/resources/app`
+   exists, `electron.exe` launches the packaged app instead of your script and
+   prints nothing. Every test then reports 0 passes and looks catastrophically
+   broken. The runner moves it aside and restores it on exit (including
+   ctrl-c), and refuses to call a no-output run a pass.
+2. **One process per test.** Tests build BrowserViews with random partitions;
+   a crashed GPU or network service otherwise takes out every check after it.
+
+Set `ELECTRON_BIN` if your binary is not at `../src/out/Default/electron.exe`.
+
+### Two test layers, and why both matter
+
+- **`test-schema.js`** (static) proves the client and kernel *agree* on all 60
+  keys. It proves nothing about whether the kernel *honours* a value.
+- **`test-coverage-audit.js`** (live, 34 checks) applies a config in a real
+  browser and asserts each surface actually reports it. All 60 keys are
+  covered and nothing is skipped.
+
+The gap between them is real. When the audit was first written, 10 checks
+failed; 9 were bugs in the audit itself and only 1 was a product bug. Verifying
+against kernel source - rather than trusting either signal alone - is what
+separated them.
+
+Known traps the audit encodes, each found by getting it wrong first:
+
+| Surface | Trap |
+|---|---|
+| `audio_data_strength` | Scales noise amplitude. `0` means "add nothing", so every seed renders identically. |
+| `media_codecs_denylist` | Hooks `MediaCapabilities.decodingInfo()`, **not** `canPlayType()`; matches substrings (`"avc1"`, not `"h264"`). |
+| `webgl_vendor`/`renderer` | Only override the `UNMASKED_*` pnames. Plain `VENDOR` is untouched. |
+| `mediaDevices`, `storage`, `getBattery` | Secure-origin gated - `undefined` on `data:` URLs. Serve from `127.0.0.1`. |
+| `geo_*` | Needs a real position to rewrite; inject one via CDP, and `Page.enable` + focus emulation or the page is not "visible" and Geolocation returns early. |
+| `webgpu_device`/`description` | Absent from `GPUAdapterInfo` unless `WebGPUDeveloperFeatures` is on. |
+| `speech_voices_*` | Lazy and process-wide: the **first** renderer to touch it sees 0 voices. Warm up before measuring. |
 
 `test-ua.js` guards the ordering rule above: moving `setUserAgent()` to after
 view construction fails it immediately (verified by mutation).
