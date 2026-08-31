@@ -17,24 +17,34 @@ function check(name, ok, detail) {
   if (!ok) failures++;
 }
 
+// ICE gathering has no fixed completion time. A single 3s deadline silently
+// returns [] when the machine is loaded - and the full suite runs 16 Electron
+// processes, so this is not hypothetical: it produced a real flake where
+// "baseline exposes real host IPs" failed because zero candidates arrived in
+// time. Retry with a longer deadline, and accept the run as soon as candidates
+// exist, so a slow-but-successful gather passes instead of being reported as
+// "the kernel dropped webrtc_ip".
 const PROBE = `(async () => {
-  const out = { hw: navigator.hardwareConcurrency, ips: [] };
-  try {
-    const pc = new RTCPeerConnection({ iceServers: [] });
-    pc.createDataChannel("x");
-    await pc.setLocalDescription(await pc.createOffer());
-    await new Promise(r => {
-      const t = setTimeout(r, 3000);
-      pc.onicecandidate = e => {
-        if (e.candidate && e.candidate.candidate) {
-          const m = /typ (host|srflx)/.exec(e.candidate.candidate);
-          const ip = /([0-9]{1,3}\\.){3}[0-9]{1,3}/.exec(e.candidate.candidate);
-          if (m && ip) out.ips.push(m[1] + ":" + ip[0]);
-        } else { clearTimeout(t); r(); }
-      };
-    });
-    pc.close();
-  } catch (e) { out.err = String(e.message); }
+  const out = { hw: navigator.hardwareConcurrency, ips: [], attempts: 0 };
+  for (let attempt = 0; attempt < 3 && out.ips.length === 0; attempt++) {
+    out.attempts++;
+    try {
+      const pc = new RTCPeerConnection({ iceServers: [] });
+      pc.createDataChannel("x");
+      await pc.setLocalDescription(await pc.createOffer());
+      await new Promise(r => {
+        const t = setTimeout(r, 8000);
+        pc.onicecandidate = e => {
+          if (e.candidate && e.candidate.candidate) {
+            const m = /typ (host|srflx)/.exec(e.candidate.candidate);
+            const ip = /([0-9]{1,3}\\.){3}[0-9]{1,3}/.exec(e.candidate.candidate);
+            if (m && ip) out.ips.push(m[1] + ":" + ip[0]);
+          } else { clearTimeout(t); r(); }
+        };
+      });
+      pc.close();
+    } catch (e) { out.err = String(e.message); }
+  }
   return out;
 })()`;
 
