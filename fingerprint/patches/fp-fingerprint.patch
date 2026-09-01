@@ -1,6 +1,21 @@
 # ============================================================================
 # fp-fingerprint.patch - fingerprint browser patches
 #
+# *** THIS FILE IS CURRENTLY DEAD WEIGHT - READ BEFORE EDITING ***
+#
+# Both apply.py and check.py prefer the SPLIT patches (00-core.patch,
+# 10-blink-core.patch, 20-blink-modules.patch, 30-webrtc.patch) and only fall
+# back to this monolith if NO split patch exists. Splits do exist, so nothing
+# here is applied and nothing here is validated.
+#
+# This has already cost one real bug: the three keys added for the
+# browserleaks/creepjs leak fix (navigator_vendor, navigator_languages,
+# device_pixel_ratio) were appended here, check.py kept reporting them
+# missing, and the client suite stayed green because nothing ran check.py.
+# The hunks were later moved into 10-blink-core.patch, where they are live.
+#
+# Add new kernel changes to the appropriate SPLIT patch, never here.
+#
 # PURPOSE: controllable fingerprint spoofing for a multi-language
 # automation browser. Every behavior is driven by FP_CONFIG (JSON via
 # FP_CONFIG_DATA env or FP_CONFIG file, plus FP_<KEY> env fallbacks),
