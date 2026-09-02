@@ -24,6 +24,18 @@
 
 const { app, BrowserWindow, session } = require('electron');
 
+// session.fromPartition() asks SpareRenderProcessHostManager to warm up a
+// spare renderer. That renderer is created LAZILY, so if it is still pending
+// when app.exit() runs, Chromium hits
+//   render_process_host_impl.cc:1725 Check failed:
+//   !BrowserMainRunner::ExitedMainMessageLoop()
+// and aborts with a non-zero exit code - after every check had already
+// printed PASS. Preventing the default window-all-closed quit keeps the
+// browser alive long enough for the spare to be created normally.
+// Without this the file exited 4294930435 while reporting 15/15 passes,
+// which the runner previously reported as a clean pass.
+app.on('window-all-closed', (e) => { e.preventDefault(); });
+
 const { startProbe } = require('./tls/tls-probe.js');
 
 let pass = 0, fail = 0, skip = 0;

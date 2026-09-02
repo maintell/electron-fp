@@ -104,6 +104,20 @@ for (const f of files) {
   if (pass === 0 && fail === 0) {
     console.log(`        (no output - exit=${r.status}${r.error ? ' ' + r.error.code : ''})`);
     failed.push(f);
+    return;
+  }
+
+  // Also gate on the exit code, not just the printed lines.
+  //
+  // Several tests already exited non-zero while printing only PASS lines - the
+  // Chromium FATAL "Check failed: !BrowserMainRunner::ExitedMainMessageLoop()"
+  // fires during shutdown and aborts with a code like 4294930435, after all
+  // output was written. Judging only the printed lines let a process that
+  // crashed on the way out be reported as a clean pass, which is precisely
+  // the kind of silent failure this runner exists to catch.
+  if (r.status !== 0) {
+    console.log(`        (exit=${r.status} - crashed during shutdown despite passing checks)`);
+    failed.push(f);
   }
 }
 
