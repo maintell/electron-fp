@@ -382,6 +382,39 @@ Chrome/154.0.8015.0 Electron/45.0.0-nightly.20260825 Safari/537.36
 BrowserContext 隔离（指纹配置本身就是按 BrowserContext 存的），所以在查看某个
 partition 时显示默认 context 的配置是明确错误的。
 
+### 配置有两个存储位置，两处都必须读
+
+`SessionPreferences` 和 `WebContentsPreferences` 是两个独立的存储：
+
+| 存储 | 写入方式 |
+| --- | --- |
+| `SessionPreferences` | `session.setFingerprintConfig({...})` |
+| `WebContentsPreferences` | `new BrowserView({ webPreferences: { fingerprint } })` |
+
+Client 用的是**第二个**（`Client/main.js` 每个 tab 建一个 BrowserView，把
+`fingerprint` 放在 `webPreferences` 里）。只读 `SessionPreferences` 会对真实
+Client tab 显示空 profile——而这正是 Inspector 存在的意义所在。更糟的是它会显示
+"未发现问题"，而实际上什么都没读。两处合并，冲突时以 per-tab 配置为准（那才是
+tab 真正跑的配置），且合并必须在覆盖率统计**之前**完成。
+
+### 一致性规则：8 条全量，且必须能说"没检查"
+
+面板运行 `Client/browser-profile.js` 里的**全部 8 条**规则（4 error + 4 warn），
+包括 pass/fail/**skip** 三段契约：输入缺失的规则报告"无法判定"，而不是"通过"。
+`skipped[]` 会显示出来，不隐藏。
+
+其中 4 条以 UA 为锚，因此读 `ElectronBrowserContext::GetUserAgent()`（含
+`session.setUserAgent()` 的生效值），否则它们只能永远 skip。
+
+页面同时报告 `ruleCount` / `rulesEvaluated`，并按 `skipCount` 判定：当半数以上
+规则因输入未设置而无法运行时，显示"Nothing to check"而**不是**"Profile is
+consistent"。一个因为规则没跑而显示"干净"的面板，比没有面板更糟。
+
+> 历史教训：初版只跑了 8 条里的 1 条，且 `warnCount` 硬编码为 0，于是 4 条 warn
+> 规则永不可达、任何 profile 都显示"一致"。另有一个 use-after-move：`skipCount`
+> 从已 move 的 list 上读，恒为 0。两者都表现为"看起来没问题"，只有把断言写成
+> "count 必须与 findings 数组长度一致"才暴露出来。
+
 ### 注册一个新 WebUI scheme 需要三处独立注册
 
 这是本次实现中代价最高的部分。三者互相独立，缺任何一个都会失败，且**失败方式不同、
