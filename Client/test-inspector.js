@@ -188,6 +188,55 @@ async function run() {
     await win2.destroy();
   }
 
+  // ---- 2b. webPreferences.fingerprint (what the CLIENT actually uses) ------
+  //
+  // The Client builds a BrowserView per tab with `fingerprint` in
+  // webPreferences (Client/main.js), which lands in WebContentsPreferences -
+  // NOT SessionPreferences. Two separate stores. An Inspector that only read
+  // SessionPreferences would report an empty profile for a real Client tab:
+  // the primary case it exists to inspect, silently wrong and reading as
+  // "verified clean".
+  const sess2 = session.fromPartition('persist:inspector-wc-test');
+  const winWC = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      session: sess2,
+      sandbox: false,
+      fingerprint: {
+        hardware_concurrency: 4,
+        tz_id: 'Asia/Tokyo',
+        navigator_platform: 'Linux x86_64',
+        ua_platform: 'Windows',   // deliberate contradiction
+      },
+    },
+  });
+  await winWC.loadURL('about:blank');
+
+  const win4 = await openWindow(sess2);
+  const r4 = await load(win4, URL);
+  check('Inspector loads for the webPreferences-config session',
+    r4.ok === true, r4.error || r4.finalUrl);
+  if (r4.ok) {
+    const d4json = await grabData(win4);
+    let d4 = null;
+    try { d4 = JSON.parse(d4json); } catch (e) { /* reported below */ }
+    check('webPreferences config: data parses', d4 && typeof d4 === 'object');
+    if (d4) {
+      check('webPreferences config is picked up (hasConfig=true)',
+        d4.hasConfig === true, JSON.stringify(d4.hasConfig));
+      check('webPreferences config: reports the 4 keys we set',
+        d4.summary && d4.summary.active === 4,
+        d4.summary ? String(d4.summary.active) + ' (expected 4)' : 'missing');
+      check('webPreferences config: at least one tab contributed',
+        d4.webContentsConfigs >= 1, JSON.stringify(d4.webContentsConfigs));
+      check('webPreferences config: detects the Linux/Windows contradiction',
+        d4.consistency && d4.consistency.errorCount >= 1,
+        JSON.stringify(d4.consistency.findings));
+    }
+  }
+  await winWC.destroy();
+  await win4.destroy();
+
   // ---- 3. the rendered DOM reflects the data ------------------------------
   // The window.__fp assertions above prove the DATA is right. These prove the
   // page actually rendered it - a page that received correct data but rendered

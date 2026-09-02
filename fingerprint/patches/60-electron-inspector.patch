@@ -42,6 +42,17 @@
 #   So the data source inlines the script AND the data into the index response,
 #   which travels the one path that does work: the main document load.
 #
+# TWO CONFIG STORES - BOTH MUST BE READ
+#   SessionPreferences      <- session.setFingerprintConfig({...})
+#   WebContentsPreferences  <- new BrowserView({ webPreferences: { fingerprint } })
+#
+#   The Client uses the SECOND one (Client/main.js builds a per-tab BrowserView
+#   with "fingerprint" in webPreferences). Reading only SessionPreferences shows
+#   an empty profile for a real Client tab - the primary case the Inspector
+#   exists to inspect - and reads as "verified clean" when nothing was read.
+#   Both are merged, with the per-tab config winning on conflict, and the merge
+#   happens BEFORE the coverage counters are computed.
+#
 # NOTE ON COVERAGE GROUPS
 #   The group/key table in fingerprint_ui.cc mirrors Client/fp-schema.js. That
 #   duplication is deliberate (C++ cannot read the JS schema) but the two MUST
@@ -203,6 +214,813 @@ index 6b5c4ff4e2..4d5f3bddff 100644
    return {};
  }
  
+diff --git a/shell/browser/ui/webui/fingerprint_ui.cc b/shell/browser/ui/webui/fingerprint_ui.cc
+new file mode 100644
+index 0000000000..ad52790205
+--- /dev/null
++++ b/shell/browser/ui/webui/fingerprint_ui.cc
+@@ -0,0 +1,500 @@
++// Copyright (c) 2026 Microsoft, Inc.
++// Use of this source code is governed by the MIT license that can be
++// found in the LICENSE.
++
++#include "shell/browser/ui/webui/fingerprint_ui.h"
++
++#include <array>
++#include <memory>
++#include <string>
++#include <string_view>
++#include <utility>
++
++#include <vector>
++
++#include "base/base64.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_util.h"
++#include "base/memory/ref_counted_memory.h"
++#include "base/values.h"
++#include "content/public/browser/browser_context.h"
++#include "content/public/browser/url_data_source.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_ui.h"
++
++#include "shell/browser/api/electron_api_web_contents.h"
++#include "shell/browser/electron_browser_context.h"
++#include "shell/browser/session_preferences.h"
++#include "shell/browser/web_contents_preferences.h"
++#include "shell/common/electron_constants.h"
++#include "shell/browser/ui/webui/fingerprint_ui_page.h"
++
++namespace electron {
++
++namespace {
++
++// The host served by this controller.
++//
++// Deliberately NOT in chrome/common/webui_url_constants.h: that header lists
++// CHROME's WebUI hosts. Putting this there would imply chrome://fingerprint
++// exists, and it does not - only electron://fingerprint does.
++constexpr std::string_view kFingerprintHost = "fingerprint";
++
++scoped_refptr<base::RefCountedMemory> Bytes(std::string_view s) {
++  return base::MakeRefCounted<base::RefCountedString>(std::string(s));
++}
++
++
++
++// The paths the page requests. No leading slash: URLDataSource::URLToRequestPath
++// strips it.
++constexpr std::string_view kInspectorDataPath = "inspector-data.json";
++constexpr std::string_view kAppJs = "app.js";
++
++// Build the JSON the page consumes.
++//
++// This reports the ACTIVE configuration read back from SessionPreferences - not
++// a hardcoded sample, and not recomputed from scratch. An inspector that shows
++// what a profile WOULD look like is decorative; the value is in showing what
++// the running browser actually has. Reading the live value also means the page
++// cannot drift from the thing it describes.
++std::string BuildInspectorDataFor(content::BrowserContext* context) {
++  base::DictValue out;
++
++  // There are TWO stores and the effective config may live in either:
++  //
++  //   SessionPreferences      <- session.setFingerprintConfig({...})
++  //   WebContentsPreferences  <- new BrowserView({ webPreferences: { fingerprint } })
++  //
++  // The Client uses the second one (Client/main.js builds a BrowserView per tab
++  // with `fingerprint` in webPreferences), so reading only SessionPreferences
++  // shows an empty profile for a real Client tab - precisely the case the
++  // Inspector exists to inspect. Both are read, and the results are merged.
++  std::string b64;
++  if (auto* prefs = electron::SessionPreferences::FromBrowserContext(context)) {
++    b64 = prefs->GetFingerprintConfigBase64();
++  }
++
++  base::DictValue config;
++  if (!b64.empty()) {
++    std::string json;
++    if (base::Base64Decode(b64, &json)) {
++      // Read() needs the options argument; the 1-arg overloads that exist are
++      // typed (ReadDict/ReadList) and would silently reject a non-dict.
++      std::optional<base::Value> v = base::JSONReader::Read(json, 0);
++      if (v && v->is_dict()) {
++        config = std::move(v->GetDict());
++      } else {
++        out.Set("error", "fingerprint config is set but not valid JSON");
++      }
++    } else {
++      out.Set("error", "fingerprint config is set but not valid base64");
++    }
++  }
++
++  // Coverage: how many keys are actually set, per group.
++  //
++  // fpCoverage lives in the app's JS (Client/fp-schema.js), not in C++, so the
++  // groups/keys are mirrored here from the schema. That duplication is deliberate
++  // but MUST stay in sync - see the note in fingerprint_ui.h.
++  struct GroupDef {
++    const char* id;
++    const char* label;
++    // Member arrays (not raw C arrays) so indexing is bounds-checked and the
++    // unsafe-buffer-usage warning - which is -Werror here - does not fire.
++    // Sized for the widest group (webgl, 9 keys) with a little headroom; if a
++    // group ever outgrows it, this fails to compile rather than silently
++    // dropping keys - which is what we want, but it means the size must be
++    // bumped deliberately, not guessed.
++    std::array<const char*, 12> keys;
++  };
++
++  // Function-local static inside a lambda rather than a plain `static const`
++  // container: a namespace/file-scope non-trivially-destructible static
++  // requires an exit-time destructor, which is -Werror here.
++  static const std::vector<GroupDef>& kGroups = *[] {
++    static const base::NoDestructor<std::vector<GroupDef>> v(std::vector<GroupDef>{
++      {"hardware",
++       "Hardware",
++       {"hardware_concurrency", "device_memory", "max_touch_points"}},
++      {"screen",
++       "Screen",
++       {"screen_width", "screen_height", "screen_avail_width",
++        "screen_avail_height", "screen_color_depth", "device_pixel_ratio"}},
++      {"audio",
++       "Audio",
++       {"audio_sample_rate", "audio_max_channels", "audio_output_latency_ms",
++        "audio_data_seed", "audio_data_strength"}},
++      {"webgl",
++       "WebGL",
++       {"webgl_max_texture_size", "webgl_max_renderbuffer_size",
++         "webgl_max_viewport_dims", "webgl_aliased_point_size_range",
++         "webgl_aliased_line_width_range", "webgl_vendor", "webgl_renderer",
++         "webgl_extensions", "webgl_shader_precision_highp"}},
++      {"webgpu",
++       "WebGPU",
++       {"webgpu_vendor", "webgpu_architecture", "webgpu_device",
++        "webgpu_description", "webgpu_features", "webgpu_limits"}},
++      {"geo", "Geolocation", {"geo_latitude", "geo_longitude", "geo_accuracy"}},
++      {"speech", "Speech", {"speech_voices_count", "speech_voices_lang"}},
++      {"media",
++       "Media devices",
++       {"media_devices_audio_input", "media_devices_video_input",
++        "media_devices_audio_output", "media_codecs_denylist"}},
++      {"canvas",
++       "Canvas",
++       {"canvas_noise_seed", "canvas_noise_strength", "measure_text_seed",
++        "client_rects_seed"}},
++      {"env",
++       "Environment",
++       {"tz_id", "prefers_color_scheme", "do_not_track"}},
++      {"network",
++       "Network",
++       {"net_effective_type", "net_rtt_ms", "net_downlink_mbps", "webrtc_ip"}},
++      {"storage",
++       "Storage",
++       {"storage_usage_bytes", "storage_quota_bytes", "permissions_status",
++         "perf_now_precision_ms"}},
++      {"fonts", "Fonts", {"fonts_blocklist", "fonts_whitelist"}},
++      {"battery", "Battery", {"battery_charging", "battery_level"}},
++      {"navigator",
++       "Navigator",
++       {"navigator_platform", "ua_brands", "ua_platform", "ua_mobile",
++         "navigator_vendor", "navigator_languages"}}});
++    return &*v;
++  }();
++
++  // A key counts as "set" when it carries a non-default value. 0 / "" are the
++  // schema's disabled placeholder values, NOT real values - treating them as set would
++  // report every key as configured.
++  auto is_set = [](const base::Value* v) {
++    if (!v) return false;
++    if (v->is_string()) return !v->GetString().empty();
++    if (v->is_int()) return v->GetInt() != 0;
++    if (v->is_double()) return v->GetDouble() != 0.0;
++    if (v->is_bool()) return v->GetBool();
++    return false;
++  };
++
++  // Merge in the per-WebContents (webPreferences) configs for this context.
++  //
++  // These are what the Client actually sets (Client/main.js builds a
++  // BrowserView per tab with `fingerprint` in webPreferences, which lands in
++  // WebContentsPreferences - NOT SessionPreferences). Without this merge the
++  // Inspector reports an empty profile for a real Client tab, which is both
++  // wrong and actively harmful: it reads as "verified clean" when in fact
++  // nothing was read.
++  //
++  // This must run BEFORE the coverage loop, which counts the merged dict.
++  int wc_configs = 0;
++  for (electron::api::WebContents* ewc :
++       electron::api::WebContents::GetWebContentsList()) {
++    if (!ewc) {
++      continue;
++    }
++    content::WebContents* wc = ewc->web_contents();
++    if (!wc || wc->GetBrowserContext() != context) {
++      continue;  // the Inspector is scoped to its own BrowserContext
++    }
++    auto* wc_prefs = electron::WebContentsPreferences::From(wc);
++    if (!wc_prefs) {
++      continue;
++    }
++    const std::string& wc_b64 = wc_prefs->GetFingerprintConfigBase64();
++    if (wc_b64.empty()) {
++      continue;
++    }
++    std::string wc_json;
++    if (!base::Base64Decode(wc_b64, &wc_json)) {
++      continue;
++    }
++    std::optional<base::Value> wc_val = base::JSONReader::Read(wc_json, 0);
++    if (!wc_val || !wc_val->is_dict()) {
++      continue;
++    }
++    ++wc_configs;
++    // WebContents config wins on conflict: it is the more specific of the two,
++    // and it is what a real tab actually runs with.
++    for (auto [key, value] : wc_val->GetDict()) {
++      config.Set(key, std::move(value));
++    }
++  }
++
++  base::ListValue coverage;
++  int total_active = 0;
++  int total_keys = 0;
++  base::ListValue empty_groups;
++
++  for (const GroupDef& def : kGroups) {
++    int active = 0;
++    int total = 0;
++    for (const char* key : def.keys) {
++      if (!key) {
++        continue;  // unused tail slots in the fixed-size array
++      }
++      ++total;
++      if (is_set(config.Find(std::string_view(key)))) {
++        ++active;
++      }
++    }
++    total_active += active;
++    total_keys += total;
++    base::DictValue g;
++    g.Set("id", def.id);
++    g.Set("label", def.label);
++    g.Set("active", active);
++    g.Set("total", total);
++    coverage.Append(std::move(g));
++    if (active == 0) {
++      empty_groups.Append(def.id);
++    }
++  }
++
++  base::DictValue summary;
++  summary.Set("active", total_active);
++  summary.Set("total", total_keys);
++  summary.Set("groups", static_cast<int>(kGroups.size()));
++  summary.Set("emptyGroups", std::move(empty_groups));
++
++  out.Set("summary", std::move(summary));
++  out.Set("coverage", std::move(coverage));
++
++  // Cross-layer consistency.
++  //
++  // The full rule set lives in Client/browser-profile.js and is applied by the
++  // app. Here we report the two contradictions that are checkable from C++
++  // alone, and - importantly - say so, rather than showing an empty "no issues"
++  // panel that would read as "verified clean" when nothing was actually run.
++  const std::string* platform = config.FindString("navigator_platform");
++  const std::string* ch_platform = config.FindString("ua_platform");
++
++  base::ListValue findings;
++  base::ListValue skipped;
++
++  if (!platform || platform->empty()) {
++    skipped.Append("navigator_platform not set");
++  }
++  if (!ch_platform || ch_platform->empty()) {
++    skipped.Append("ua_platform not set");
++  }
++  if (platform && !platform->empty() && ch_platform && !ch_platform->empty()) {
++    // Crude OS-family check: the UA-anchored rules in browser-profile.js are
++    // authoritative; this only catches the grossest mismatch.
++    //
++    // Case-INSENSITIVE, and it has to be: the two surfaces do not use
++    // consistent casing. navigator_platform uses "Win32"/"MacIntel" while
++    // ua_platform (Sec-CH-UA-Platform) uses "macOS"/"Windows". A case-sensitive
++    // match misses "macOS" entirely and reports a contradictory profile as
++    // clean - the exact opposite of what this panel exists to catch.
++    auto family = [](const std::string& raw) {
++      const std::string v = base::ToLowerASCII(raw);
++      if (v.find("win") != std::string::npos) return 1;
++      if (v.find("mac") != std::string::npos) return 2;
++      if (v.find("linux") != std::string::npos) return 3;
++      if (v.find("android") != std::string::npos) return 4;
++      if (v.find("iphone") != std::string::npos ||
++          v.find("ios") != std::string::npos) {
++        return 5;
++      }
++      return 0;
++    };
++    const int a = family(*platform);
++    const int b = family(*ch_platform);
++    if (a && b && a != b) {
++      base::DictValue f;
++      f.Set("id", "platform-family-mismatch");
++      f.Set("severity", "error");
++      f.Set("message", std::string("navigator_platform \"") + *platform +
++                           "\" and ua_platform \"" + *ch_platform +
++                           "\" imply different operating systems");
++      f.Set("describe", "the two platform surfaces must agree");
++      findings.Append(std::move(f));
++    }
++  }
++
++  base::DictValue consistency;
++  int errors = 0;
++  for (const auto& f : findings) {
++    if (*f.GetDict().FindString("severity") == "error") {
++      ++errors;
++    }
++  }
++  consistency.Set("findings", std::move(findings));
++  consistency.Set("skipped", std::move(skipped));
++  consistency.Set("errorCount", errors);
++  consistency.Set("warnCount", 0);
++  consistency.Set("skipCount", static_cast<int>(skipped.size()));
++
++  out.Set("consistency", std::move(consistency));
++
++  out.Set("hasConfig", !config.empty());
++  // How many per-tab (webPreferences) configs contributed. Exposed rather than
++  // folded into hasConfig so a "0 tabs, 0 keys" report is distinguishable from
++  // a "3 tabs, nothing set" one - the first means the Inspector has nothing to
++  // look at, the second means the tabs genuinely run native.
++  out.Set("webContentsConfigs", wc_configs);
++
++  return base::WriteJson(out).value_or("{\"error\":\"json write failed\"}");
++}
++
++// Serves the Inspector's static assets.
++//
++// A custom URLDataSource rather than WebUIDataSource + AddResourcePath(): the
++// latter takes grit resource ids, and adding a .grd plus build rules for two
++// small assets is a lot of machinery for a diagnostic page. This keeps the page
++// in the same file as the C++ that feeds it, so the two cannot silently drift.
++//
++// Same shape as devtools_ui_bundle_data_source.cc, which is the only other
++// WebUI in this tree that serves bytes without grit.
++class FingerprintDataSource : public content::URLDataSource {
++ public:
++  explicit FingerprintDataSource(content::BrowserContext* context)
++      : context_(context) {}
++  ~FingerprintDataSource() override = default;
++
++  FingerprintDataSource(const FingerprintDataSource&) = delete;
++  FingerprintDataSource& operator=(const FingerprintDataSource&) = delete;
++
++  std::string GetSource() override { return std::string(kFingerprintHost); }
++
++  void StartDataRequest(const GURL& url,
++                        const content::WebContents::Getter& wc_getter,
++                        GotDataCallback callback) override {
++    const std::string path = content::URLDataSource::URLToRequestPath(url);
++
++    // IMPORTANT: URLToRequestPath() strips the leading slash, so these are
++    // compared WITHOUT one. Matching on "/app.js" instead silently 404s every
++    // asset while the index still loads - the page renders and then reports
++    // "Failed to load inspector data", which reads like a data bug rather than
++    // a path bug.
++    if (path == kAppJs) {
++      std::move(callback).Run(Bytes(kFingerprintUiAppJs));
++      return;
++    }
++    if (path == kInspectorDataPath) {
++      // Kept for direct inspection, but the page no longer depends on it - see
++      // the index branch below.
++      std::move(callback).Run(Bytes(BuildInspectorDataFor(context_)));
++      return;
++    }
++    // Bare host and "/" both mean the index.
++    if (path.empty() || path == "/") {
++      std::move(callback).Run(Bytes(BuildIndexPage()));
++      return;
++    }
++    // A null response makes URLDataSource answer 404. There is no
++    // CreateNotFoundResponse() helper on this class in this tree - only
++    // WebUIDataSource has one, and we are not using that.
++    std::move(callback).Run(nullptr);
++  }
++
++  std::string GetMimeType(const GURL& url) override {
++    const std::string path = content::URLDataSource::URLToRequestPath(url);
++    if (base::EndsWith(path, ".js")) {
++      return "application/javascript";
++    }
++    return "text/html";
++  }
++
++  bool ShouldAddContentSecurityPolicy() override { return false; }
++  bool ShouldDenyXFrameOptions() override { return false; }
++  bool ShouldServeMimeTypeAsContentTypeHeader() override { return true; }
++
++  // REQUIRED. URLDataSource::ShouldServiceRequest() defaults to allowing only
++  // chrome: and devtools:, so on a new scheme every request is rejected in
++  // web_ui_url_loader_factory.cc with ERR_INVALID_URL (-300) and
++  // StartDataRequest() is never called. The failure looks like the data source
++  // was never registered, which sends you hunting in the wrong place - the
++  // factory DID find the source, it just refused to serve it.
++  bool ShouldServiceRequest(const GURL& url,
++                            content::BrowserContext* browser_context,
++                            int render_process_id) override {
++    return url.SchemeIs(electron::kElectronUIScheme);
++  }
++
++  // Assemble the page: markup + inlined script + inlined data.
++  //
++  // Everything is inlined deliberately. Neither <script src="app.js"> nor
++  // fetch('inspector-data.json') nor the chrome.send/addWebUiListener round
++  // trip works in this build - all three fail for chrome:// WebUIs too, so
++  // this is a property of the build, not of the new electron:// scheme. The
++  // main document load does work, so the page is served self-contained.
++  std::string BuildIndexPage() {
++    const std::string payload =
++        "window.__fp = " + BuildInspectorDataFor(context_) + ";";
++
++    std::string page(kFingerprintUiHtml);
++    const size_t pos = page.find(kFingerprintUiDataMarker);
++    if (pos == std::string::npos) {
++      // The marker is gone: the page and this function have drifted apart.
++      // Fail loudly rather than serve a page with a permanently empty panel.
++      return "<html><body><p>Inspector page template is missing the " +
++             std::string(kFingerprintUiDataMarker) + " marker.</p></body></html>";
++    }
++    page.replace(pos, kFingerprintUiDataMarker.size(),
++                 payload + "\n" + std::string(kFingerprintUiAppJs));
++    return page;
++  }
++
++ private:
++  // Which profile the numbers describe. The Inspector is per-BrowserContext
++  // because so is the fingerprint config; showing the default context's config
++  // while inspecting another partition would be actively wrong.
++  raw_ptr<content::BrowserContext> context_;
++};
++
++}  // namespace
++
++FingerprintUI::FingerprintUI(content::WebUI* web_ui)
++    : content::WebUIController(web_ui) {
++  auto* const browser_context = web_ui->GetWebContents()->GetBrowserContext();
++
++  // The page gets its data over WebUI IPC, not fetch().
++  //
++  // fetch() for WebUI subresources is broken in this build for chrome:// too
++  // (verified: fetching chrome://resources/js/cr.js from chrome://accessibility
++  // fails with "Failed to fetch"), so serving inspector-data.json as a
++  // subresource cannot work. This message-handler path is what the other WebUI
++  // in this tree (accessibility_ui) uses.
++  // kWebUi is what injects chrome.send / addWebUiListener into the page.
++  // Without it the page loads but the IPC helpers are simply undefined, so
++  // load() throws "addWebUiListener is not defined" and the banner shows a
++  // generic failure that says nothing about the real cause.
++  web_ui->SetBindings({content::BindingsPolicyValue::kWebUi});
++
++  web_ui->AddMessageHandler(
++      std::make_unique<FingerprintUIMessageHandler>(browser_context));
++
++  // URLDataSource::Add() takes ownership and ties the source's lifetime to the
++  // BrowserContext, which outlives this controller. Deliberately NOT also
++  // holding it in a member: that would be a double free.
++  content::URLDataSource::Add(
++      browser_context, std::make_unique<FingerprintDataSource>(browser_context));
++}
++
++FingerprintUI::~FingerprintUI() = default;
++
++void FingerprintUIMessageHandler::RegisterMessages() {
++  web_ui()->RegisterMessageCallback(
++      "requestInspectorData",
++      base::BindRepeating(&FingerprintUIMessageHandler::HandleRequestInspectorData,
++                          base::Unretained(this)));
++}
++
++void FingerprintUIMessageHandler::HandleRequestInspectorData(
++    const base::ListValue& args) {
++  AllowJavascript();
++  // BuildInspectorDataFor() already returns serialized JSON; hand it straight
++  // to the page rather than round-tripping through a re-parse, which would
++  // only add a failure mode that reports "no data" for a parse problem.
++  std::optional<base::Value> parsed =
++      base::JSONReader::Read(BuildInspectorDataFor(context_), 0);
++  if (!parsed) {
++    return;
++  }
++  FireWebUIListener("inspector-data", *parsed);
++}
++
++}  // namespace electron
+diff --git a/shell/browser/ui/webui/fingerprint_ui.h b/shell/browser/ui/webui/fingerprint_ui.h
+new file mode 100644
+index 0000000000..05a9d8e786
+--- /dev/null
++++ b/shell/browser/ui/webui/fingerprint_ui.h
+@@ -0,0 +1,69 @@
++// Copyright (c) 2026 Microsoft, Inc.
++// Use of this source code is governed by the MIT license that can be
++// found in the LICENSE.
++
++#ifndef ELECTRON_SHELL_BROWSER_UI_WEBUI_FINGERPRINT_UI_H_
++#define ELECTRON_SHELL_BROWSER_UI_WEBUI_FINGERPRINT_UI_H_
++
++#include <memory>
++
++#include "base/memory/weak_ptr.h"
++#include "base/values.h"
++#include "content/public/browser/web_ui_controller.h"
++#include "content/public/browser/web_ui_message_handler.h"
++
++namespace content {
++class BrowserContext;
++}
++
++namespace electron {
++
++// Serves the live profile data to the page over WebUI IPC.
++//
++// A separate handler rather than making FingerprintUI itself a
++// WebUIMessageHandler: WebUIMessageHandler is abstract, and mixing it into the
++// controller turns the controller into an abstract type that can no longer be
++// constructed by CreateWebUIControllerForURL.
++class FingerprintUIMessageHandler : public content::WebUIMessageHandler {
++ public:
++  explicit FingerprintUIMessageHandler(content::BrowserContext* context)
++      : context_(context) {}
++  ~FingerprintUIMessageHandler() override = default;
++
++  FingerprintUIMessageHandler(const FingerprintUIMessageHandler&) = delete;
++  FingerprintUIMessageHandler& operator=(const FingerprintUIMessageHandler&) =
++      delete;
++
++  void RegisterMessages() override;
++
++ private:
++  void HandleRequestInspectorData(const base::ListValue& args);
++
++  raw_ptr<content::BrowserContext> context_;
++};
++
++// Serves the fingerprint Inspector at electron://fingerprint/.
++//
++// The Inspector exists because a fingerprint is judged as a whole. Individual
++// surfaces each have their own test, but nothing showed what a PROFILE looks
++// like across all of them at once - or whether it contradicts itself. This page
++// renders a profile's coverage per group and the result of the cross-layer
++// consistency check, which is the thing no single-surface test can express.
++//
++// It is a first-class electron:// WebUI rather than a page inside the app so
++// that it is (a) available to any app, including one that never opts in, and
++// (b) served from a privileged origin the app's own code cannot rewrite. An
++// inspector whose numbers the code under inspection can change is worthless as
++// a diagnostic.
++class FingerprintUI : public content::WebUIController {
++ public:
++  explicit FingerprintUI(content::WebUI* web_ui);
++  ~FingerprintUI() override;
++
++  FingerprintUI(const FingerprintUI&) = delete;
++  FingerprintUI& operator=(const FingerprintUI&) = delete;
++};
++
++}  // namespace electron
++
++#endif  // ELECTRON_SHELL_BROWSER_UI_WEBUI_FINGERPRINT_UI_H_
+diff --git a/shell/browser/ui/webui/fingerprint_ui_page.h b/shell/browser/ui/webui/fingerprint_ui_page.h
+new file mode 100644
+index 0000000000..4dbb9f2e7d
+--- /dev/null
++++ b/shell/browser/ui/webui/fingerprint_ui_page.h
+@@ -0,0 +1,220 @@
++// Copyright (c) 2026 Microsoft, Inc.
++// Use of this source code is governed by the MIT license that can be
++// found in the LICENSE.
++
++// The fingerprint Inspector page, as string constants.
++//
++// Kept in C++ rather than as standalone .html/.js files loaded at runtime:
++// the page is served by FingerprintDataSource straight from these constants,
++// so there is no packaging step and no way for the page to be missing or
++// out of sync with the build that serves it. A diagnostic page that silently
++// fails to load is indistinguishable from one that reports "all clean".
++//
++// NOTE: `);` appearing at the start of a line inside a raw string literal ends
++// the literal. None of the embedded JS may contain that sequence.
++
++#ifndef ELECTRON_SHELL_BROWSER_UI_WEBUI_FINGERPRINT_UI_PAGE_H_
++#define ELECTRON_SHELL_BROWSER_UI_WEBUI_FINGERPRINT_UI_PAGE_H_
++
++#include <string_view>
++
++namespace electron {
++
++inline constexpr std::string_view kFingerprintUiHtml = R"FPHTML(<!DOCTYPE html>
++<html lang="en">
++<head>
++<meta charset="utf-8">
++<title>Fingerprint Inspector</title>
++<style>
++  :root { color-scheme: light dark; }
++  body {
++    font: 13px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
++    margin: 0; padding: 24px; max-width: 1100px;
++  }
++  h1 { font-size: 18px; margin: 0 0 4px; }
++  h2 { font-size: 14px; margin: 24px 0 8px; text-transform: uppercase;
++       letter-spacing: .04em; opacity: .6; }
++  .sub { opacity: .65; margin: 0 0 20px; }
++  .url { font-family: ui-monospace, monospace; opacity: .8; }
++  .card { border: 1px solid rgba(127,127,127,.35); border-radius: 8px;
++          padding: 14px 16px; margin-bottom: 12px; }
++  table { border-collapse: collapse; width: 100%; }
++  td, th { text-align: left; padding: 4px 10px 4px 0; vertical-align: top; }
++  th { opacity: .6; font-weight: 600; }
++  .bar { background: rgba(127,127,127,.25); border-radius: 3px;
++         height: 8px; width: 120px; overflow: hidden; }
++  .bar > i { display: block; height: 100%; background: #3b82f6; }
++  .ok { color: #15803d; } .warn { color: #b45309; } .err { color: #b91c1c; }
++  .muted { opacity: .55; }
++  code { font-family: ui-monospace, monospace; font-size: 12px; }
++  .finding { padding: 6px 0; border-top: 1px solid rgba(127,127,127,.2); }
++  .finding:first-child { border-top: 0; }
++  .pill { display: inline-block; padding: 1px 7px; border-radius: 10px;
++          font-size: 11px; font-weight: 600; }
++  .pill.error { background: #fee2e2; color: #b91c1c; }
++  .pill.warn  { background: #fef3c7; color: #b45309; }
++  .pill.skip  { background: rgba(127,127,127,.18); opacity: .7; }
++  #status { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; }
++  ul { margin: 6px 0 0; padding-left: 20px; }
++</style>
++</head>
++<body>
++  <h1>Fingerprint Inspector</h1>
++  <p class="sub">
++    Per-group coverage and cross-layer consistency for the active profile.
++    Served from <span class="url">electron://fingerprint</span>.
++  </p>
++
++  <div id="status">Loading&hellip;</div>
++
++  <h2>Summary</h2>
++  <div class="card"><table id="summary"></table></div>
++
++  <h2>Coverage by group</h2>
++  <div class="card"><table id="coverage"></table></div>
++
++  <h2>Cross-layer consistency</h2>
++  <div class="card">
++    <div id="consistency"></div>
++  </div>
++
++  <h2>Notes</h2>
++  <div class="card">
++    <ul class="muted">
++      <li><code>skipped</code> rules could not evaluate (their inputs are not
++          set). They are reported, not hidden &mdash; a rule that quietly passes
++          on missing input proves nothing.</li>
++      <li>An <span class="err">error</span> means the profile contradicts
++          itself, which is more detectable than not spoofing at all.</li>
++      <li>The UA anchors these checks: every other surface is compared against
++          what the UA implies.</li>
++    </ul>
++  </div>
++
++  <script>__FP_DATA__</script>
++</body>
++</html>
++)FPHTML";
++
++// Marker inside kFingerprintUiHtml that gets replaced with the inlined script.
++// See FingerprintDataSource::StartDataRequest for why the page is self-contained.
++inline constexpr std::string_view kFingerprintUiDataMarker = "__FP_DATA__";
++
++inline constexpr std::string_view kFingerprintUiAppJs = R"FPJS(
++'use strict';
++
++// The page renders whatever the browser process hands it. It deliberately does
++// NO fingerprinting of its own: reading navigator/screen here would measure the
++// privileged WebUI renderer rather than the profile under inspection, and
++// reporting that as "the fingerprint" would be actively misleading.
++
++const el = (id) => document.getElementById(id);
++
++function setStatus(text, cls) {
++  const s = el('status');
++  s.textContent = text;
++  s.className = cls || '';
++  s.style.background = cls === 'err' ? '#fee2e2'
++    : cls === 'warn' ? '#fef3c7'
++    : cls === 'ok' ? '#dcfce7'
++    : 'rgba(127,127,127,.15)';
++  s.style.color = cls ? '' : 'inherit';
++}
++
++function renderSummary(sum) {
++  const rows = [
++    ['Active keys', sum.active + ' / ' + sum.total],
++    ['Groups', String(sum.groups)],
++    ['Empty groups', sum.emptyGroups.length ? sum.emptyGroups.join(', ') : 'none'],
++  ];
++  el('summary').innerHTML = rows
++    .map(([k, v]) => '<tr><th>' + k + '</th><td>' + v + '</td></tr>')
++    .join('');
++}
++
++function renderCoverage(cov) {
++  el('coverage').innerHTML =
++    '<tr><th>Group</th><th>Active / total</th><th></th></tr>' +
++    cov.map((g) => {
++      const pct = g.total ? Math.round((g.active / g.total) * 100) : 0;
++      return '<tr><td>' + g.label + '</td>' +
++        '<td class="muted">' + g.active + ' / ' + g.total + '</td>' +
++        '<td><div class="bar"><i style="width:' + pct + '%"></i></div></td></tr>';
++    }).join('');
++}
++
++function renderConsistency(c) {
++  const parts = [];
++  parts.push('<p><strong>' +
++    (c.errorCount ? c.errorCount + ' error(s), ' : '') +
++    c.warnCount + ' warning(s), ' + c.skipCount + ' skipped</strong></p>');
++
++  if (!c.findings.length) {
++    parts.push('<p class="ok">No contradictions detected.</p>');
++  } else {
++    parts.push(c.findings.map((f) =>
++      '<div class="finding"><span class="pill ' + f.severity + '">' +
++      f.severity.toUpperCase() + '</span> <code>' + f.id + '</code><br>' +
++      f.message + '<br><span class="muted">' + f.describe + '</span></div>'
++    ).join(''));
++  }
++
++  if (c.skipped.length) {
++    parts.push('<p class="muted" style="margin-top:10px">Skipped (inputs not set): ' +
++      c.skipped.map((s) => '<code>' + s.id + '</code>').join(', ') + '</p>');
++  }
++  el('consistency').innerHTML = parts.join('');
++}
++
++function apply(data) {
++  if (data.error) {
++    setStatus('Error: ' + data.error, 'err');
++    return;
++  }
++
++  renderSummary(data.summary);
++  renderCoverage(data.coverage);
++  renderConsistency(data.consistency);
++
++  if (data.consistency.errorCount) {
++    setStatus('Profile has ' + data.consistency.errorCount +
++      ' cross-layer error(s) - inconsistent surfaces are a detection signal.',
++      'err');
++  } else if (data.consistency.warnCount) {
++    setStatus('Profile is consistent, with ' + data.consistency.warnCount +
++      ' warning(s).', 'warn');
++  } else {
++    setStatus('Profile is consistent.', 'ok');
++  }
++}
++
++// The data is INLINED into the page by the data source (window.__fp).
++//
++// Not fetch(), and not WebUI IPC. In this build:
++//   - WebUI subresource fetches fail, including for chrome:// (fetching
++//     chrome://resources/js/cr.js from chrome://accessibility gives a bare
++//     "Failed to fetch"). So <script src> and fetch() of a sibling URL are out,
++//     which is also why the WebUI's own JS module (cr) is missing.
++//   - addWebUiListener is undefined on chrome://accessibility too, so the
++//     chrome.send/fireWebUIListener round trip cannot deliver a reply either.
++// The one path that does work is the main document load, so the page is served
++// fully self-contained: markup, script and data all in the initial response.
++function load() {
++  try {
++    if (typeof window.__fp !== 'object' || window.__fp === null) {
++      setStatus('No data: the page was served without an inline payload.', 'err');
++      return;
++    }
++    window.__fpApply = apply;   // exposed for tests
++    apply(window.__fp);
++  } catch (e) {
++    setStatus('Failed to render inspector data: ' + e.message, 'err');
++  }
++}
++
++load();
++)FPJS";
++
++}  // namespace electron
++
++#endif  // ELECTRON_SHELL_BROWSER_UI_WEBUI_FINGERPRINT_UI_PAGE_H_
 diff --git a/shell/common/electron_constants.h b/shell/common/electron_constants.h
 index 79ab830c8c..b7fdaa5175 100644
 --- a/shell/common/electron_constants.h

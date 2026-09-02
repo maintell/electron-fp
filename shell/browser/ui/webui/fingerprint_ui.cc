@@ -24,8 +24,10 @@
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui.h"
 
+#include "shell/browser/api/electron_api_web_contents.h"
 #include "shell/browser/electron_browser_context.h"
 #include "shell/browser/session_preferences.h"
+#include "shell/browser/web_contents_preferences.h"
 #include "shell/common/electron_constants.h"
 #include "shell/browser/ui/webui/fingerprint_ui_page.h"
 
@@ -61,11 +63,19 @@ constexpr std::string_view kAppJs = "app.js";
 std::string BuildInspectorDataFor(content::BrowserContext* context) {
   base::DictValue out;
 
-  const std::string b64 =
-      electron::SessionPreferences::FromBrowserContext(context)
-          ? electron::SessionPreferences::FromBrowserContext(context)
-                ->GetFingerprintConfigBase64()
-          : std::string();
+  // There are TWO stores and the effective config may live in either:
+  //
+  //   SessionPreferences      <- session.setFingerprintConfig({...})
+  //   WebContentsPreferences  <- new BrowserView({ webPreferences: { fingerprint } })
+  //
+  // The Client uses the second one (Client/main.js builds a BrowserView per tab
+  // with `fingerprint` in webPreferences), so reading only SessionPreferences
+  // shows an empty profile for a real Client tab - precisely the case the
+  // Inspector exists to inspect. Both are read, and the results are merged.
+  std::string b64;
+  if (auto* prefs = electron::SessionPreferences::FromBrowserContext(context)) {
+    b64 = prefs->GetFingerprintConfigBase64();
+  }
 
   base::DictValue config;
   if (!b64.empty()) {
@@ -157,7 +167,7 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
   }();
 
   // A key counts as "set" when it carries a non-default value. 0 / "" are the
-  // schema's disabled sentinels, NOT real values - treating them as set would
+  // schema's disabled placeholder values, NOT real values - treating them as set would
   // report every key as configured.
   auto is_set = [](const base::Value* v) {
     if (!v) return false;
@@ -167,6 +177,50 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
     if (v->is_bool()) return v->GetBool();
     return false;
   };
+
+  // Merge in the per-WebContents (webPreferences) configs for this context.
+  //
+  // These are what the Client actually sets (Client/main.js builds a
+  // BrowserView per tab with `fingerprint` in webPreferences, which lands in
+  // WebContentsPreferences - NOT SessionPreferences). Without this merge the
+  // Inspector reports an empty profile for a real Client tab, which is both
+  // wrong and actively harmful: it reads as "verified clean" when in fact
+  // nothing was read.
+  //
+  // This must run BEFORE the coverage loop, which counts the merged dict.
+  int wc_configs = 0;
+  for (electron::api::WebContents* ewc :
+       electron::api::WebContents::GetWebContentsList()) {
+    if (!ewc) {
+      continue;
+    }
+    content::WebContents* wc = ewc->web_contents();
+    if (!wc || wc->GetBrowserContext() != context) {
+      continue;  // the Inspector is scoped to its own BrowserContext
+    }
+    auto* wc_prefs = electron::WebContentsPreferences::From(wc);
+    if (!wc_prefs) {
+      continue;
+    }
+    const std::string& wc_b64 = wc_prefs->GetFingerprintConfigBase64();
+    if (wc_b64.empty()) {
+      continue;
+    }
+    std::string wc_json;
+    if (!base::Base64Decode(wc_b64, &wc_json)) {
+      continue;
+    }
+    std::optional<base::Value> wc_val = base::JSONReader::Read(wc_json, 0);
+    if (!wc_val || !wc_val->is_dict()) {
+      continue;
+    }
+    ++wc_configs;
+    // WebContents config wins on conflict: it is the more specific of the two,
+    // and it is what a real tab actually runs with.
+    for (auto [key, value] : wc_val->GetDict()) {
+      config.Set(key, std::move(value));
+    }
+  }
 
   base::ListValue coverage;
   int total_active = 0;
@@ -275,11 +329,12 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
 
   out.Set("consistency", std::move(consistency));
 
-  if (!config.empty()) {
-    out.Set("hasConfig", true);
-  } else {
-    out.Set("hasConfig", false);
-  }
+  out.Set("hasConfig", !config.empty());
+  // How many per-tab (webPreferences) configs contributed. Exposed rather than
+  // folded into hasConfig so a "0 tabs, 0 keys" report is distinguishable from
+  // a "3 tabs, nothing set" one - the first means the Inspector has nothing to
+  // look at, the second means the tabs genuinely run native.
+  out.Set("webContentsConfigs", wc_configs);
 
   return base::WriteJson(out).value_or("{\"error\":\"json write failed\"}");
 }
