@@ -70,6 +70,7 @@
 #include "ui/display/screen.h"
 #include "ui/linux/display_server_utils.h"
 #include "ui/views/layout/layout_provider.h"
+#include "shell/common/electron_constants.h"
 #include "url/url_util.h"
 
 #if defined(USE_AURA)
@@ -684,6 +685,26 @@ void ElectronBrowserMainParts::PreCreateMainMessageLoopCommon() {
   RegisterURLHandler();
 #endif
   media::SetLocalizedStringProvider(MediaStringProvider);
+
+  // Register electron:// as a standard scheme in the BROWSER process.
+  //
+  // This must happen before any GURL is constructed: url_util DCHECKs on
+  // "Trying to add a scheme after the lists have been used". PreMainMessageLoopRun
+  // is too late (GURLs already exist by then) - that ordering fails the DCHECK
+  // at url/url_util.cc:503. PreCreateMainMessageLoop is early enough.
+  //
+  // Two independent things are needed for electron://fingerprint/ to work:
+  //   1. url::AddStandardScheme here (and in renderer_client_base.cc) so the
+  //      URL PARSES. Without it navigation fails ERR_INVALID_URL (-300).
+  //   2. ElectronBrowserClient::GetAdditionalWebUISchemes() so content treats
+  //      it as a WEBUI. Without it navigation fails ERR_FAILED (-2).
+  url::AddStandardScheme(electron::kElectronUIScheme, url::SCHEME_WITH_HOST);
+  // CORS-enabled or the page's own subresource fetches (app.js,
+  // inspector-data.json) are rejected: the main document loads, the inline
+  // script runs, and every fetch() from that origin fails with a bare
+  // "Failed to fetch". Content registers chrome:// and chrome-untrusted://
+  // this way in content/common/url_schemes.cc.
+  url::AddCorsEnabledScheme(electron::kElectronUIScheme);
 
 #if BUILDFLAG(IS_WIN)
   auto* local_state = g_browser_process->local_state();

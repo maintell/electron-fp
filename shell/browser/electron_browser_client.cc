@@ -129,6 +129,7 @@
 #include "shell/browser/window_list.h"
 #include "shell/common/api/api.mojom.h"
 #include "shell/common/application_info.h"
+#include "shell/common/electron_constants.h"
 #include "shell/common/electron_paths.h"
 #include "shell/common/logging.h"
 #include "shell/common/options_switches.h"
@@ -910,6 +911,14 @@ void ElectronBrowserClient::GetAdditionalAllowedSchemesForFileSystem(
 void ElectronBrowserClient::GetAdditionalWebUISchemes(
     std::vector<std::string>* additional_schemes) {
   additional_schemes->push_back(content::kChromeDevToolsScheme);
+  // electron:// hosts Electron's own privileged WebUIs (currently only the
+  // fingerprint Inspector). Registering it as a WebUI scheme is what makes
+  // content route it through ElectronWebUIControllerFactory and serve it from
+  // the browser process rather than treating it as an unhandled custom scheme.
+  //
+  // This is the ONLY place the scheme is declared: content handles the
+  // renderer/security plumbing once it is in this list.
+  additional_schemes->push_back(electron::kElectronUIScheme);
 }
 
 void ElectronBrowserClient::SiteInstanceGotProcessAndSite(

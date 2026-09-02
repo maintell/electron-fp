@@ -10,8 +10,20 @@
 #include "content/public/browser/web_ui_controller.h"
 #include "shell/browser/ui/devtools_ui.h"
 #include "shell/browser/ui/webui/accessibility_ui.h"
+#include "shell/browser/ui/webui/fingerprint_ui.h"
 
 namespace electron {
+
+namespace {
+
+// Host of the fingerprint Inspector, served on the electron:// scheme.
+//
+// Not in chrome/common/webui_url_constants.h: that header enumerates Chrome's
+// WebUI hosts, and listing this there would imply chrome://fingerprint works.
+// It does not - only electron://fingerprint does.
+constexpr char kElectronUIFingerprintHost[] = "fingerprint";
+
+}  // namespace
 
 // static
 ElectronWebUIControllerFactory* ElectronWebUIControllerFactory::GetInstance() {
@@ -25,9 +37,12 @@ ElectronWebUIControllerFactory::~ElectronWebUIControllerFactory() = default;
 content::WebUI::TypeID ElectronWebUIControllerFactory::GetWebUIType(
     content::BrowserContext* browser_context,
     const GURL& url) {
+  // Host-only match, so the same controller serves any WebUI scheme that is
+  // routed here. Scheme gating happens when the scheme is registered, not here.
   if (const std::string_view host = url.host();
       host == chrome::kChromeUIDevToolsHost ||
-      host == chrome::kChromeUIAccessibilityHost) {
+      host == chrome::kChromeUIAccessibilityHost ||
+      host == kElectronUIFingerprintHost) {
     return this;
   }
 
@@ -53,6 +68,9 @@ ElectronWebUIControllerFactory::CreateWebUIControllerForURL(
 
   if (host == chrome::kChromeUIAccessibilityHost)
     return std::make_unique<ElectronAccessibilityUI>(web_ui);
+
+  if (host == kElectronUIFingerprintHost)
+    return std::make_unique<FingerprintUI>(web_ui);
 
   return {};
 }

@@ -24,6 +24,7 @@
 #include "shell/browser/api/electron_api_protocol.h"
 #include "shell/common/api/electron_api_native_image.h"
 #include "shell/common/color_util.h"
+#include "shell/common/electron_constants.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/js2c_bundle_ids.h"
 #include "shell/common/node_includes.h"
@@ -168,6 +169,17 @@ RendererClientBase::RendererClientBase() {
       ParseSchemesCLISwitch(command_line, switches::kExtensionSchemes);
   for (const std::string& scheme : extension_schemes_list)
     url::AddExtensionScheme(scheme.c_str());
+  // electron:// is Electron's own WebUI scheme (electron://fingerprint/).
+  //
+  // It must be a STANDARD scheme with a host, or GURL rejects the URL as
+  // malformed - the navigation fails with ERR_INVALID_URL (-300) before the
+  // WebUI machinery is ever consulted. Registering it here in the renderer and
+  // in ElectronBrowserMainParts (browser process) is what makes the URL parse;
+  // being in GetAdditionalWebUISchemes() is what makes it a WEBUI. Both are
+  // needed and they are independent.
+  url::AddStandardScheme(electron::kElectronUIScheme, url::SCHEME_WITH_HOST);
+  url::AddCorsEnabledScheme(electron::kElectronUIScheme);
+
   // We rely on the unique process host id which is notified to the
   // renderer process via command line switch from the content layer,
   // if this switch is removed from the content layer for some reason,

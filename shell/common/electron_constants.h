@@ -16,6 +16,16 @@ namespace electron {
 inline constexpr std::string_view kBrowserForward = "browser-forward";
 inline constexpr std::string_view kBrowserBackward = "browser-backward";
 
+// Scheme for Electron's own privileged WebUIs (electron://fingerprint/).
+//
+// Registered as a WebUI scheme via
+// ElectronBrowserClient::GetAdditionalWebUISchemes(), which is what makes
+// content route it to ElectronWebUIControllerFactory and serve it from the
+// browser process. Adding it to that list is the whole registration - but note
+// that this scheme is NOT a standard/secure scheme for web content, so pages
+// cannot be loaded from it by ordinary navigation.
+inline constexpr char kElectronUIScheme[] = "electron";
+
 // Keys for Device APIs
 inline constexpr std::string_view kDeviceVendorIdKey = "vendorId";
 inline constexpr std::string_view kDeviceProductIdKey = "productId";

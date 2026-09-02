@@ -1,0 +1,256 @@
+# ============================================================================
+# 60-electron-inspector.patch - the electron://fingerprint/ Inspector.
+#
+# Part of the fp-fingerprint patch set. Apply in filename order:
+#   00-core.patch -> 10-blink-core.patch -> 20-blink-modules.patch ->
+#   30-webrtc.patch -> 40-net-tls.patch -> 50-electron-glue.patch ->
+#   60-electron-inspector.patch
+#
+# WHAT THIS ADDS
+#   A privileged WebUI at electron://fingerprint/ that reports the ACTIVE
+#   fingerprint configuration of the BrowserContext it is opened on: per-group
+#   coverage across all 63 fp_* keys, and cross-layer consistency findings.
+#
+# WHY A NEW SCHEME
+#   The Inspector is Electron-implemented and must not be reachable at
+#   chrome://fingerprint (which would imply a Chromium upstream WebUI). It is
+#   served on its own scheme, registered in three places that are INDEPENDENT
+#   and all three are required - missing any one produces a different,
+#   misleading failure:
+#
+#     1. url::AddStandardScheme (browser + renderer). Without it the URL does
+#        not parse and every navigation fails ERR_INVALID_URL (-300).
+#     2. ContentBrowserClient::GetAdditionalWebUISchemes. Without it content
+#        does not treat the scheme as WebUI and navigation fails
+#        ERR_FAILED (-2).
+#     3. URLDataSource::ShouldServiceRequest. The default implementation
+#        (content/public/browser/url_data_source.h) allows ONLY chrome: and
+#        devtools:, so on any new scheme the data source is found and then
+#        refused - ERR_INVALID_URL again, with StartDataRequest never called.
+#
+#   Registration must also happen before url::LockSchemeRegistries() and before
+#   any GURL is constructed: PreMainMessageLoopRun is too late and trips
+#   "Trying to add a scheme after the lists have been used"
+#   (url/url_util.cc:503). PreCreateMainMessageLoop is early enough.
+#
+# WHY THE PAGE IS SELF-CONTAINED
+#   Normally a WebUI serves its HTML, fetches JSON, and loads <script src>.
+#   NONE of those subresource paths work in this build - and this is not
+#   specific to the new scheme. Verified on stock chrome://accessibility:
+#     - fetch('chrome://resources/js/cr.js')          -> "Failed to fetch"
+#     - addWebUiListener                              -> undefined
+#   So the data source inlines the script AND the data into the index response,
+#   which travels the one path that does work: the main document load.
+#
+# NOTE ON COVERAGE GROUPS
+#   The group/key table in fingerprint_ui.cc mirrors Client/fp-schema.js. That
+#   duplication is deliberate (C++ cannot read the JS schema) but the two MUST
+#   stay in sync; test-inspector.js asserts the total is 63.
+#
+# NEW FILES (not diffable, listed here because they are part of the change):
+#   shell/browser/ui/webui/fingerprint_ui.h        - WebUIController + URLDataSource
+#   shell/browser/ui/webui/fingerprint_ui.cc       - data source, page assembly,
+#                                                    live-data builder
+#   shell/browser/ui/webui/fingerprint_ui_page.h   - raw-string HTML + JS
+# ============================================================================
+#
+# --- filenames.gni
+#   Register the three new WebUI sources in the build.
+#
+# --- shell/browser/electron_browser_client.cc
+#   Declare "electron" as a WebUI scheme (see registration step 2 above).
+#
+# --- shell/browser/electron_browser_main_parts.cc
+#   url::AddStandardScheme + AddCorsEnabledScheme for "electron", in
+#   PreCreateMainMessageLoop - early enough to beat the GURL-usage DCHECK.
+#
+# --- shell/browser/electron_web_ui_controller_factory.cc
+#   Route host "fingerprint" to FingerprintUI.
+#
+# --- shell/common/electron_constants.h
+#   Define kElectronUIScheme = "electron".
+#
+# --- shell/renderer/renderer_client_base.cc
+#   Mirror the browser-process scheme registration in the renderer; schemes are
+#   per-process and a mismatch makes the URL unparseable on one side.
+diff --git a/filenames.gni b/filenames.gni
+index e8121b90ec..c977617d7c 100644
+--- a/filenames.gni
++++ b/filenames.gni
+@@ -570,6 +570,9 @@ filenames = {
+     "shell/browser/ui/tray_icon_observer.h",
+     "shell/browser/ui/webui/accessibility_ui.cc",
+     "shell/browser/ui/webui/accessibility_ui.h",
++    "shell/browser/ui/webui/fingerprint_ui.cc",
++    "shell/browser/ui/webui/fingerprint_ui.h",
++    "shell/browser/ui/webui/fingerprint_ui_page.h",
+     "shell/browser/usb/electron_usb_delegate.cc",
+     "shell/browser/usb/electron_usb_delegate.h",
+     "shell/browser/usb/usb_chooser_context.cc",
+diff --git a/shell/browser/electron_browser_client.cc b/shell/browser/electron_browser_client.cc
+index 1a5bb25241..d71e0b644f 100644
+--- a/shell/browser/electron_browser_client.cc
++++ b/shell/browser/electron_browser_client.cc
+@@ -129,6 +129,7 @@
+ #include "shell/browser/window_list.h"
+ #include "shell/common/api/api.mojom.h"
+ #include "shell/common/application_info.h"
++#include "shell/common/electron_constants.h"
+ #include "shell/common/electron_paths.h"
+ #include "shell/common/logging.h"
+ #include "shell/common/options_switches.h"
+@@ -910,6 +911,14 @@ void ElectronBrowserClient::GetAdditionalAllowedSchemesForFileSystem(
+ void ElectronBrowserClient::GetAdditionalWebUISchemes(
+     std::vector<std::string>* additional_schemes) {
+   additional_schemes->push_back(content::kChromeDevToolsScheme);
++  // electron:// hosts Electron's own privileged WebUIs (currently only the
++  // fingerprint Inspector). Registering it as a WebUI scheme is what makes
++  // content route it through ElectronWebUIControllerFactory and serve it from
++  // the browser process rather than treating it as an unhandled custom scheme.
++  //
++  // This is the ONLY place the scheme is declared: content handles the
++  // renderer/security plumbing once it is in this list.
++  additional_schemes->push_back(electron::kElectronUIScheme);
+ }
+ 
+ void ElectronBrowserClient::SiteInstanceGotProcessAndSite(
+diff --git a/shell/browser/electron_browser_main_parts.cc b/shell/browser/electron_browser_main_parts.cc
+index 4a4dcd37fd..2d90a5e92c 100644
+--- a/shell/browser/electron_browser_main_parts.cc
++++ b/shell/browser/electron_browser_main_parts.cc
+@@ -70,6 +70,7 @@
+ #include "ui/display/screen.h"
+ #include "ui/linux/display_server_utils.h"
+ #include "ui/views/layout/layout_provider.h"
++#include "shell/common/electron_constants.h"
+ #include "url/url_util.h"
+ 
+ #if defined(USE_AURA)
+@@ -685,6 +686,26 @@ void ElectronBrowserMainParts::PreCreateMainMessageLoopCommon() {
+ #endif
+   media::SetLocalizedStringProvider(MediaStringProvider);
+ 
++  // Register electron:// as a standard scheme in the BROWSER process.
++  //
++  // This must happen before any GURL is constructed: url_util DCHECKs on
++  // "Trying to add a scheme after the lists have been used". PreMainMessageLoopRun
++  // is too late (GURLs already exist by then) - that ordering fails the DCHECK
++  // at url/url_util.cc:503. PreCreateMainMessageLoop is early enough.
++  //
++  // Two independent things are needed for electron://fingerprint/ to work:
++  //   1. url::AddStandardScheme here (and in renderer_client_base.cc) so the
++  //      URL PARSES. Without it navigation fails ERR_INVALID_URL (-300).
++  //   2. ElectronBrowserClient::GetAdditionalWebUISchemes() so content treats
++  //      it as a WEBUI. Without it navigation fails ERR_FAILED (-2).
++  url::AddStandardScheme(electron::kElectronUIScheme, url::SCHEME_WITH_HOST);
++  // CORS-enabled or the page's own subresource fetches (app.js,
++  // inspector-data.json) are rejected: the main document loads, the inline
++  // script runs, and every fetch() from that origin fails with a bare
++  // "Failed to fetch". Content registers chrome:// and chrome-untrusted://
++  // this way in content/common/url_schemes.cc.
++  url::AddCorsEnabledScheme(electron::kElectronUIScheme);
++
+ #if BUILDFLAG(IS_WIN)
+   auto* local_state = g_browser_process->local_state();
+   DCHECK(local_state);
+diff --git a/shell/browser/electron_web_ui_controller_factory.cc b/shell/browser/electron_web_ui_controller_factory.cc
+index 6b5c4ff4e2..4d5f3bddff 100644
+--- a/shell/browser/electron_web_ui_controller_factory.cc
++++ b/shell/browser/electron_web_ui_controller_factory.cc
+@@ -10,9 +10,21 @@
+ #include "content/public/browser/web_ui_controller.h"
+ #include "shell/browser/ui/devtools_ui.h"
+ #include "shell/browser/ui/webui/accessibility_ui.h"
++#include "shell/browser/ui/webui/fingerprint_ui.h"
+ 
+ namespace electron {
+ 
++namespace {
++
++// Host of the fingerprint Inspector, served on the electron:// scheme.
++//
++// Not in chrome/common/webui_url_constants.h: that header enumerates Chrome's
++// WebUI hosts, and listing this there would imply chrome://fingerprint works.
++// It does not - only electron://fingerprint does.
++constexpr char kElectronUIFingerprintHost[] = "fingerprint";
++
++}  // namespace
++
+ // static
+ ElectronWebUIControllerFactory* ElectronWebUIControllerFactory::GetInstance() {
+   return base::Singleton<ElectronWebUIControllerFactory>::get();
+@@ -25,9 +37,12 @@ ElectronWebUIControllerFactory::~ElectronWebUIControllerFactory() = default;
+ content::WebUI::TypeID ElectronWebUIControllerFactory::GetWebUIType(
+     content::BrowserContext* browser_context,
+     const GURL& url) {
++  // Host-only match, so the same controller serves any WebUI scheme that is
++  // routed here. Scheme gating happens when the scheme is registered, not here.
+   if (const std::string_view host = url.host();
+       host == chrome::kChromeUIDevToolsHost ||
+-      host == chrome::kChromeUIAccessibilityHost) {
++      host == chrome::kChromeUIAccessibilityHost ||
++      host == kElectronUIFingerprintHost) {
+     return this;
+   }
+ 
+@@ -54,6 +69,9 @@ ElectronWebUIControllerFactory::CreateWebUIControllerForURL(
+   if (host == chrome::kChromeUIAccessibilityHost)
+     return std::make_unique<ElectronAccessibilityUI>(web_ui);
+ 
++  if (host == kElectronUIFingerprintHost)
++    return std::make_unique<FingerprintUI>(web_ui);
++
+   return {};
+ }
+ 
+diff --git a/shell/common/electron_constants.h b/shell/common/electron_constants.h
+index 79ab830c8c..b7fdaa5175 100644
+--- a/shell/common/electron_constants.h
++++ b/shell/common/electron_constants.h
+@@ -16,6 +16,16 @@ namespace electron {
+ inline constexpr std::string_view kBrowserForward = "browser-forward";
+ inline constexpr std::string_view kBrowserBackward = "browser-backward";
+ 
++// Scheme for Electron's own privileged WebUIs (electron://fingerprint/).
++//
++// Registered as a WebUI scheme via
++// ElectronBrowserClient::GetAdditionalWebUISchemes(), which is what makes
++// content route it to ElectronWebUIControllerFactory and serve it from the
++// browser process. Adding it to that list is the whole registration - but note
++// that this scheme is NOT a standard/secure scheme for web content, so pages
++// cannot be loaded from it by ordinary navigation.
++inline constexpr char kElectronUIScheme[] = "electron";
++
+ // Keys for Device APIs
+ inline constexpr std::string_view kDeviceVendorIdKey = "vendorId";
+ inline constexpr std::string_view kDeviceProductIdKey = "productId";
+diff --git a/shell/renderer/renderer_client_base.cc b/shell/renderer/renderer_client_base.cc
+index f8651f1a28..cc1eca98df 100644
+--- a/shell/renderer/renderer_client_base.cc
++++ b/shell/renderer/renderer_client_base.cc
+@@ -24,6 +24,7 @@
+ #include "shell/browser/api/electron_api_protocol.h"
+ #include "shell/common/api/electron_api_native_image.h"
+ #include "shell/common/color_util.h"
++#include "shell/common/electron_constants.h"
+ #include "shell/common/gin_helper/dictionary.h"
+ #include "shell/common/js2c_bundle_ids.h"
+ #include "shell/common/node_includes.h"
+@@ -168,6 +169,17 @@ RendererClientBase::RendererClientBase() {
+       ParseSchemesCLISwitch(command_line, switches::kExtensionSchemes);
+   for (const std::string& scheme : extension_schemes_list)
+     url::AddExtensionScheme(scheme.c_str());
++  // electron:// is Electron's own WebUI scheme (electron://fingerprint/).
++  //
++  // It must be a STANDARD scheme with a host, or GURL rejects the URL as
++  // malformed - the navigation fails with ERR_INVALID_URL (-300) before the
++  // WebUI machinery is ever consulted. Registering it here in the renderer and
++  // in ElectronBrowserMainParts (browser process) is what makes the URL parse;
++  // being in GetAdditionalWebUISchemes() is what makes it a WEBUI. Both are
++  // needed and they are independent.
++  url::AddStandardScheme(electron::kElectronUIScheme, url::SCHEME_WITH_HOST);
++  url::AddCorsEnabledScheme(electron::kElectronUIScheme);
++
+   // We rely on the unique process host id which is notified to the
+   // renderer process via command line switch from the content layer,
+   // if this switch is removed from the content layer for some reason,
