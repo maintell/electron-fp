@@ -216,10 +216,10 @@ index 6b5c4ff4e2..4d5f3bddff 100644
  
 diff --git a/shell/browser/ui/webui/fingerprint_ui.cc b/shell/browser/ui/webui/fingerprint_ui.cc
 new file mode 100644
-index 0000000000..ad52790205
+index 0000000000..59f00f922b
 --- /dev/null
 +++ b/shell/browser/ui/webui/fingerprint_ui.cc
-@@ -0,0 +1,500 @@
+@@ -0,0 +1,806 @@
 +// Copyright (c) 2026 Microsoft, Inc.
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE.
@@ -238,6 +238,7 @@ index 0000000000..ad52790205
 +#include "base/json/json_reader.h"
 +#include "base/json/json_writer.h"
 +#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
 +#include "base/strings/string_util.h"
 +#include "base/memory/ref_counted_memory.h"
 +#include "base/values.h"
@@ -483,71 +484,376 @@ index 0000000000..ad52790205
 +  out.Set("summary", std::move(summary));
 +  out.Set("coverage", std::move(coverage));
 +
-+  // Cross-layer consistency.
++  // Cross-layer consistency: the SAME rule set as Client/browser-profile.js.
 +  //
-+  // The full rule set lives in Client/browser-profile.js and is applied by the
-+  // app. Here we report the two contradictions that are checkable from C++
-+  // alone, and - importantly - say so, rather than showing an empty "no issues"
-+  // panel that would read as "verified clean" when nothing was actually run.
-+  const std::string* platform = config.FindString("navigator_platform");
-+  const std::string* ch_platform = config.FindString("ua_platform");
-+
++  // This is a port, not an approximation. An earlier version of this panel ran
++  // one ad-hoc check and hardcoded warnCount to 0, so it rendered "Profile is
++  // consistent" having evaluated 1 rule out of 8 - and with all four warn-level
++  // rules unreachable. For a panel whose entire purpose is detecting
++  // contradictions, reporting "clean" because the rules never ran is the worst
++  // possible outcome. Every rule below mirrors its JS counterpart, including
++  // the pass/fail/SKIP contract.
++  //
++  // The skip contract is what makes this trustworthy: a rule whose inputs are
++  // absent must say "could not evaluate", never "passed". skipped[] is shown,
++  // not hidden.
 +  base::ListValue findings;
 +  base::ListValue skipped;
 +
-+  if (!platform || platform->empty()) {
-+    skipped.Append("navigator_platform not set");
++  // Severity strings match SEVERITY in browser-profile.js.
++  constexpr std::string_view kError = "error";
++  constexpr std::string_view kWarning = "warn";
++
++  // A rule records either a finding or a skip. Passing = neither.
++  auto fail = [&findings](std::string_view id, std::string_view severity,
++                          const std::string& message,
++                          std::string_view describe) {
++    base::DictValue f;
++    f.Set("id", id);
++    f.Set("severity", severity);
++    f.Set("message", message);
++    f.Set("describe", describe);
++    findings.Append(std::move(f));
++  };
++  auto skip = [&skipped](std::string_view id, std::string_view reason) {
++    base::DictValue s;
++    s.Set("id", id);
++    s.Set("reason", reason);
++    skipped.Append(std::move(s));
++  };
++
++  // Total rules we intend to run. Reported so the page can say "N of 8 rules
++  // evaluated" instead of implying full coverage when a rule is missing.
++  constexpr int kRuleCount = 8;
++  int rules_evaluated = 0;
++
++  // The UA in effect for this BrowserContext - session.setUserAgent() included,
++  // not just the compiled-in default. Four of the eight rules are anchored to
++  // it; without the spoofed value they could only ever skip.
++  std::string user_agent;
++  if (auto* bc = static_cast<ElectronBrowserContext*>(context)) {
++    user_agent = bc->GetUserAgent();
 +  }
-+  if (!ch_platform || ch_platform->empty()) {
-+    skipped.Append("ua_platform not set");
-+  }
-+  if (platform && !platform->empty() && ch_platform && !ch_platform->empty()) {
-+    // Crude OS-family check: the UA-anchored rules in browser-profile.js are
-+    // authoritative; this only catches the grossest mismatch.
-+    //
-+    // Case-INSENSITIVE, and it has to be: the two surfaces do not use
-+    // consistent casing. navigator_platform uses "Win32"/"MacIntel" while
-+    // ua_platform (Sec-CH-UA-Platform) uses "macOS"/"Windows". A case-sensitive
-+    // match misses "macOS" entirely and reports a contradictory profile as
-+    // clean - the exact opposite of what this panel exists to catch.
-+    auto family = [](const std::string& raw) {
-+      const std::string v = base::ToLowerASCII(raw);
-+      if (v.find("win") != std::string::npos) return 1;
-+      if (v.find("mac") != std::string::npos) return 2;
-+      if (v.find("linux") != std::string::npos) return 3;
-+      if (v.find("android") != std::string::npos) return 4;
-+      if (v.find("iphone") != std::string::npos ||
-+          v.find("ios") != std::string::npos) {
-+        return 5;
++
++  // --- helpers mirroring fp-schema.js -------------------------------------
++  // Comparisons are case/whitespace-insensitive: the surfaces genuinely use
++  // different casing ("Win32" vs "Windows", "MacIntel" vs "macOS"), and a
++  // case-sensitive compare flags cosmetic differences as contradictions.
++  auto norm = [](const std::string& v) {
++    return base::ToLowerASCII(base::TrimWhitespaceASCII(v, base::TRIM_ALL));
++  };
++
++  // fpPlatformForUserAgent. iPhone/iPad MUST be tested before the Mac rule:
++  // iOS UAs contain the substring "Mac OS X" ("CPU iPhone OS 18_1 like Mac OS
++  // X"), so a Macintosh-first test reports an iPhone as "MacIntel" - a
++  // contradiction that is trivial to fingerprint. Ordering is load-bearing.
++  auto platform_for_ua = [](const std::string& ua) -> std::string {
++    if (ua.empty()) return "";
++    if (ua.find("iPhone") != std::string::npos ||
++        ua.find("iPad") != std::string::npos) return "iPhone";
++    if (ua.find("Macintosh") != std::string::npos ||
++        ua.find("Mac OS X") != std::string::npos) return "MacIntel";
++    if (ua.find("Android") != std::string::npos) return "Linux armv8l";
++    if (ua.find("Windows") != std::string::npos) return "Win32";
++    if (ua.find("X11") != std::string::npos ||
++        ua.find("Linux") != std::string::npos) return "Linux x86_64";
++    return "";
++  };
++
++  // fpVendorForUserAgent. Same ordering caveat as above.
++  auto vendor_for_ua = [](const std::string& ua) -> std::string {
++    if (ua.empty()) return "";
++    if (ua.find("iPhone") != std::string::npos ||
++        ua.find("iPad") != std::string::npos ||
++        ua.find("Macintosh") != std::string::npos ||
++        ua.find("Mac OS X") != std::string::npos) return "Apple Computer, Inc.";
++    if (ua.find("Firefox") != std::string::npos &&
++        ua.find("Chrome") == std::string::npos &&
++        ua.find("Chromium") == std::string::npos) return "";
++    if (ua.find("Edg/") != std::string::npos) return "Google Inc.";
++    if (ua.find("CriOS") != std::string::npos ||
++        ua.find("Chrome") != std::string::npos) return "Google Inc.";
++    return "";
++  };
++
++  // fpUaMetadataForUserAgent: only the `mobile` and `platform` fields are
++  // needed by these rules.
++  auto ua_is_mobile = [](const std::string& ua) -> bool {
++    return ua.find("Android") != std::string::npos ||
++           ua.find("iPhone") != std::string::npos ||
++           ua.find("iPad") != std::string::npos ||
++           ua.find("Mobile") != std::string::npos;
++  };
++  auto ua_ch_platform = [](const std::string& ua) -> std::string {
++    if (ua.empty()) return "";
++    if (ua.find("Android") != std::string::npos) return "Android";
++    if (ua.find("iPhone") != std::string::npos ||
++        ua.find("iPad") != std::string::npos) return "iOS";
++    if (ua.find("Macintosh") != std::string::npos ||
++        ua.find("Mac OS X") != std::string::npos) return "macOS";
++    if (ua.find("Windows") != std::string::npos) return "Windows";
++    if (ua.find("X11") != std::string::npos ||
++        ua.find("Linux") != std::string::npos) return "Linux";
++    return "";
++  };
++
++  // Fetch a config value as a string, accepting the numeric and boolean forms
++  // the JSON editor can produce. Empty optional = key absent or unset.
++  auto cfg_str = [&config](std::string_view key) -> std::optional<std::string> {
++    const base::Value* v = config.Find(key);
++    if (!v) return std::nullopt;
++    if (const std::string* s = v->GetIfString()) return *s;
++    if (std::optional<int> i = v->GetIfInt()) return base::NumberToString(*i);
++    if (std::optional<bool> b = v->GetIfBool()) return *b ? "true" : "false";
++    if (std::optional<double> d = v->GetIfDouble()) {
++      return base::NumberToString(*d);
++    }
++    return std::nullopt;
++  };
++
++  // --- rule 1: platform-matches-ua (error) --------------------------------
++  {
++    auto platform = cfg_str("navigator_platform");
++    if (!user_agent.empty() && platform && !platform->empty()) {
++      ++rules_evaluated;
++      const std::string want = platform_for_ua(user_agent);
++      if (want.empty()) {
++        skip("platform-matches-ua", "could not derive a platform from this UA");
++      } else if (norm(want) != norm(*platform)) {
++        fail("platform-matches-ua", kError,
++             "UA implies platform \"" + want + "\" but navigator_platform is \"" +
++                 *platform + "\"",
++             "navigator.platform agrees with the platform implied by the UA");
 +      }
-+      return 0;
-+    };
-+    const int a = family(*platform);
-+    const int b = family(*ch_platform);
-+    if (a && b && a != b) {
-+      base::DictValue f;
-+      f.Set("id", "platform-family-mismatch");
-+      f.Set("severity", "error");
-+      f.Set("message", std::string("navigator_platform \"") + *platform +
-+                           "\" and ua_platform \"" + *ch_platform +
-+                           "\" imply different operating systems");
-+      f.Set("describe", "the two platform surfaces must agree");
-+      findings.Append(std::move(f));
++    } else {
++      skip("platform-matches-ua",
++           "needs both user_agent and navigator_platform");
++    }
++  }
++
++  // --- rule 2: vendor-matches-ua (error) ----------------------------------
++  {
++    auto vendor = cfg_str("navigator_vendor");
++    if (!user_agent.empty() && vendor && !vendor->empty()) {
++      ++rules_evaluated;
++      const std::string want = vendor_for_ua(user_agent);
++      if (want.empty()) {
++        skip("vendor-matches-ua", "could not derive a vendor from this UA");
++      } else if (norm(want) != norm(*vendor)) {
++        fail("vendor-matches-ua", kError,
++             "UA implies vendor \"" + want + "\" but navigator_vendor is \"" +
++                 *vendor + "\"",
++             "navigator.vendor agrees with the vendor implied by the UA");
++      }
++    } else {
++      skip("vendor-matches-ua", "needs both user_agent and navigator_vendor");
++    }
++  }
++
++  // --- rule 3: ua-mobile-matches-ua (error) --------------------------------
++  {
++    auto mobile = cfg_str("ua_mobile");
++    if (!user_agent.empty() && mobile && !mobile->empty()) {
++      ++rules_evaluated;
++      // ua_mobile is stored as the STRING "true"/"false", but the editor can
++      // hand us a boolean or 0/1. Treating the string "false" as truthy would
++      // make every desktop profile look mobile.
++      const std::string m = norm(*mobile);
++      const bool got = (m == "true" || m == "1");
++      const bool want = ua_is_mobile(user_agent);
++      if (got != want) {
++        fail("ua-mobile-matches-ua", kError,
++             "UA implies mobile=" + std::string(want ? "true" : "false") +
++                 " but ua_mobile=" + *mobile,
++             "ua_mobile (Client Hint) agrees with the UA being a mobile device");
++      }
++    } else {
++      skip("ua-mobile-matches-ua", "needs both user_agent and ua_mobile");
++    }
++  }
++
++  // --- rule 4: ua-platform-ch-matches-ua (error) ---------------------------
++  {
++    auto ch_platform = cfg_str("ua_platform");
++    if (!user_agent.empty() && ch_platform && !ch_platform->empty()) {
++      ++rules_evaluated;
++      const std::string want = ua_ch_platform(user_agent);
++      if (want.empty()) {
++        skip("ua-platform-ch-matches-ua",
++             "could not derive a platform from this UA");
++      } else if (norm(want) != norm(*ch_platform)) {
++        fail("ua-platform-ch-matches-ua", kError,
++             "UA implies Client-Hint platform \"" + want +
++                 "\" but ua_platform is \"" + *ch_platform + "\"",
++             "ua_platform (Client Hint) agrees with the OS implied by the UA");
++      }
++    } else {
++      skip("ua-platform-ch-matches-ua", "needs both user_agent and ua_platform");
++    }
++  }
++
++  // --- rule 5: mobile-hardware-consistent (warn) ---------------------------
++  {
++    if (!user_agent.empty()) {
++      ++rules_evaluated;
++      auto touch = cfg_str("max_touch_points");
++      double touch_val = 0;
++      const bool touch_parsed =
++          touch && !touch->empty() && base::StringToDouble(*touch, &touch_val);
++      const bool has_touch = touch_parsed && touch_val != 0.0;
++      const bool want_mobile = ua_is_mobile(user_agent);
++      if (want_mobile && !has_touch) {
++        fail("mobile-hardware-consistent", kWarning,
++             "mobile UA but max_touch_points is not set (real phones report "
++             "touch)",
++             "touch points are set for a mobile UA, and absent for a desktop "
++             "one");
++      } else if (!want_mobile && has_touch) {
++        fail("mobile-hardware-consistent", kWarning,
++             "desktop UA but max_touch_points is set - a mobile-emulation tell",
++             "touch points are set for a mobile UA, and absent for a desktop "
++             "one");
++      }
++    } else {
++      skip("mobile-hardware-consistent", "needs a user_agent");
++    }
++  }
++
++  // --- rule 6: device-memory-plausible (warn) ------------------------------
++  {
++    auto dm = cfg_str("device_memory");
++    // The schema's DISABLED placeholder is 0/"" - the defaults are deliberately
++    // 0/"" so an untouched key means "do not spoof". Warning on it would flag
++    // every empty profile, so use the same is_set() notion as the coverage
++    // counters above.
++    if (dm && !dm->empty() && *dm != "0") {
++      ++rules_evaluated;
++      // base::StringToDouble, not std::stod: Chromium builds with exceptions
++      // disabled, so a try/catch here does not even compile.
++      double n = 0;
++      const bool ok = base::StringToDouble(*dm, &n);
++      if (!ok || n <= 0) {
++        fail("device-memory-plausible", kWarning,
++             "device_memory must be positive, got " + *dm,
++             "device_memory is a plausible value");
++      } else {
++        // Real devices expose powers of two (rounded down), so 3 or 7 is a tell.
++        const long long i = static_cast<long long>(n);
++        if (i > 0 && (i & (i - 1)) != 0) {
++          fail("device-memory-plausible", kWarning,
++               "device_memory " + *dm +
++                   " is not a power of two (real devices report 1/2/4/8)",
++               "device_memory is a plausible value");
++        }
++      }
++    } else {
++      skip("device-memory-plausible", "device_memory not set");
++    }
++  }
++
++  // --- rule 7: screen-dimensions-plausible (warn) --------------------------
++  {
++    auto w = cfg_str("screen_width");
++    auto h = cfg_str("screen_height");
++    if (w && !w->empty() && *w != "0" && h && !h->empty() && *h != "0") {
++      ++rules_evaluated;
++      double dw = 0, dh = 0;
++      if (!base::StringToDouble(*w, &dw) || !base::StringToDouble(*h, &dh)) {
++        dw = dh = 0;  // non-numeric; reported as non-positive below
++      }
++      if (dw <= 0 || dh <= 0) {
++        fail("screen-dimensions-plausible", kWarning,
++             "screen dimensions must be positive, got " + *w + "x" + *h,
++             "screen dimensions are internally consistent");
++      } else {
++        // avail is the viewport minus OS chrome, so it can never exceed screen.
++        auto aw = cfg_str("screen_avail_width");
++        auto ah = cfg_str("screen_avail_height");
++        double daw = 0, dah = 0;
++        const bool aw_ok =
++            aw && !aw->empty() && base::StringToDouble(*aw, &daw);
++        const bool ah_ok =
++            ah && !ah->empty() && base::StringToDouble(*ah, &dah);
++        if (aw_ok && daw > dw) {
++          fail("screen-dimensions-plausible", kWarning,
++               "screen_avail_width (" + *aw + ") exceeds screen_width (" + *w +
++                   ")",
++               "screen dimensions are internally consistent");
++        }
++        if (ah_ok && dah > dh) {
++          fail("screen-dimensions-plausible", kWarning,
++               "screen_avail_height (" + *ah + ") exceeds screen_height (" +
++                   *h + ")",
++               "screen dimensions are internally consistent");
++        }
++      }
++    } else {
++      skip("screen-dimensions-plausible",
++           "needs screen_width and screen_height");
++    }
++  }
++
++  // --- rule 8: webrtc-ip-requires-network-group (warn) ---------------------
++  {
++    auto ip = cfg_str("webrtc_ip");
++    if (ip && !ip->empty()) {
++      ++rules_evaluated;
++      // Other ACTIVE network keys besides webrtc_ip.
++      int others = 0;
++      for (const GroupDef& def : kGroups) {
++        if (std::string_view(def.id) != "network") {
++          continue;
++        }
++        for (const char* key : def.keys) {
++          if (!key || std::string_view(key) == "webrtc_ip") {
++            continue;
++          }
++          if (is_set(config.Find(std::string_view(key)))) {
++            ++others;
++          }
++        }
++      }
++      if (others == 0) {
++        fail("webrtc-ip-requires-network-group", kWarning,
++             "webrtc_ip set alone; real clients vary more than one network "
++             "surface",
++             "webrtc_ip is set only alongside other network keys (not in "
++             "isolation)");
++      }
++    } else {
++      skip("webrtc-ip-requires-network-group", "webrtc_ip not set");
 +    }
 +  }
 +
 +  base::DictValue consistency;
 +  int errors = 0;
++  int warns = 0;
 +  for (const auto& f : findings) {
-+    if (*f.GetDict().FindString("severity") == "error") {
-+      ++errors;
++    if (const std::string* s = f.GetDict().FindString("severity")) {
++      if (*s == kError) {
++        ++errors;
++      } else if (*s == kWarning) {
++        ++warns;
++      }
 +    }
 +  }
 +  consistency.Set("findings", std::move(findings));
++  // Size is captured BEFORE the move: reading skipped.size() after
++  // std::move(skipped) reads a moved-from list, which is empty. That silently
++  // reported skipCount:0 next to a populated skipped[] - and since the page
++  // thresholds on skipCount to decide whether a "consistent" verdict is
++  // meaningful, the undercount made an untested profile look verified.
++  const int skip_count = static_cast<int>(skipped.size());
 +  consistency.Set("skipped", std::move(skipped));
 +  consistency.Set("errorCount", errors);
-+  consistency.Set("warnCount", 0);
-+  consistency.Set("skipCount", static_cast<int>(skipped.size()));
++  // No longer hardcoded: the four warn rules above are real, so this counts
++  // them. It was pinned to 0 before, which made every profile look warning-free.
++  consistency.Set("warnCount", warns);
++  consistency.Set("skipCount", skip_count);
++  // Reported so the page can state coverage honestly instead of implying that
++  // a clean panel means every rule ran.
++  consistency.Set("ruleCount", kRuleCount);
++  consistency.Set("rulesEvaluated", rules_evaluated);
 +
 +  out.Set("consistency", std::move(consistency));
 +
@@ -797,10 +1103,10 @@ index 0000000000..05a9d8e786
 +#endif  // ELECTRON_SHELL_BROWSER_UI_WEBUI_FINGERPRINT_UI_H_
 diff --git a/shell/browser/ui/webui/fingerprint_ui_page.h b/shell/browser/ui/webui/fingerprint_ui_page.h
 new file mode 100644
-index 0000000000..4dbb9f2e7d
+index 0000000000..ac78520bb7
 --- /dev/null
 +++ b/shell/browser/ui/webui/fingerprint_ui_page.h
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,253 @@
 +// Copyright (c) 2026 Microsoft, Inc.
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE.
@@ -952,6 +1258,14 @@ index 0000000000..4dbb9f2e7d
 +    (c.errorCount ? c.errorCount + ' error(s), ' : '') +
 +    c.warnCount + ' warning(s), ' + c.skipCount + ' skipped</strong></p>');
 +
++  // How many of the rule set actually ran. Shown unconditionally, because a
++  // clean panel is only meaningful alongside it: "0 errors" after running 1 of
++  // 8 rules is not evidence of a consistent profile.
++  if (c.ruleCount) {
++    parts.push('<p class="muted">' + c.rulesEvaluated + ' of ' + c.ruleCount +
++      ' rules evaluated</p>');
++  }
++
 +  if (!c.findings.length) {
 +    parts.push('<p class="ok">No contradictions detected.</p>');
 +  } else {
@@ -979,6 +1293,26 @@ index 0000000000..4dbb9f2e7d
 +  renderCoverage(data.coverage);
 +  renderConsistency(data.consistency);
 +
++  //
++  // "Consistent" is only claimed when rules actually ran. Before this, a profile
++  // with nothing set - and therefore every rule skipped - still reported
++  // "Profile is consistent", which reads as verified-clean when nothing was
++  // checked. Say how much was checked instead.
++  //
++  // "Consistent" is only claimed when enough of the rule set actually ran.
++  //
++  // The first attempt at this used `rulesEvaluated === 0`, which was wrong:
++  // the browser always has a native UA, so mobile-hardware-consistent always
++  // evaluates and the count is never 0 - an empty profile still reported
++  // "Profile is consistent". What matters is how many rules could NOT run
++  // because their inputs were never set, so threshold on skipCount instead.
++  const ran = data.consistency.rulesEvaluated;
++  const total = data.consistency.ruleCount;
++  const skippedN = data.consistency.skipCount;
++  // Half or more of the rule set unevaluated = the surfaces were never set,
++  // so "consistent" would describe an untested profile, not a clean one.
++  const mostlyUnchecked = total > 0 && skippedN * 2 >= total;
++
 +  if (data.consistency.errorCount) {
 +    setStatus('Profile has ' + data.consistency.errorCount +
 +      ' cross-layer error(s) - inconsistent surfaces are a detection signal.',
@@ -986,8 +1320,13 @@ index 0000000000..4dbb9f2e7d
 +  } else if (data.consistency.warnCount) {
 +    setStatus('Profile is consistent, with ' + data.consistency.warnCount +
 +      ' warning(s).', 'warn');
++  } else if (mostlyUnchecked) {
++    setStatus('Nothing to check - ' + skippedN + ' of ' + total +
++      ' rules had no data (no surfaces set). This is not a clean bill of ' +
++      'health.', 'warn');
 +  } else {
-+    setStatus('Profile is consistent.', 'ok');
++    setStatus('Profile is consistent (' + ran + ' of ' + total +
++      ' rules evaluated).', 'ok');
 +  }
 +}
 +

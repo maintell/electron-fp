@@ -149,6 +149,14 @@ function renderConsistency(c) {
     (c.errorCount ? c.errorCount + ' error(s), ' : '') +
     c.warnCount + ' warning(s), ' + c.skipCount + ' skipped</strong></p>');
 
+  // How many of the rule set actually ran. Shown unconditionally, because a
+  // clean panel is only meaningful alongside it: "0 errors" after running 1 of
+  // 8 rules is not evidence of a consistent profile.
+  if (c.ruleCount) {
+    parts.push('<p class="muted">' + c.rulesEvaluated + ' of ' + c.ruleCount +
+      ' rules evaluated</p>');
+  }
+
   if (!c.findings.length) {
     parts.push('<p class="ok">No contradictions detected.</p>');
   } else {
@@ -176,6 +184,26 @@ function apply(data) {
   renderCoverage(data.coverage);
   renderConsistency(data.consistency);
 
+  //
+  // "Consistent" is only claimed when rules actually ran. Before this, a profile
+  // with nothing set - and therefore every rule skipped - still reported
+  // "Profile is consistent", which reads as verified-clean when nothing was
+  // checked. Say how much was checked instead.
+  //
+  // "Consistent" is only claimed when enough of the rule set actually ran.
+  //
+  // The first attempt at this used `rulesEvaluated === 0`, which was wrong:
+  // the browser always has a native UA, so mobile-hardware-consistent always
+  // evaluates and the count is never 0 - an empty profile still reported
+  // "Profile is consistent". What matters is how many rules could NOT run
+  // because their inputs were never set, so threshold on skipCount instead.
+  const ran = data.consistency.rulesEvaluated;
+  const total = data.consistency.ruleCount;
+  const skippedN = data.consistency.skipCount;
+  // Half or more of the rule set unevaluated = the surfaces were never set,
+  // so "consistent" would describe an untested profile, not a clean one.
+  const mostlyUnchecked = total > 0 && skippedN * 2 >= total;
+
   if (data.consistency.errorCount) {
     setStatus('Profile has ' + data.consistency.errorCount +
       ' cross-layer error(s) - inconsistent surfaces are a detection signal.',
@@ -183,8 +211,13 @@ function apply(data) {
   } else if (data.consistency.warnCount) {
     setStatus('Profile is consistent, with ' + data.consistency.warnCount +
       ' warning(s).', 'warn');
+  } else if (mostlyUnchecked) {
+    setStatus('Nothing to check - ' + skippedN + ' of ' + total +
+      ' rules had no data (no surfaces set). This is not a clean bill of ' +
+      'health.', 'warn');
   } else {
-    setStatus('Profile is consistent.', 'ok');
+    setStatus('Profile is consistent (' + ran + ' of ' + total +
+      ' rules evaluated).', 'ok');
   }
 }
 

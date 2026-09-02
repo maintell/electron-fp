@@ -114,10 +114,29 @@ async function run() {
   // working page from a page whose data fetch 404'd.
   const status = await win.webContents.executeJavaScript(
     "(document.getElementById('status')||{}).textContent||''");
+  // The banner must show a rendered verdict, not the raw placeholder. With no
+  // profile set, the honest verdict is now "Nothing to check" (most rules could
+  // not evaluate) rather than "Profile is consistent" - so the accepted set
+  // includes it. What matters is that the data reached the page at all.
   check('status banner rendered (data fetch succeeded)',
-    /consistent|error|warning|Failed to load/i.test(status), status.trim());
+    /consistent|error|warning|nothing to check|Failed to load/i.test(status),
+    status.trim());
   check('status is NOT the fetch-failure message',
     !/Failed to load inspector data/i.test(status), status.trim());
+  // Regression guard for the use-after-move bug: skipCount was read from a
+  // moved-from list and always reported 0, while skipped[] held 7 entries. The
+  // panel thresholds on skipCount, so the undercount made an untested profile
+  // read as verified-clean.
+  {
+    let d0 = null;
+    try { d0 = JSON.parse(dataJson); } catch (e) { /* reported above */ }
+    if (d0 && d0.consistency) {
+      check('skipCount matches the length of skipped[]',
+        d0.consistency.skipCount === (d0.consistency.skipped || []).length,
+        'skipCount=' + d0.consistency.skipCount + ' vs skipped[]=' +
+          (d0.consistency.skipped || []).length);
+    }
+  }
 
   // Data comes over WebUI IPC, not fetch(): WebUI subresource fetches are
   // broken in this build (verified for chrome:// too). We re-request it by
@@ -258,6 +277,113 @@ async function run() {
       /error/i.test(status3), status3.trim());
   }
   await win3.destroy();
+
+  // ---- 4. EVERY rule in the set, including the warn-level ones ------------
+  //
+  // The Inspector previously ran 1 of 8 rules and hardcoded warnCount to 0, so
+  // it reported "Profile is consistent" having evaluated almost nothing. These
+  // checks configure a profile that trips all eight, so a rule silently
+  // dropping out (or warnCount being pinned again) fails the suite.
+  //
+  // A UA is set here on purpose: four rules are anchored to it, and without one
+  // they can only ever skip - which is exactly how the gap stayed invisible.
+  const sessRules = session.fromPartition('persist:inspector-rules-test');
+  sessRules.setUserAgent(
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+    '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
+  sessRules.setFingerprintConfig({
+    // error: UA(Windows) -> platform Win32, vendor Google Inc., mobile=false,
+    //        Client-Hint platform "Windows".
+    navigator_platform: 'Linux x86_64',      // rule 1
+    navigator_vendor: 'Apple Computer, Inc.', // rule 2
+    ua_mobile: 'true',                        // rule 3
+    ua_platform: 'macOS',                     // rule 4
+    // warn: desktop UA advertising touch is a mobile-emulation tell.
+    max_touch_points: 5,                      // rule 5
+    device_memory: 3,                         // rule 6 (not a power of two)
+    screen_width: 800,                        // rule 7
+    screen_height: 600,
+    screen_avail_width: 1024,                 // exceeds screen_width
+    webrtc_ip: '1.2.3.4',                     // rule 8 (alone in network)
+  });
+
+  const winRules = await openWindow(sessRules);
+  const rRules = await load(winRules, URL);
+  check('all-rules window loads', rRules.ok === true, rRules.error || rRules.finalUrl);
+
+  if (rRules.ok) {
+    const raw = await grabData(winRules);
+    let d = null;
+    try { d = JSON.parse(raw); } catch (e) { /* reported below */ }
+    check('all-rules run: data parses', d && typeof d === 'object');
+
+    if (d) {
+      const c = d.consistency || {};
+      const ids = (c.findings || []).map((f) => f.id);
+      const sevOf = (id) => (c.findings || []).find((f) => f.id === id);
+
+      // Every rule is expected: 4 error + 4 warn.
+      const wantErrors = ['platform-matches-ua', 'vendor-matches-ua',
+        'ua-mobile-matches-ua', 'ua-platform-ch-matches-ua'];
+      const wantWarns = ['mobile-hardware-consistent', 'device-memory-plausible',
+        'screen-dimensions-plausible', 'webrtc-ip-requires-network-group'];
+
+      for (const id of wantErrors) {
+        const f = sevOf(id);
+        check('error rule fires: ' + id,
+          !!f && f.severity === 'error', f ? f.severity : 'MISSING from ' + JSON.stringify(ids));
+      }
+      for (const id of wantWarns) {
+        const f = sevOf(id);
+        check('warn rule fires: ' + id,
+          !!f && f.severity === 'warn', f ? f.severity : 'MISSING from ' + JSON.stringify(ids));
+      }
+
+      // The counts must agree with the findings - this is what a hardcoded
+      // warnCount would break.
+      check('errorCount matches the error findings',
+        c.errorCount === wantErrors.length,
+        c.errorCount + ' vs ' + wantErrors.length);
+      check('warnCount is NOT hardcoded to 0 (was pinned before)',
+        c.warnCount === wantWarns.length,
+        'warnCount=' + c.warnCount + ' expected ' + wantWarns.length);
+
+      // Coverage reporting: all 8 rules ran, none skipped.
+      check('ruleCount reports the full rule set', c.ruleCount === 8, String(c.ruleCount));
+      check('all 8 rules evaluated (none skipped)',
+        c.rulesEvaluated === 8 && c.skipCount === 0,
+        'evaluated=' + c.rulesEvaluated + ' skipped=' + c.skipCount);
+
+      // The rendered page must show the warn count, not just carry it in JSON.
+      const status = await winRules.webContents.executeJavaScript(
+        `(document.getElementById('status')||{}).textContent||''`);
+      check('status reports the error count', /error/i.test(status), status.trim());
+      const rulesLine = await winRules.webContents.executeJavaScript(
+        `(document.getElementById('consistency')||{}).textContent||''`);
+      check('page shows rules-evaluated coverage line',
+        /8 of 8 rules evaluated/.test(rulesLine), rulesLine.slice(0, 120));
+    }
+  }
+  await winRules.destroy();
+
+  // ---- 5. an EMPTY profile must not claim to be verified clean ------------
+  //
+  // With nothing set, every rule skips. The old panel still said "Profile is
+  // consistent", which reads as a clean bill of health. It must now say
+  // nothing was checked.
+  const sessEmpty = session.fromPartition('persist:inspector-empty-test');
+  const winEmpty = await openWindow(sessEmpty);
+  const rEmpty = await load(winEmpty, URL);
+  check('empty-profile window loads', rEmpty.ok === true, rEmpty.error || rEmpty.finalUrl);
+  if (rEmpty.ok) {
+    const status = await winEmpty.webContents.executeJavaScript(
+      `(document.getElementById('status')||{}).textContent||''`);
+    check('empty profile does NOT claim "Profile is consistent"',
+      !/^Profile is consistent/.test(status.trim()), status.trim());
+    check('empty profile says nothing was checked',
+      /nothing to check|not a clean bill of health/i.test(status), status.trim());
+  }
+  await winEmpty.destroy();
 
   await win.destroy();
 
