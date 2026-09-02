@@ -359,7 +359,68 @@ Chrome/154.0.8015.0 Electron/45.0.0-nightly.20260825 Safari/537.36
 闭合引号就截断，实测得到的是一个内容为空的垃圾条目。内核解析器同时接受两种
 形式，但引号在到达解析器之前就已经被截断了。
 
-### 剩余未决：TLS/JA3 定制（方案 C）
+### 剩余未决：TLS/JA3 定制（方案 C，仍未做）
 
 需先决策：接受全局统一 TLS，还是投入改造网络栈做 per-tab 隔离。后者受架构约束——
 配置注入是 per-renderer 的，而 TLS 指纹产生于共享网络栈。
+
+
+（该节此前被截断在此处，已在实现 Inspector 后补齐。）
+
+---
+
+## Inspector：`electron://fingerprint/`（已实现）
+
+一个特权 WebUI，报告它所在 BrowserContext 的**当前生效**指纹配置：全部 63 个
+`fp_*` key 的分组覆盖率，以及跨层一致性发现。
+
+覆盖率数据从 `SessionPreferences` 读回，而不是重新推算——一个展示"某个 profile
+应该长什么样"的面板只是装饰品，价值在于展示运行中的浏览器实际持有什么；读实时值
+同时保证页面不会与它描述的对象产生漂移。
+
+在任一 BrowserContext 下打开 `electron://fingerprint/` 即可。Inspector 按
+BrowserContext 隔离（指纹配置本身就是按 BrowserContext 存的），所以在查看某个
+partition 时显示默认 context 的配置是明确错误的。
+
+### 注册一个新 WebUI scheme 需要三处独立注册
+
+这是本次实现中代价最高的部分。三者互相独立，缺任何一个都会失败，且**失败方式不同、
+且具有误导性**——特别是第 3 点，它的表现与"数据源根本没注册"完全一致：
+
+| # | 缺什么 | 失败表现 |
+|---|--------|----------|
+| 1 | `url::AddStandardScheme`（browser + renderer 都要） | URL 无法解析，跳转 `ERR_INVALID_URL (-300)` |
+| 2 | `GetAdditionalWebUISchemes` | content 不把它当 WebUI，跳转 `ERR_FAILED (-2)` |
+| 3 | `URLDataSource::ShouldServiceRequest` 覆写 | 数据源**被找到后被拒绝**：再次 `ERR_INVALID_URL`，且 `StartDataRequest` 从不被调用 |
+
+第 3 点的原因：`URLDataSource::ShouldServiceRequest` 的默认实现只放行 `chrome:` 和
+`devtools:`（见 `content/public/browser/url_data_source.h`）。在新 scheme 上，数据源
+查找成功、随后被拒，日志里看不出任何痕迹。
+
+第 1 点还有一个时序约束：注册必须发生在构造任何 GURL 之前。
+`PreMainMessageLoopRun` 太晚，会命中 `url/url_util.cc:503` 的 DCHECK
+（"Trying to add a scheme after the lists have been used"）。正确的是
+`PreCreateMainMessageLoop`。
+
+### 为什么页面是自包含的
+
+常规 WebUI 的做法是：输出 HTML，然后 `fetch()` JSON、`<script src>` 加载脚本。
+在这个构建里**这三条子资源路径全都不可用**，而且这不是新 scheme 的问题——
+在原生 `chrome://accessibility` 上实测同样失败：
+
+```
+fetch('chrome://resources/js/cr.js')  ->  "Failed to fetch"
+addWebUiListener                      ->  undefined
+```
+
+`cr`（WebUI 的 JS 模块）加载不出来，所以 `cr.addWebUiListener` 也没有；而
+`chrome.send` / `FireWebUIListener` 的回程依赖它，因此 WebUI IPC 同样无法投递回复。
+
+唯一可用的路径是**主文档加载**，所以数据源把脚本和数据一起内联进 index 响应：
+`window.__fp` 携带数据，脚本直接内联在页面里。
+
+### 覆盖率分组表需要同步
+
+`fingerprint_ui.cc` 里的分组/key 表镜像了 `Client/fp-schema.js`（C++ 无法读取 JS
+schema）。这个重复是有意为之，但两边必须保持一致；`test-inspector.js` 断言总数为
+63，key 数量对不上会直接失败。
