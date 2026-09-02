@@ -17,6 +17,11 @@
 #include "gin/weak_cell.h"
 #include "gin/wrappable.h"
 #include "services/network/public/mojom/host_resolver.mojom-forward.h"
+// Full definition (not -forward): Http2ProfilePtr is stored by value in the
+// Session API, which requires the complete mojom type rather than a forward
+// declaration. Keep ssl_config on the -forward header to avoid growing the
+// include footprint of this widely-included file.
+#include "services/network/public/mojom/network_context.mojom.h"
 #include "services/network/public/mojom/ssl_config.mojom-forward.h"
 #include "shell/browser/api/ipc_dispatcher.h"
 #include "shell/browser/event_emitter_mixin.h"
@@ -148,6 +153,7 @@ class Session final : public gin::Wrappable<Session>,
   void SetUserAgent(const std::string& user_agent, gin::Arguments* args);
   std::string GetUserAgent();
   void SetSSLConfig(network::mojom::SSLConfigPtr config);
+  void SetHttp2Profile(network::mojom::Http2ProfilePtr profile);
   void SetFingerprintConfig(gin::Arguments* args);
   v8::Local<v8::Value> GetFingerprintConfig(gin::Arguments* args);
   bool IsPersistent();

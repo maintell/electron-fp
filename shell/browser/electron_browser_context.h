@@ -155,6 +155,15 @@ class ElectronBrowserContext : public content::BrowserContext {
   network::mojom::SSLConfigPtr GetSSLConfig();
   void SetSSLConfigClient(mojo::Remote<network::mojom::SSLConfigClient> client);
 
+  // HTTP/2 fingerprint profile. Unlike SSLConfig there is no live-update
+  // client: HttpNetworkSessionParams are read once when the NetworkContext is
+  // constructed, so this must be set BEFORE the first request on the session.
+  // All fields are optional; unset means "whatever the command line decided".
+  void SetHttp2Profile(network::mojom::Http2ProfilePtr profile);
+  const network::mojom::Http2ProfilePtr& GetHttp2Profile() const {
+    return http2_profile_;
+  }
+
   bool ChooseDisplayMediaDevice(const content::MediaStreamRequest& request,
                                 content::MediaResponseCallback callback);
   void SetDisplayMediaRequestHandler(DisplayMediaRequestHandler handler);
@@ -235,6 +244,9 @@ class ElectronBrowserContext : public content::BrowserContext {
 
   network::mojom::SSLConfigPtr ssl_config_;
   mojo::Remote<network::mojom::SSLConfigClient> ssl_config_client_;
+
+  // HTTP/2 profile state. Mirrors ssl_config_ but has no update channel.
+  network::mojom::Http2ProfilePtr http2_profile_;
 
   DisplayMediaRequestHandler display_media_request_handler_;
 

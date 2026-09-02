@@ -65,6 +65,8 @@
 #include "services/network/public/cpp/features.h"
 #include "services/network/public/cpp/request_destination.h"
 #include "services/network/public/mojom/clear_data_filter.mojom.h"
+#include "services/network/public/mojom/network_context.mojom.h"
+#include "services/network/public/mojom/ssl_config.mojom.h"
 #include "shell/browser/api/electron_api_app.h"
 #include "shell/browser/api/electron_api_cookies.h"
 #include "shell/browser/api/electron_api_data_pipe_holder.h"
@@ -468,7 +470,134 @@ struct Converter<network::mojom::SSLConfigPtr> {
     }
     std::ranges::sort((*out)->disabled_cipher_suites);
 
-    // TODO(nornagon): also support other SSLConfig properties?
+    // Fingerprint profile fields (see net/ssl/ssl_config_service.h).
+    //
+    // Every fp_* key is OPTIONAL: when absent the mojom field stays nullopt and
+    // the network stack keeps stock Chromium behavior. That is what makes an
+    // unprofiled session byte-identical to upstream - verified by
+    // Client/test-tls-fingerprint.js, which asserts the unprofiled JA4 equals
+    // the pre-change baseline.
+    //
+    // These are read individually rather than via a generic struct converter
+    // because silently ignoring an unknown key is the worst failure mode here:
+    // a profile would then claim a fingerprint it does not produce.
+
+    std::string fp_cipher_list;
+    if (options.Get("fpCipherList", &fp_cipher_list)) {
+      // An invalid cipher list is rejected at the call site. Passing it through
+      // would break every connection on the session with a confusing error far
+      // from its cause, so validate eagerly.
+      if (fp_cipher_list.empty()) {
+        return false;
+      }
+      (*out)->fp_cipher_list = std::move(fp_cipher_list);
+    }
+
+    std::vector<uint16_t> fp_signature_algorithms;
+    if (options.Has("fpSignatureAlgorithms") &&
+        !options.Get("fpSignatureAlgorithms", &fp_signature_algorithms)) {
+      return false;
+    }
+    if (!fp_signature_algorithms.empty()) {
+      (*out)->fp_signature_algorithms = std::move(fp_signature_algorithms);
+    }
+
+    bool fp_grease_enabled;
+    if (options.Get("fpGreaseEnabled", &fp_grease_enabled)) {
+      (*out)->fp_grease_enabled = fp_grease_enabled;
+    }
+
+    bool fp_grease_sigalgs_enabled;
+    if (options.Get("fpGreaseSigalgsEnabled", &fp_grease_sigalgs_enabled)) {
+      (*out)->fp_grease_sigalgs_enabled = fp_grease_sigalgs_enabled;
+    }
+
+    bool fp_permute_extensions;
+    if (options.Get("fpPermuteExtensions", &fp_permute_extensions)) {
+      (*out)->fp_permute_extensions = fp_permute_extensions;
+    }
+
+    std::vector<uint16_t> fp_extension_order;
+    if (options.Has("fpExtensionOrder") &&
+        !options.Get("fpExtensionOrder", &fp_extension_order)) {
+      return false;
+    }
+    if (!fp_extension_order.empty()) {
+      (*out)->fp_extension_order = std::move(fp_extension_order);
+    }
+
+    bool fp_omit_alpn;
+    if (options.Get("fpOmitAlpn", &fp_omit_alpn)) {
+      (*out)->fp_omit_alpn = fp_omit_alpn;
+    }
+
+    bool fp_omit_session_ticket;
+    if (options.Get("fpOmitSessionTicket", &fp_omit_session_ticket)) {
+      (*out)->fp_omit_session_ticket = fp_omit_session_ticket;
+    }
+
+    // Advertised TLS version cap. Distinct from maxVersion: this governs only
+    // what appears in supported_versions (visible to a passive observer),
+    // while maxVersion also gates what the client will accept.
+    int fp_advertised_version_max = 0;
+    if (options.Get("fpAdvertisedVersionMax", &fp_advertised_version_max)) {
+      if (fp_advertised_version_max < 0 ||
+          fp_advertised_version_max > 0xffff) {
+        return false;
+      }
+      (*out)->fp_advertised_version_max = fp_advertised_version_max;
+    }
+
+    return true;
+  }
+};
+
+// Converter for the HTTP/2 fingerprint profile.
+//
+// Same discipline as the SSLConfig converter above: every key is optional, and
+// an absent key leaves the mojom field unset so the network stack keeps stock
+// Chromium behavior. An unrecognized TYPE (as opposed to an absent key) is
+// rejected, because silently ignoring it would let a profile claim an HTTP/2
+// fingerprint it does not produce.
+template <>
+struct Converter<network::mojom::Http2ProfilePtr> {
+  static bool FromV8(v8::Isolate* isolate,
+                     v8::Local<v8::Value> val,
+                     network::mojom::Http2ProfilePtr* out) {
+    gin_helper::Dictionary options;
+    if (!ConvertFromV8(isolate, val, &options))
+      return false;
+    *out = network::mojom::Http2Profile::New();
+
+    bool settings_grease;
+    if (options.Get("settingsGrease", &settings_grease)) {
+      (*out)->settings_grease = settings_grease;
+    }
+
+    bool end_stream_with_data_frame;
+    if (options.Get("endStreamWithDataFrame", &end_stream_with_data_frame)) {
+      (*out)->end_stream_with_data_frame = end_stream_with_data_frame;
+    }
+
+    gin_helper::Dictionary grease;
+    if (options.Get("greaseFrame", &grease)) {
+      auto frame = network::mojom::GreasedHttp2Frame::New();
+      int type = 0;
+      int flags = 0;
+      std::vector<uint8_t> payload;
+      if (!grease.Get("type", &type) || type < 0 || type > 0xff)
+        return false;
+      if (!grease.Get("flags", &flags) || flags < 0 || flags > 0xff)
+        return false;
+      // payload is optional; an absent key means an empty (zero-length) frame.
+      if (grease.Has("payload") && !grease.Get("payload", &payload))
+        return false;
+      frame->type = static_cast<uint8_t>(type);
+      frame->flags = static_cast<uint8_t>(flags);
+      frame->payload = std::move(payload);
+      (*out)->grease_frame = std::move(frame);
+    }
+
     return true;
   }
 };
@@ -1094,6 +1223,29 @@ v8::Local<v8::Value> Session::GetFingerprintConfig(gin::Arguments* args) {
 
 void Session::SetSSLConfig(network::mojom::SSLConfigPtr config) {
   browser_context_->SetSSLConfig(std::move(config));
+}
+
+void Session::SetHttp2Profile(network::mojom::Http2ProfilePtr profile) {
+  // ORDERING TRAP - why this cannot work as a setter:
+  //
+  // HttpNetworkSessionParams are read once, when the NetworkContext is
+  // constructed. StoragePartition construction happens at
+  // session.fromPartition() time, i.e. BEFORE any method on the returned
+  // Session can run. Verified with instrumentation: ConfigureNetworkContext-
+  // Params() always observes http2profile_set=0 for a post-hoc call.
+  //
+  // Storing the value anyway would be worse than refusing: the profile would
+  // appear to be set while having zero effect, which is precisely the silent
+  // mismatch this subsystem exists to avoid. So we store it (so later-created
+  // contexts on the same BrowserContext would honour it, should content ever
+  // recreate one) AND log loudly that it will not affect the current context.
+  //
+  // The supported path is session.fromPartition(name, { http2Profile: {...} }).
+  LOG(WARNING) << "session.setHttp2Profile() has no effect on an existing "
+                  "session: HTTP/2 params are fixed when the NetworkContext is "
+                  "created. Pass { http2Profile: ... } as the second argument "
+                  "to session.fromPartition() instead.";
+  browser_context_->SetHttp2Profile(std::move(profile));
 }
 
 bool Session::IsPersistent() {
@@ -1905,6 +2057,7 @@ void Session::FillObjectTemplate(v8::Isolate* isolate,
       .SetMethod("setFingerprintConfig", &Session::SetFingerprintConfig)
       .SetMethod("getFingerprintConfig", &Session::GetFingerprintConfig)
       .SetMethod("setSSLConfig", &Session::SetSSLConfig)
+      .SetMethod("setHttp2Profile", &Session::SetHttp2Profile)
       .SetMethod("getBlobData", &Session::GetBlobData)
       .SetMethod("downloadURL", &Session::DownloadURL)
       .SetMethod("createInterruptedDownload",

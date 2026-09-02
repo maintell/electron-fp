@@ -1,0 +1,719 @@
+# ============================================================================
+# 40-net-tls.patch - Network-layer fingerprint control plane (TLS + HTTP/2).
+#
+# Part of the fp-fingerprint patch set. Apply in filename order:
+#   00-core.patch -> 10-blink-core.patch -> 20-blink-modules.patch ->
+#   30-webrtc.patch -> 40-net-tls.patch
+#
+# WHY THIS PATCH EXISTS SEPARATELY
+#   Patches 00-30 all live under blink/, because the only config entry point
+#   (fp_config_helpers.h) is readable from blink only. That boundary meant
+#   net/ and BoringSSL could not read the config at all, so TLS/JA3/JA4 was
+#   structurally unreachable from the browser surface. check.py enforced the
+#   boundary (check 8d) and fingerprint/README.md documented it as known-
+#   uncovered territory.
+#
+#   This patch crosses that boundary by a DIFFERENT mechanism: instead of
+#   sharing the blink config, it adds fp_* fields to the existing per-profile
+#   net::SSLContextConfig and the network::mojom::SSLConfig mojom message,
+#   which Electron already plumbs end-to-end (session.setSSLConfig ->
+#   ElectronBrowserContext -> OnSSLConfigUpdated -> network service ->
+#   SSLClientContext -> SSLClientSocketImpl). No blink dependency, and the
+#   per-profile isolation property is inherited from the URLRequestContext.
+#
+#   Because this patch touches net/, check.py's NET_STACK_PREFIXES guard in
+#   check 8d has been updated: the guard's stated purpose was to stop the
+#   README going stale, and it has now been satisfied by updating the README.
+#
+# MERGE/UPGRADE GUIDE
+#   - net/ssl/ssl_config_service.h: new fp_* fields appended to the struct.
+#     operator== is `= default`, so it covers new fields automatically.
+#     Files: http_network_session.cc/.h, ssl_client_socket_impl.cc,
+#     ssl_config_service.h, ssl_config.mojom, ssl_config_type_converter.cc.
+#   - net/socket/ssl_client_socket_impl.cc: SSLContext pre-builds 4 SSL_CTX
+#     variants (all GREASE x GREASE-sigalgs combos) because BoringSSL exposes
+#     GREASE only at SSL_CTX level (SSL_CTX_set_grease_enabled), never per-SSL.
+#     If upstream changes the GREASE API, revisit GetSSLContextForGrease().
+#   - services/network/public/mojom/ssl_config.mojom: mirrored fields.
+#     REGENERATE the mojom bindings on upgrade (build does this).
+#   - net/http/http_network_session.h/.cc: HTTP/2 params, plus
+#     services/network/network_context.cc and network_context.mojom. These are
+#     in this patch rather than a separate one because they are configured by
+#     the same per-profile mechanism and validated by the same tests.
+#
+# HTTP/2 ORDERING CONSTRAINT (cost real debugging time - do not "simplify")
+#   HttpNetworkSessionParams are read ONCE, when the NetworkContext is
+#   constructed. StoragePartition construction happens inside
+#   session.fromPartition(), BEFORE any Session method can run. A post-hoc
+#   session.setHttp2Profile() is therefore silently ineffective - verified by
+#   instrumenting ConfigureNetworkContextParams, which always observed the
+#   profile unset for such calls. The supported API is
+#   session.fromPartition(name, { http2Profile: {...} }), matching how `cache`
+#   is passed. The setter is retained but warns loudly rather than pretending.
+#
+# Regenerate with git diff over the six paths listed in this header.
+# ============================================================================
+
+# --- net/http/http_network_session.cc ---
+# RANGE: HttpNetworkSession constructor, SpdySessionPool args.
+# PURPOSE: apply the HTTP/2 profile overrides. Each uses value_or() so an
+# unset profile falls back to the stock param: an unprofiled context is
+# byte-identical to upstream.
+diff --git a/net/http/http_network_session.cc b/net/http/http_network_session.cc
+index 0ccbec3fcc226..a5f7862f4b562 100644
+--- a/net/http/http_network_session.cc
++++ b/net/http/http_network_session.cc
+@@ -176,9 +176,15 @@ HttpNetworkSession::HttpNetworkSession(const HttpNetworkSessionParams& params,
+                          params.spdy_session_max_recv_window_size,
+                          params.spdy_session_max_queued_capped_frames,
+                          AddDefaultHttp2Settings(params.http2_settings),
+-                         params.enable_http2_settings_grease,
+-                         params.greased_http2_frame,
+-                         params.http2_end_stream_with_data_frame,
++                         // Fingerprint profile: each of these falls back to the
++                         // stock value when the profile does not set it, so an
++                         // unprofiled context behaves exactly like upstream.
++                         params.fp_http2_settings_grease.value_or(
++                             params.enable_http2_settings_grease),
++                         params.fp_greased_http2_frame.value_or(
++                             params.greased_http2_frame),
++                         params.fp_http2_end_stream_with_data_frame.value_or(
++                             params.http2_end_stream_with_data_frame),
+                          params.enable_priority_update,
+                          params.spdy_go_away_on_ip_change,
+                          params.time_func,
+# --- net/http/http_network_session.h ---
+# RANGE: HttpNetworkSessionParams, HTTP/2 settings block.
+# PURPOSE: declare the HTTP/2 profile fields. Note the default here is
+# enable_http2_settings_grease = false, whereas real Chrome turns it ON
+# via components/network_session_configurator. Electron DOES call that
+# configurator, so the stock switch --http2-grease-settings also works
+# (verified); these fp_* fields exist for PER-PROFILE control, which a
+# process-wide switch cannot express.
+diff --git a/net/http/http_network_session.h b/net/http/http_network_session.h
+index 0097a398b6d68..0e4d55215c355 100644
+--- a/net/http/http_network_session.h
++++ b/net/http/http_network_session.h
+@@ -114,7 +114,39 @@ struct NET_EXPORT HttpNetworkSessionParams {
+   // https://tools.ietf.org/html/draft-bishop-httpbis-grease-00.
+   // The setting identifier and value will be drawn independently for each
+   // connection to prevent tracking of the client.
++  //
++  // NOTE: upstream (components/network_session_configurator) turns this ON for
++  // real Chrome via the --http2-grease-settings switch. Electron builds
++  // HttpNetworkSessionParams directly and never runs that configurator, so it
++  // stays false here - meaning an Electron-derived build emits a HTTP/2
++  // SETTINGS frame with no GREASE entry, which differs from Chrome on EVERY
++  // HTTP/2 connection. See fp_http2_settings_grease below.
+   bool enable_http2_settings_grease = false;
++
++  // -------------------------------------------------------------------------
++  // Fingerprint profile: browser-profile-driven HTTP/2 shaping.
++  //
++  // Defaults are "unset" so an unprofiled build keeps stock Chromium behavior
++  // exactly. As with the TLS profile, these describe HTTP/2 *behavior*; there
++  // is deliberately no field that stores a target H2 fingerprint string.
++  // -------------------------------------------------------------------------
++
++  // Overrides |enable_http2_settings_grease| when set. Real Chrome sends a
++  // GREASE SETTINGS entry; a profile emulating Chrome should therefore set
++  // this to true, because the net/ default is false.
++  std::optional<bool> fp_http2_settings_grease;
++
++  // Overrides |greased_http2_frame| when set. Controls whether a reserved-type
++  // frame is sent after each SETTINGS frame. Real Chrome does not set this by
++  // default (it is opt-in via --http2-grease-frame-type), so `nullopt` is the
++  // Chrome-matching default; an explicit value replaces it wholesale.
++  std::optional<std::optional<SpdySessionPool::GreasedHttp2Frame>>
++      fp_greased_http2_frame;
++
++  // Overrides |http2_end_stream_with_data_frame| when set. Pairs with
++  // fp_greased_http2_frame so a grease frame can be sent even on bodyless
++  // requests.
++  std::optional<bool> fp_http2_end_stream_with_data_frame;
+   // If set, an HTTP/2 frame with a reserved frame type will be sent after
+   // every HTTP/2 SETTINGS frame and before every HTTP/2 DATA frame.
+   // https://tools.ietf.org/html/draft-bishop-httpbis-grease-00.
+# --- net/socket/ssl_client_socket_impl.cc ---
+# RANGE: SSLContext (GREASE ctx variants) + SSLClientSocketImpl::Init().
+# PURPOSE: the actual ClientHello shaping. GREASE is SSL_CTX-only in
+# BoringSSL, so 4 pre-built SSL_CTX variants cover every combination.
+# Also applies cipher list, sigalgs, ALPN/session_ticket omission, and the
+# advertised-version cap.
+diff --git a/net/socket/ssl_client_socket_impl.cc b/net/socket/ssl_client_socket_impl.cc
+index 67c6c41f6e0db..4a2eee87348a2 100644
+--- a/net/socket/ssl_client_socket_impl.cc
++++ b/net/socket/ssl_client_socket_impl.cc
+@@ -166,6 +166,24 @@ class SSLClientSocketImpl::SSLContext {
+   }
+   SSL_CTX* ssl_ctx() { return ssl_ctx_.get(); }
+ 
++  // Returns an SSL_CTX matching the requested GREASE settings.
++  //
++  // WHY THIS EXISTS: BoringSSL exposes GREASE only through SSL_CTX-level
++  // setters (SSL_CTX_set_grease_enabled / SSL_CTX_set_grease_sigalgs_enabled);
++  // there is deliberately no per-SSL equivalent, because GREASE is meant to be
++  // a property of the client implementation rather than of one connection.
++  // That collides with per-profile fingerprints, where two tabs must be able to
++  // present different ClientHellos.
++  //
++  // Since there are only four meaningful combinations, we build all four at
++  // construction time. Lookup is then a constant-time index with no locking -
++  // no mutation after startup, so no data race and no lazy-init hazard.
++  SSL_CTX* GetSSLContextForGrease(bool grease, bool grease_sigalgs) {
++    // std::array (not a C array) keeps this out of -Wunsafe-buffer-usage: the
++    // index is a computed size_t and Chromium builds with UNSAFE_BUFFERS_BUILD.
++    return grease_ctx_.at(KeyFor(grease, grease_sigalgs)).get();
++  }
++
+   SSLClientSocketImpl* GetClientSocketFromSSL(const SSL* ssl) {
+     DCHECK(ssl);
+     SSLClientSocketImpl* socket = static_cast<SSLClientSocketImpl*>(
+@@ -194,30 +212,54 @@ class SSLClientSocketImpl::SSLContext {
+         SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
+     DCHECK_NE(ssl_socket_data_index_, -1);
+     ssl_ctx_.reset(SSL_CTX_new(TLS_with_buffers_method()));
+-    SSL_CTX_set_cert_cb(ssl_ctx_.get(), ClientCertRequestCallback, nullptr);
++    ConfigureSSLContext(ssl_ctx_.get(), /*grease=*/true,
++                        /*grease_sigalgs=*/
++                        base::FeatureList::IsEnabled(features::kTlsGreaseSigalgs));
++
++    // Build the per-profile GREASE variants up front. GREASE has no per-SSL
++    // setter in BoringSSL, so varying it per profile requires a distinct
++    // SSL_CTX per combination. Four combinations, built once, read-only after.
++    for (bool grease : {false, true}) {
++      for (bool grease_sigalgs : {false, true}) {
++        bssl::UniquePtr<SSL_CTX> ctx(SSL_CTX_new(TLS_with_buffers_method()));
++        ConfigureSSLContext(ctx.get(), grease, grease_sigalgs);
++        grease_ctx_.at(KeyFor(grease, grease_sigalgs)) = std::move(ctx);
++      }
++    }
++  }
++
++  // Applies every setting that is identical across all SSL_CTXs. Split out of
++  // the constructor so the GREASE variants are configured exactly like the
++  // default one - otherwise the variants would silently drift from the default
++  // (e.g. missing cert compression) and produce a subtly different handshake.
++  static void ConfigureSSLContext(SSL_CTX* ctx,
++                                  bool grease,
++                                  bool grease_sigalgs) {
++    SSL_CTX_set_cert_cb(ctx, ClientCertRequestCallback, nullptr);
+ 
+     // Verifies the server certificate even on resumed sessions.
+-    SSL_CTX_set_reverify_on_resume(ssl_ctx_.get(), 1);
+-    SSL_CTX_set_custom_verify(ssl_ctx_.get(), SSL_VERIFY_PEER,
+-                              VerifyCertCallback);
++    SSL_CTX_set_reverify_on_resume(ctx, 1);
++    SSL_CTX_set_custom_verify(ctx, SSL_VERIFY_PEER, VerifyCertCallback);
+     // Disable the internal session cache. Session caching is handled
+     // externally (i.e. by SSLClientSessionCache).
+     SSL_CTX_set_session_cache_mode(
+-        ssl_ctx_.get(), SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL);
+-    SSL_CTX_sess_set_new_cb(ssl_ctx_.get(), NewSessionCallback);
+-    SSL_CTX_set_timeout(ssl_ctx_.get(), 1 * 60 * 60 /* one hour */);
++        ctx, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL);
++    SSL_CTX_sess_set_new_cb(ctx, NewSessionCallback);
++    SSL_CTX_set_timeout(ctx, 1 * 60 * 60 /* one hour */);
+ 
+-    SSL_CTX_set_grease_enabled(ssl_ctx_.get(), 1);
+-    if (base::FeatureList::IsEnabled(features::kTlsGreaseSigalgs)) {
+-      SSL_CTX_set_grease_sigalgs_enabled(ssl_ctx_.get(), 1);
+-    }
++    SSL_CTX_set_grease_enabled(ctx, grease ? 1 : 0);
++    SSL_CTX_set_grease_sigalgs_enabled(ctx, grease_sigalgs ? 1 : 0);
+ 
+     // Deduplicate all certificates minted from the SSL_CTX in memory.
+-    SSL_CTX_set0_buffer_pool(ssl_ctx_.get(), x509_util::GetBufferPool());
++    SSL_CTX_set0_buffer_pool(ctx, x509_util::GetBufferPool());
+ 
+-    SSL_CTX_set_msg_callback(ssl_ctx_.get(), MessageCallback);
++    SSL_CTX_set_msg_callback(ctx, MessageCallback);
+ 
+-    ConfigureCertificateCompression(ssl_ctx_.get());
++    ConfigureCertificateCompression(ctx);
++  }
++
++  static size_t KeyFor(bool grease, bool grease_sigalgs) {
++    return (grease ? 2u : 0u) | (grease_sigalgs ? 1u : 0u);
+   }
+ 
+   static int ClientCertRequestCallback(SSL* ssl, void* arg) {
+@@ -281,7 +323,13 @@ class SSLClientSocketImpl::SSLContext {
+   int ssl_socket_data_index_;
+ 
+   bssl::UniquePtr<SSL_CTX> ssl_ctx_;
+-};
++
++  // Per-profile GREASE variants, indexed by KeyFor(). Built once in the
++  // constructor and never mutated, so concurrent readers need no lock.
++  // std::array rather than a C array so indexing is bounds-checked and does not
++  // trip -Wunsafe-buffer-usage.
++  std::array<bssl::UniquePtr<SSL_CTX>, 4> grease_ctx_;
++  };
+ 
+ const SSL_PRIVATE_KEY_METHOD
+     SSLClientSocketImpl::SSLContext::kPrivateKeyMethod = {
+@@ -684,7 +732,23 @@ int SSLClientSocketImpl::Init() {
+   SSLContext* context = SSLContext::GetInstance();
+   crypto::OpenSSLErrStackTracer err_tracer(FROM_HERE);
+ 
+-  ssl_.reset(SSL_new(context->ssl_ctx()));
++  // Select an SSL_CTX whose GREASE settings match this profile. GREASE is an
++  // SSL_CTX-level property in BoringSSL (no per-SSL setter), so per-profile
++  // GREASE requires picking among pre-built contexts. When the profile does not
++  // specify GREASE we use the default context, which is configured exactly as
++  // upstream - so an unprofiled build is byte-identical to stock Chromium.
++  const std::optional<bool>& fp_grease = context_->config().fp_grease_enabled;
++  const std::optional<bool>& fp_grease_sigalgs =
++      context_->config().fp_grease_sigalgs_enabled;
++  SSL_CTX* ssl_ctx = context->ssl_ctx();
++  if (fp_grease.has_value() || fp_grease_sigalgs.has_value()) {
++    const bool grease = fp_grease.value_or(true);
++    const bool grease_sigalgs = fp_grease_sigalgs.value_or(
++        base::FeatureList::IsEnabled(features::kTlsGreaseSigalgs));
++    ssl_ctx = context->GetSSLContextForGrease(grease, grease_sigalgs);
++  }
++
++  ssl_.reset(SSL_new(ssl_ctx));
+   if (!ssl_ || !context->SetClientSocketForSSL(ssl_.get(), this))
+     return ERR_UNEXPECTED;
+ 
+@@ -761,6 +825,26 @@ int SSLClientSocketImpl::Init() {
+     return ERR_UNEXPECTED;
+   }
+ 
++  // Fingerprint profile: cap the version ADVERTISED in supported_versions,
++  // independently of the versions the client will ACCEPT (version_max above).
++  //
++  // Why separate: supported_versions is what a passive observer fingerprints.
++  // Lowering version_max instead would also refuse TLS 1.3 servers - a
++  // functional regression mistaken for a fingerprint change.
++  const std::optional<uint16_t>& fp_adv_max =
++      context_->config().fp_advertised_version_max;
++  if (fp_adv_max.has_value()) {
++    const uint16_t advertised_max =
++        std::min<uint16_t>(*fp_adv_max, version_max);
++    if (advertised_max < TLS1_2_VERSION) {
++      // TLS versions before TLS 1.2 are no longer supported.
++      return ERR_UNEXPECTED;
++    }
++    if (!SSL_set_max_proto_version(ssl_.get(), advertised_max)) {
++      return ERR_UNEXPECTED;
++    }
++  }
++
+   SSL_set_early_data_enabled(ssl_.get(), ssl_config_.early_data_enabled);
+ 
+   // TODO(crbug.com/41393419): Make this option not a no-op in BoringSSL and
+@@ -786,6 +870,21 @@ int SSLClientSocketImpl::Init() {
+     }
+   }
+ 
++  // Fingerprint profile: a profile-supplied cipher list REPLACES the built-in
++  // command entirely. This is the single biggest lever on both JA3 (verbatim
++  // cipher list) and JA4 (sorted cipher list + cipher count), and it is
++  // hardcoded upstream, which is why no amount of Electron-level configuration
++  // can move it.
++  //
++  // We validate the list eagerly and log loudly on failure, because an invalid
++  // cipher string here is a hard ERR_UNEXPECTED for every connection on this
++  // profile - a silent failure mode is unacceptable.
++  const std::optional<std::string>& fp_cipher_list =
++      context_->config().fp_cipher_list;
++  if (fp_cipher_list.has_value()) {
++    command = *fp_cipher_list;
++  }
++
+   if (!SSL_set_strict_cipher_list(ssl_.get(), command.c_str())) {
+     LOG(ERROR) << "SSL_set_cipher_list('" << command << "') failed";
+     return ERR_UNEXPECTED;
+@@ -807,8 +906,20 @@ int SSLClientSocketImpl::Init() {
+       SSL_SIGN_RSA_PSS_RSAE_SHA512,
+       SSL_SIGN_RSA_PKCS1_SHA512,
+   };
+-  if (!SSL_set_verify_algorithm_prefs(ssl_.get(), kVerifyPrefs,
+-                                      std::size(kVerifyPrefs))) {
++  const std::optional<std::vector<uint16_t>>& fp_sigalgs =
++      context_->config().fp_signature_algorithms;
++  if (fp_sigalgs.has_value() && !fp_sigalgs->empty()) {
++    // Profile-supplied signature algorithm preference order. JA4 hashes the
++    // sorted set, so ORDER does not affect JA4 - but MEMBERSHIP and COUNT do,
++    // and the order is visible to any server that inspects the raw list.
++    if (!SSL_set_verify_algorithm_prefs(ssl_.get(), fp_sigalgs->data(),
++                                        fp_sigalgs->size())) {
++      LOG(ERROR) << "SSL_set_verify_algorithm_prefs() failed for profile list ("
++                 << fp_sigalgs->size() << " entries)";
++      return ERR_UNEXPECTED;
++    }
++  } else if (!SSL_set_verify_algorithm_prefs(ssl_.get(), kVerifyPrefs,
++                                             std::size(kVerifyPrefs))) {
+     return ERR_UNEXPECTED;
+   }
+ 
+@@ -816,7 +927,14 @@ int SSLClientSocketImpl::Init() {
+       ssl_.get(),
+       base::FeatureList::IsEnabled(features::kUseNewAlpsCodepointHttp2));
+ 
+-  if (!ssl_config_.alpn_protos.empty()) {
++  // Fingerprint profile: omitting ALPN is unusual for a browser - Chromium
++  // always sends it - but some non-browser TLS clients do not, and a profile
++  // targeting such a client must be able to express that. Note that omitting
++  // ALPN while still speaking HTTP/2 would be self-contradictory; the
++  // consistency engine is responsible for rejecting such a profile.
++  const bool omit_alpn = context_->config().fp_omit_alpn;
++
++  if (!omit_alpn && !ssl_config_.alpn_protos.empty()) {
+     std::vector<uint8_t> wire_protos =
+         SerializeNextProtos(ssl_config_.alpn_protos);
+     SSL_set_alpn_protos(ssl_.get(), wire_protos.data(), wire_protos.size());
+@@ -838,6 +956,16 @@ int SSLClientSocketImpl::Init() {
+   SSL_enable_signed_cert_timestamps(ssl_.get());
+   SSL_enable_ocsp_stapling(ssl_.get());
+ 
++  // Fingerprint profile: the session_ticket extension advertises resumption
++  // support. Omitting it changes both the extension list (JA3) and whether a
++  // resumed ClientHello later carries a PSK binder.
++  //
++  // BoringSSL has no SSL_disable_session_tickets(); the supported mechanism is
++  // the SSL_OP_NO_TICKET option (RFC 5077).
++  if (context_->config().fp_omit_session_ticket) {
++    SSL_set_options(ssl_.get(), SSL_OP_NO_TICKET);
++  }
++
+   // Configure BoringSSL to allow renegotiations. Once the initial handshake
+   // completes, if renegotiations are not allowed, the default reject value will
+   // be restored. This is done in this order to permit a BoringSSL
+@@ -861,7 +989,30 @@ int SSLClientSocketImpl::Init() {
+     return rv;
+   }
+ 
+-  SSL_set_permute_extensions(ssl_.get(), 1);
++  // Fingerprint profile: extension-order permutation.
++  //
++  // Upstream this is hardcoded to 1. Disabling it does NOT make the client look
++  // more "native" - it makes the extension order FIXED, which is a stronger and
++  // more stable fingerprint than a permuted one. It is only meaningful when
++  // emulating a client that genuinely does not permute, and it should be paired
++  // with fp_extension_order so the emitted order is intentional rather than
++  // merely constant.
++  //
++  // NOTE: BoringSSL exposes this per-SSL (unlike GREASE), so it needs no
++  // per-profile SSL_CTX.
++  const std::optional<bool>& fp_permute = context_->config().fp_permute_extensions;
++  SSL_set_permute_extensions(ssl_.get(), fp_permute.value_or(true) ? 1 : 0);
++
++  // An explicit extension order is requested but not supported: fail loudly
++  // rather than silently emitting a different order than the profile claims.
++  // See the fp_extension_order comment in net/ssl/ssl_config_service.h.
++  if (!context_->config().fp_extension_order.empty()) {
++    LOG(ERROR) << "fp_extension_order is set but not implemented: BoringSSL "
++                  "provides no API to pin ClientHello extension order. "
++                  "Refusing to emit a ClientHello that does not match the "
++                  "requested profile.";
++    return ERR_NOT_IMPLEMENTED;
++  }
+ 
+   // Configure BoringSSL to send Trust Anchor IDs, if provided.
+   if (ssl_config_.trust_anchor_ids.has_value()) {
+# --- net/ssl/ssl_config_service.h ---
+# RANGE: SSLContextConfig struct, fp_* fields appended at the end.
+# PURPOSE: kernel-side config surface for the TLS profile. Every field is
+# std::optional so "unset" means "stock Chromium behavior", which is what
+# keeps an unprofiled build byte-identical to upstream.
+diff --git a/net/ssl/ssl_config_service.h b/net/ssl/ssl_config_service.h
+index 8329b02b8551e..e15f81f9fb40f 100644
+--- a/net/ssl/ssl_config_service.h
++++ b/net/ssl/ssl_config_service.h
+@@ -107,6 +107,79 @@ struct NET_EXPORT SSLContextConfig {
+   // MtcMetadata was generated. See MtcMetadata.update_time_seconds in
+   // net/cert/root_store.proto.
+   int64_t mtc_update_time_seconds = 0;
++
++  // -------------------------------------------------------------------------
++  // Fingerprint profile: browser-profile-driven TLS ClientHello control.
++  //
++  // These are the surfaces that Chromium otherwise HARDCODES in
++  // SSLClientSocketImpl::Init(), which is why a Chromium-derived build cannot
++  // move its JA3/JA4 without a source change. All of them default to
++  // "unset / native Chromium behavior" so that an unprofiled context is
++  // byte-identical to stock Chromium - a lie that is inconsistent with the
++  // rest of the stack is worse than no spoof at all.
++  //
++  // Design rule enforced here: these describe TLS *behavior*, not the JA3/JA4
++  // string. The hashes are DERIVED on the wire from what these produce. Never
++  // add a field that stores a target JA3/JA4 - that inverts the dependency and
++  // makes the profile unverifiable.
++  // -------------------------------------------------------------------------
++
++  // When nullopt, use Chromium's built-in cipher list ordering command
++  // ("ALL:!aPSK:!ECDSA+SHA1:!3DES"). When set, this string REPLACES it and is
++  // passed to SSL_set_strict_cipher_list(). It is the dominant input to both
++  // JA3 (verbatim list) and JA4 (sorted list + count).
++  std::optional<std::string> fp_cipher_list;
++
++  // When nullopt, use Chromium's built-in kVerifyPrefs signature-algorithm
++  // preference order. When set, passed to SSL_set_verify_algorithm_prefs().
++  // JA4 hashes this list (sorted), so order-independent, but the COUNT and
++  // membership both matter.
++  std::optional<std::vector<uint16_t>> fp_signature_algorithms;
++
++  // GREASE (RFC 8701). When unset, Chromium's global default applies
++  // (SSL_CTX_set_grease_enabled(ctx, 1)).
++  //
++  // NOTE: BoringSSL exposes GREASE only as an SSL_CTX-level setter, so this
++  // cannot be applied per-SSL like permute_extensions. It therefore requires a
++  // per-profile SSL_CTX; see SSLClientContext::GetSSLContextForProfile().
++  std::optional<bool> fp_grease_enabled;
++  std::optional<bool> fp_grease_sigalgs_enabled;
++
++  // Extension-order permutation. When unset, Chromium's default applies
++  // (SSL_set_permute_extensions(ssl, 1)).
++  //
++  // Turning this OFF does not make the client look more like a "real browser" -
++  // it makes the extension order FIXED and therefore maximally fingerprintable.
++  // Only set it to emulate a client that genuinely does not permute, and pair
++  // it with an explicit fp_extension_order so the result is deterministic
++  // rather than merely constant.
++  std::optional<bool> fp_permute_extensions;
++
++  // Explicit ClientHello extension order, e.g. {0x000a, 0x000d, ...}.
++  //
++  // HONEST LIMITATION - NOT IMPLEMENTED: BoringSSL exposes only
++  // SSL_[CTX_]set_permute_extensions(on/off); there is no API to pin a specific
++  // ClientHello extension order. Implementing this would require patching
++  // BoringSSL's ClientHello assembly (ssl/extensions.cc), which changes a
++  // security-critical handshake path and is out of scope for this phase.
++  //
++  // The field exists so the config surface is stable and so a profile that
++  // requests it is REJECTED loudly instead of being silently ignored - a
++  // silently-ignored fingerprint setting is worse than a missing one, because
++  // the profile then claims a fingerprint it does not produce.
++  std::vector<uint16_t> fp_extension_order;
++
++  // If true, drop the ALPN extension entirely from the ClientHello. Some
++  // non-browser TLS clients do not send ALPN; Chromium always does.
++  bool fp_omit_alpn = false;
++
++  // If true, omit the session_ticket extension. Affects resumption behavior
++  // and therefore whether the ClientHello carries a PSK binder on resume.
++  bool fp_omit_session_ticket = false;
++
++  // Override the maximum TLS version advertised in supported_versions.
++  // Distinct from `version_max`, which gates what the client will ACCEPT.
++  std::optional<uint16_t> fp_advertised_version_max;
+ };
+ 
+ // The interface for retrieving global SSL configuration.  This interface
+# --- services/network/network_context.cc ---
+# RANGE: NetworkContext constructor, after ParseCommandLineAndFieldTrials.
+# PURPOSE: apply the HTTP/2 profile onto HttpNetworkSessionParams. Applied
+# AFTER the command-line parse so a profile overrides a process-wide switch,
+# and only when set, so an unprofiled context keeps stock behavior.
+diff --git a/services/network/network_context.cc b/services/network/network_context.cc
+index 2065c41667a2f..5065063b547b2 100644
+--- a/services/network/network_context.cc
++++ b/services/network/network_context.cc
+@@ -3357,6 +3357,32 @@ URLRequestContextOwner NetworkContext::MakeURLRequestContext(
+   session_params.key_auth_cache_server_entries_by_network_anonymization_key =
+       params_->split_auth_cache_by_network_anonymization_key;
+ 
++  // Fingerprint profile: HTTP/2 overrides, applied AFTER
++  // ParseCommandLineAndFieldTrials so a profile wins over process-wide
++  // switches, and so unset fields leave the switch/default value untouched.
++  //
++  // These are per-NetworkContext, unlike --http2-grease-settings which is
++  // process-wide; that is the only reason to prefer them over the switch.
++  if (params_->fp_http2_profile) {
++    const auto& p = params_->fp_http2_profile;
++
++    if (p->settings_grease.has_value()) {
++      session_params.fp_http2_settings_grease = p->settings_grease.value();
++    }
++    if (p->end_stream_with_data_frame.has_value()) {
++      session_params.fp_http2_end_stream_with_data_frame =
++          p->end_stream_with_data_frame.value();
++    }
++    if (p->grease_frame) {
++      net::SpdySessionPool::GreasedHttp2Frame frame;
++      frame.type = p->grease_frame->type;
++      frame.flags = p->grease_frame->flags;
++      frame.payload.assign(p->grease_frame->payload.begin(),
++                           p->grease_frame->payload.end());
++      session_params.fp_greased_http2_frame = std::move(frame);
++    }
++  }
++
+   builder.set_http_network_session_params(session_params);
+   builder.set_quic_context(std::move(quic_context));
+ 
+# --- services/network/public/mojom/network_context.mojom ---
+# RANGE: new GreasedHttp2Frame + Http2Profile structs; one fp_http2_profile
+# field appended to NetworkContextParams.
+# PURPOSE: transport for the HTTP/2 profile. Grouped in a struct (rather
+# than three loose optional fields) so an omitted key is unambiguous at the
+# gin boundary: a bare optional<bool> cannot distinguish JS `false` from
+# "key absent", which would silently misread a profile.
+diff --git a/services/network/public/mojom/network_context.mojom b/services/network/public/mojom/network_context.mojom
+index e266c2974e658..80b2d2ff3323a 100644
+--- a/services/network/public/mojom/network_context.mojom
++++ b/services/network/public/mojom/network_context.mojom
+@@ -358,6 +358,41 @@ interface CertVerifierClient {
+   ) => (int32 error_code, CertVerifyResult result);
+ };
+ 
++// A frame of a reserved (GREASE) type, emitted after each HTTP/2 SETTINGS
++// frame so that servers handle unknown frame types, per
++// draft-bishop-httpbis-grease-00.
++//
++// Mirrors net::SpdySessionPool::GreasedHttp2Frame (net/spdy/spdy_session_pool.h).
++// Separate `type`/`flags`/`payload` fields rather than a raw blob so the mojom
++// validator checks the shapes; payload is bytes because it is arbitrary-length
++// opaque data drawn from a CSPRNG.
++struct GreasedHttp2Frame {
++  // Reserved frame type: 0x0b + 0x1f * rand(8), per the GREASE draft.
++  uint8 type;
++  uint8 flags;
++  array<uint8> payload;
++};
++
++// Per-NetworkContext HTTP/2 fingerprint profile.
++//
++// Grouping these in one struct (rather than three loose optional fields on
++// NetworkContextParams) makes "unset" unambiguous at the JS boundary: a
++// hand-written gin converter cannot distinguish JS `false` from an omitted
++// key when the parameter is a bare optional<bool>, which is exactly the kind of
++// silent misinterpretation this subsystem must avoid.
++struct Http2Profile {
++  // Overrides enable_http2_settings_grease. Real Chrome greases SETTINGS;
++  // the net/ default is false, so a Chrome-matching profile sets true.
++  bool? settings_grease;
++
++  // Overrides http2_end_stream_with_data_frame: END_STREAM on an empty DATA
++  // frame instead of on HEADERS.
++  bool? end_stream_with_data_frame;
++
++  // Overrides greased_http2_frame. Real Chrome leaves this unset by default.
++  GreasedHttp2Frame? grease_frame;
++};
++
+ // Parameters for constructing a network context.
+ struct NetworkContextParams {
+   // The user agent string.
+@@ -677,6 +712,24 @@ struct NetworkContextParams {
+   // do not have an associated `URLLoaderFactory`.
+   pending_remote<URLLoaderNetworkServiceObserver>?
+       device_bound_sessions_network_observer;
++
++  // ------------------------------------------------------------------------
++  // Fingerprint profile: HTTP/2 behavior.
++  //
++  // Every field is optional so that "unset" means "keep whatever
++  // ParseCommandLineAndFieldTrials decided", which keeps an unprofiled context
++  // byte-identical to stock Chromium. See net/http/http_network_session.h.
++  //
++  // WHY THIS EXISTS WHEN --http2-grease-settings ALREADY WORKS: that switch is
++  // process-wide, read once at NetworkContext construction. These fields are
++  // per-NetworkContext, so a profile can differ per session. Verified: the
++  // switch does take effect in Electron, so a Chrome-matching build needs
++  // either the switch or fp_http2_settings_grease=true, not both.
++  // ------------------------------------------------------------------------
++
++  // Per-profile HTTP/2 shaping. Unset (null) keeps whatever
++  // ParseCommandLineAndFieldTrials decided, preserving stock behavior.
++  Http2Profile? fp_http2_profile;
+ };
+ 
+ struct NetworkConditions {
+# --- services/network/public/mojom/ssl_config.mojom ---
+# RANGE: SSLConfig struct, fp_* fields appended.
+# PURPOSE: cross-process transport for the profile. Bindings regenerate
+# at build time; no manual steps on upgrade.
+diff --git a/services/network/public/mojom/ssl_config.mojom b/services/network/public/mojom/ssl_config.mojom
+index 8c748ceed155c..4f1dd2c944a08 100644
+--- a/services/network/public/mojom/ssl_config.mojom
++++ b/services/network/public/mojom/ssl_config.mojom
+@@ -91,6 +91,49 @@ struct SSLConfig {
+   // MtcMetadata was generated. See also MtcMetadata.update_time_seconds in
+   // net/cert/root_store.proto.
+   int64 mtc_update_time_seconds;
++
++  // -------------------------------------------------------------------------
++  // Fingerprint profile: browser-profile-driven TLS ClientHello shaping.
++  //
++  // Every field here describes TLS *behavior*. None of them stores a target
++  // JA3/JA4 - those are derived on the wire from what these produce, and
++  // storing them would invert the dependency and make the profile
++  // unverifiable. Empty/unset means "use stock Chromium behavior".
++  // -------------------------------------------------------------------------
++
++  // Replaces Chromium's built-in cipher list command
++  // ("ALL:!aPSK:!ECDSA+SHA1:!3DES"). Passed to SSL_set_strict_cipher_list().
++  // Empty = keep the built-in list.
++  string fp_cipher_list;
++
++  // Replaces Chromium's built-in signature-algorithm preference list.
++  // Empty = keep the built-in kVerifyPrefs order.
++  array<uint16> fp_signature_algorithms;
++
++  // GREASE (RFC 8701), normally hardcoded on in Chromium. Because BoringSSL
++  // only offers SSL_CTX-level GREASE setters, setting these selects a
++  // pre-built per-profile SSL_CTX rather than mutating a shared one.
++  bool? fp_grease_enabled;
++  bool? fp_grease_sigalgs_enabled;
++
++  // ClientHello extension-order permutation, normally hardcoded on.
++  // Turning it off makes the order FIXED (more fingerprintable, not less);
++  // pair with fp_extension_order for a deliberate order.
++  bool? fp_permute_extensions;
++
++  // Explicit extension order. Empty = BoringSSL's own ordering.
++  array<uint16> fp_extension_order;
++
++  // Omit the ALPN extension. Contradicts HTTP/2 use; the consistency engine
++  // is responsible for rejecting that combination.
++  bool fp_omit_alpn = false;
++
++  // Omit the session_ticket extension (sets SSL_OP_NO_TICKET).
++  bool fp_omit_session_ticket = false;
++
++  // Cap the TLS version advertised in supported_versions. Distinct from
++  // version_max, which gates what the client will accept. 0 = no override.
++  uint16 fp_advertised_version_max;
+ };
+ 
+ // Receives SSL configuration updates.
+# --- services/network/ssl_config_type_converter.cc ---
+# RANGE: MojoSSLConfigToSSLContextConfig.
+# PURPOSE: map mojom -> net config. Empty string/array/0 means unset, so
+# an unprofiled SSLConfig produces a default-constructed net config.
+diff --git a/services/network/ssl_config_type_converter.cc b/services/network/ssl_config_type_converter.cc
+index d0669a19e6f17..a8372d3bcc8f7 100644
+--- a/services/network/ssl_config_type_converter.cc
++++ b/services/network/ssl_config_type_converter.cc
+@@ -65,6 +65,26 @@ net::SSLContextConfig MojoSSLConfigToSSLContextConfig(
+   }
+   net_config.mtc_update_time_seconds = mojo_config->mtc_update_time_seconds;
+ 
++  // Fingerprint profile: TLS ClientHello shaping. All of these are pass-through
++  // of "unset = stock Chromium behavior", which is what makes an unprofiled
++  // context byte-identical to upstream.
++  if (!mojo_config->fp_cipher_list.empty()) {
++    net_config.fp_cipher_list = mojo_config->fp_cipher_list;
++  }
++  if (!mojo_config->fp_signature_algorithms.empty()) {
++    net_config.fp_signature_algorithms = mojo_config->fp_signature_algorithms;
++  }
++  net_config.fp_grease_enabled = mojo_config->fp_grease_enabled;
++  net_config.fp_grease_sigalgs_enabled = mojo_config->fp_grease_sigalgs_enabled;
++  net_config.fp_permute_extensions = mojo_config->fp_permute_extensions;
++  net_config.fp_extension_order = mojo_config->fp_extension_order;
++  net_config.fp_omit_alpn = mojo_config->fp_omit_alpn;
++  net_config.fp_omit_session_ticket = mojo_config->fp_omit_session_ticket;
++  if (mojo_config->fp_advertised_version_max != 0) {
++    net_config.fp_advertised_version_max =
++        mojo_config->fp_advertised_version_max;
++  }
++
+   return net_config;
+ }
+ 

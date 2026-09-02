@@ -60,6 +60,15 @@ void NetworkContextService::ConfigureNetworkContextParams(
 
   network_context_params->initial_ssl_config = browser_context_->GetSSLConfig();
 
+  // Fingerprint profile: HTTP/2. Applied at construction time only - there is
+  // no OnSSLConfigUpdated-style live channel for HttpNetworkSessionParams, so
+  // session.setHttp2Profile() must be called before the first request.
+  if (browser_context_->GetHttp2Profile()) {
+    network_context_params->fp_http2_profile =
+        browser_context_->GetHttp2Profile()->Clone();
+  }
+
+
   network_context_params->user_agent = browser_context_->GetUserAgent();
 
   network_context_params->cors_origin_access_list =

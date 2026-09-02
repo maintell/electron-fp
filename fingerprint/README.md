@@ -100,9 +100,141 @@ python3 fingerprint/scripts/apply.py --dry-run && echo "dry-run ok (or src missi
 允许项：
 - `shell/common/options_switches.h`、`shell/browser/web_contents_preferences.cc`、`shell/browser/electron_browser_client.cc`、`shell/browser/api/electron_api_*.cc`、`lib/browser/api/*.ts`、`typings/internal-electron.d.ts` 的最小粘合（见 `docs/superpowers/specs/2026-08-26-electron-fingerprint-design.md §4.2`）
 
-## 已知未覆盖：网络层指纹（TLS/JA3/JA4）
+## 网络层指纹（TLS/JA3/JA4 与 HTTP/2）— 已实现
 
-**60 个 key 全部位于渲染层（Blink）与 WebRTC，不含任何网络栈指纹。** 这不是遗漏待补，而是当前架构的边界；此处记录以免被误认为已实现。
+> **2026-09-01 更新（状态变更：未覆盖 → 已实现）**
+> 网络层指纹现在由 `40-net-tls.patch` 提供。此前此节标题为"已知未覆盖"，
+> 该结论已被下面的实测数据推翻，文档同步更新以免与代码矛盾。
+
+`00/10/20/30` 四个补丁全部位于 Blink 与 WebRTC，因为唯一配置入口
+`fp_config_helpers.h` 只能被 Blink 包含。`40-net-tls.patch` **不复用该入口**，
+而是走 Electron 已有的、本就逐 profile 隔离的通道：
+
+```
+session.setSSLConfig({ fp* })
+  → ElectronBrowserContext::SetSSLConfig
+  → mojo OnSSLConfigUpdated  (network::mojom::SSLConfig)
+  → 网络服务 MojoSSLConfigToSSLContextConfig
+  → net::SSLClientContext（per-URLRequestContext，天然逐 profile）
+  → SSLClientSocketImpl::Init()   ← ClientHello 在此成形
+```
+
+关键点：`SSLClientContext` 是 **per-URLRequestContext** 的
+（`net/http/http_network_session.h`），而每个标签页已独占 partition
+（`Client/main.js` 的 `fp-tab-${tabId}`），所以"逐 profile 独立网络上下文"
+不需要新建机制，只需把字段挂到已有的 `SSLContextConfig` 上。
+
+### 覆盖范围（逐字段，含未实现项的诚实标注）
+
+| 字段 | 作用 | 层级 |
+|---|---|---|
+| `fpCipherList` | 替换 Chromium 硬编码 `ALL:!aPSK:!ECDSA+SHA1:!3DES` | per-SSL |
+| `fpSignatureAlgorithms` | 替换签名算法偏好列表 | per-SSL |
+| `fpGreaseEnabled` / `fpGreaseSigalgsEnabled` | GREASE 开关 | **per-SSL_CTX** |
+| `fpPermuteExtensions` | 扩展顺序随机化开关 | per-SSL |
+| `fpExtensionOrder` | **未实现，且会显式报错拒绝** | — |
+| `fpOmitAlpn` / `fpOmitSessionTicket` | 移除 ALPN / session_ticket | per-SSL |
+| `fpAdvertisedVersionMax` | 仅压低 supported_versions 的**对外**版本 | per-SSL |
+| HTTP/2 `settingsGrease` 等 | `HttpNetworkSessionParams::fp_*` | per-URLRequestContext |
+
+**两个入口点不同，这是有意的**：
+
+```js
+// TLS：可随时设置（SSLConfig 有 OnSSLConfigUpdated 实时通道）
+session.setSSLConfig({ fpCipherList: 'ECDHE-RSA-AES128-GCM-SHA256', ... })
+
+// HTTP/2：必须在构造时传入（见下"构造期约束"）
+session.fromPartition('persist:x', { http2Profile: { settingsGrease: true } })
+```
+
+### 构造期约束（HTTP/2，踩过坑，勿"简化"）
+
+`HttpNetworkSessionParams` 只在 **NetworkContext 构造时读取一次**；而
+StoragePartition 的构造发生在 `session.fromPartition()` **内部**，早于任何
+Session 方法。因此事后调用的 `session.setHttp2Profile()` **静默无效**——
+该函数曾完整实现并接通 mojom，实测无效果（在
+`ConfigureNetworkContextParams` 插桩，事后调用一律观测到 profile 未设置）。
+
+故 setter 被保留但 `LOG(WARNING)` 明确告警，而不是假装生效；
+受支持写法是 `fromPartition(name, { http2Profile })`，与 `cache` 选项一致。
+
+#### 三个 HTTP/2 字段的实测证据
+
+三者均已证明能改动真实线路字节（非仅"被接受"），由
+`Client/test-http2-wire.js` / `test-http2-profile.js` 覆盖：
+
+| 字段 | 观测到的线路证据 |
+|---|---|
+| `settingsGrease:true` | SETTINGS 多出 GREASE 项 `0x1a8a`；同进程未打 profile 的 session 仍为 0 |
+| `greaseFrame:{type:0x2a,...}` | SETTINGS 后出现 `type=0x2a payload=deadbeef` 保留类型帧 |
+| `endStreamWithDataFrame` | HEADERS flags `0x25`→`0x24`（END_STREAM 被移走），空的 END_STREAM DATA 帧出现 |
+
+> **测试陷阱**：验证 `endStreamWithDataFrame` 时，探针若在收到 HEADERS 时立即
+> settle，会截断紧跟其后的空 DATA 帧，导致"字段无效"的误判。需在 HEADERS 后
+> 留出短暂窗口再 settle。flags 位翻转已能证明字段被读到，此时缺帧应优先怀疑
+> 捕获窗口而非实现。
+
+两个刻意的设计约束：
+
+1. **未设置 = 原生 Chromium。** 所有字段都是 `std::optional`／空值即"未设置"。
+   实测：不打 profile 时 JA4 与改动前基线**逐字节相同**
+   （`t13i1515h2_dea800f94266_31b5f215ee45`）。
+2. **`fpExtensionOrder` 不静默忽略。** BoringSSL 只提供
+   `SSL_[CTX_]set_permute_extensions(on|off)`，没有指定扩展顺序的 API；
+   实现它需要改 BoringSSL 的 ClientHello 拼装（安全关键路径）。因此设置了该
+   字段的连接**直接失败**（`ERR_NOT_IMPLEMENTED` 并 `LOG(ERROR)`），
+   而不是发出一个与 profile 声明不符的 ClientHello——静默忽略比缺失更糟，
+   因为 profile 会声称一个它并未产生的指纹。
+
+### 实测（本地探针读真实 ClientHello，非推断）
+
+```
+无 profile      JA4 = t13i1515h2_dea800f94266_31b5f215ee45   （= 改动前基线）
+fpCipherList    JA4 = t13i0415h2_2561529f22d6_...            （密码套件收窄）
+GREASE 关闭     GREASE 码点 = 0（对照组基线 = 5）
+omitSessionTicket  session_ticket 消失，exts 17 → 16
+fpAdvertisedVersionMax=0x0303   JA4 → t12i1210h2_...
+HTTP/2          SETTINGS 8 项；GREASE SETTINGS = 无
+```
+
+测法纪律（曾因违反它得出过错误结论，故写入测试）：
+- **首次握手必须丢弃**：GREASE 随机，首个 ClientHello 不可比。
+- 断某 profile"无效果"前，先用**非法值**验证链路是否真的到达 BoringSSL
+  （非法 cipher list 必须连接失败）；否则无法区分"被忽略"与"值本身无效"。
+- BoringSSL 的 cipher list **只管 TLS ≤ 1.2**，且名字是**连字符形式**
+  （`ECDHE-RSA-AES128-GCM-SHA256`，不是 `ECDHE_RSA_WITH_...`）。
+  用长名或只列 TLS 1.3 套件都会得到"看起来没生效"的假阴性。
+
+### HTTP/2 与 Chrome 的差异（实测，且**已有现成开关**）
+
+`enable_http2_settings_grease` 在 `net/` 默认为 `false`；`enable_http2_settings_grease`
+由 `components/network_session_configurator` 的 `--http2-grease-settings` 打开。
+**该开关在本构建中实测有效**，不需要内核补丁：
+
+```
+无开关         SETTINGS = 4 项（1,2,4,6）          GREASE = 0
+--http2-grease-settings  SETTINGS = 5 项  0xfa9a / 0xfa2a（随机）GREASE = 1
+```
+
+故：**要模拟 Chrome，直接加 `--http2-grease-settings` 即可**，
+`HttpNetworkSessionParams::fp_http2_settings_grease` 仅为"需要逐 profile 而非
+进程级控制"时预留（开关是 process-wide 的，profile 字段是 per-URLRequestContext）。
+注意两者默认值都是"未设置"，以保持原生行为。
+
+**测量方法警告（曾据此得出错误结论）**：不要用 Node `http2` 的
+`remoteSettings` 事件读对端 SETTINGS。它返回的是 Node 认为对端的值，
+不是线上字节；实测同一连接上：
+
+```
+线上原始字节：4 项（1,2,4,6）
+remoteSettings：8 项（额外补入 maxFrameSize/maxConcurrentStreams/
+                      maxHeaderSize/enableConnectProtocol）
+```
+
+Node 用协议默认值补齐了 4 项，且会**丢弃未知（GREASE）id**——恰恰是我们
+关心的信号。因此 `Client/test-http2-fingerprint.js` 自行解码 SETTINGS 帧字节。
+（该文件的旧版本曾基于 `remoteSettings` "通过"了 4 项断言，实际在测 Node
+而非 Electron。）
 
 > **2026-08-29 更新**：User-Agent 与 `navigator.platform` **已覆盖**，不再是缺口。
 > UA 由客户端 `session.setUserAgent()` 处理（非内核 key，`Client/main.js`）；

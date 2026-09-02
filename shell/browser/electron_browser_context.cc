@@ -374,6 +374,42 @@ ElectronBrowserContext::ElectronBrowserContext(
     use_cache_ = use_cache_opt.value();
   }
 
+  // Fingerprint profile: HTTP/2.
+  //
+  // READ AT CONSTRUCTION, NOT VIA A SETTER. The StoragePartition - and with it
+  // the NetworkContext and its HttpNetworkSessionParams - is created when the
+  // BrowserContext is created (session.fromPartition), before any JS method on
+  // the Session object can run. A post-hoc setter is therefore silently
+  // ineffective: it was implemented, wired through mojom, and verified to have
+  // no effect, because params are read once at construction.
+  //
+  // So the profile is passed as a fromPartition() option, exactly like `cache`.
+  // The remaining setHttp2Profile() exists for symmetry and to fail loudly
+  // rather than silently; see its implementation for the ordering caveat.
+  if (const base::DictValue* h2 = options.FindDict("http2Profile")) {
+    auto profile = network::mojom::Http2Profile::New();
+    if (auto v = h2->FindBool("settingsGrease")) {
+      profile->settings_grease = v.value();
+    }
+    if (auto v = h2->FindBool("endStreamWithDataFrame")) {
+      profile->end_stream_with_data_frame = v.value();
+    }
+    if (const base::DictValue* gf = h2->FindDict("greaseFrame")) {
+      auto frame = network::mojom::GreasedHttp2Frame::New();
+      frame->type = static_cast<uint8_t>(gf->FindInt("type").value_or(0x0b));
+      frame->flags = static_cast<uint8_t>(gf->FindInt("flags").value_or(0));
+      if (const base::ListValue* pl = gf->FindList("payload")) {
+        for (const auto& b : *pl) {
+          if (auto i = b.GetIfInt()) {
+            frame->payload.push_back(static_cast<uint8_t>(*i));
+          }
+        }
+      }
+      profile->grease_frame = std::move(frame);
+    }
+    http2_profile_ = std::move(profile);
+  }
+
   base::StringToInt(command_line->GetSwitchValueASCII(switches::kDiskCacheSize),
                     &max_cache_size_);
 
@@ -720,6 +756,11 @@ void ElectronBrowserContext::SetSSLConfig(network::mojom::SSLConfigPtr config) {
 void ElectronBrowserContext::SetSSLConfigClient(
     mojo::Remote<network::mojom::SSLConfigClient> client) {
   ssl_config_client_ = std::move(client);
+}
+
+void ElectronBrowserContext::SetHttp2Profile(
+    network::mojom::Http2ProfilePtr profile) {
+  http2_profile_ = std::move(profile);
 }
 
 void ElectronBrowserContext::SetDisplayMediaRequestHandler(
