@@ -174,6 +174,30 @@ Session 方法。因此事后调用的 `session.setHttp2Profile()` **静默无�
 > 留出短暂窗口再 settle。flags 位翻转已能证明字段被读到，此时缺帧应优先怀疑
 > 捕获窗口而非实现。
 
+### 外部验证（约束 12）
+
+`Client/test-external-validation.js` 用第三方（`tls.browserleaks.com/json`）
+比对内核结果——这是唯一能发现"自洽但与真实浏览器不符"的手段，内部测试看不到。
+
+结果：**密码套件集合 15/15 完全一致；扩展集合 14/14 一致。**
+
+#### 已知偏差：SNI（0x0000）
+
+本地探针监听 `127.0.0.1`，测试连 `https://127.0.0.1:PORT/`；而 Chromium 对
+**IP 字面量不发送 SNI**。因此本地 baseline 少了 `0x0000`，与真实站点看到的
+ClientHello 天然不同（JA4 哈希覆盖扩展列表）。
+
+- 这不是产品缺陷，但意味着：**本地 JA4 ≠ 真实站点算出的 JA4**。
+  "未打 profile == 原生"的结论成立，但跨上下文比较 JA4 字符串无效。
+- 该行为由 `Client/test-probe-realism.js` 钉死：IP 无 SNI、hostname 有 SNI、
+  二者恰差这一个扩展。
+- 曾误判为"GREASE 随机化"：本地连跑三次稳定 15，排除该解释。
+
+> HTML 页面（`browserleaks.com/ssl`、`creepjs.com`）会尝试并打印但不计入
+> 成败——经沙箱代理会间歇性失败，与本项目无关。用"狼来了"的门禁只会让人
+> 忽略失败。JSON 端点既稳定，又直接给出 `ja4_r`（解码后的原始列表），更适
+> 合做断言。
+
 两个刻意的设计约束：
 
 1. **未设置 = 原生 Chromium。** 所有字段都是 `std::optional`／空值即"未设置"。
