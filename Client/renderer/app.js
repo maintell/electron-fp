@@ -618,10 +618,14 @@ function renderSelfTest(result) {
 
   const rows = result.rows || [];
   const s = result.summary || {};
+  // All four verdicts, including error. The summary originally showed only
+  // pass/fail/skip, so a probe that threw produced a summary reading
+  // "0 pass 0 fail 0 skip" with no indication that anything went wrong.
   $fpSelfTestSummary.innerHTML =
     '<span class="fp-badge fp-badge-pass">' + (s.pass || 0) + ' pass</span> ' +
     '<span class="fp-badge fp-badge-fail">' + (s.fail || 0) + ' fail</span> ' +
-    '<span class="fp-badge fp-badge-skip">' + (s.skip || 0) + ' skip</span>';
+    '<span class="fp-badge fp-badge-skip">' + (s.skip || 0) + ' skip</span> ' +
+    '<span class="fp-badge fp-badge-error">' + (s.error || 0) + ' error</span>';
 
   const showSkipped = $fpSelfTestShowSkipped.checked;
   const visible = showSkipped ? rows : rows.filter((r) => r.verdict !== 'skip');

@@ -178,8 +178,12 @@ const PRELOAD = fs.readFileSync(path.join(CLIENT, 'preload.js'), 'utf8');
   // Skipped rows are hidden by default - that is the whole point of the
   // "skip is not success" rule, so assert it in the UI too.
   check('skipped rows are hidden by default', r.rows === 3, r.rows + ' rows rendered (4 supplied, 1 skip)');
+  // All four, including error. The summary once omitted error entirely, so a
+  // probe that threw read "0 pass 0 fail 0 skip" - indistinguishable from a
+  // clean run on an unconfigured profile.
   check('summary reports all four counts',
-    /1 pass/.test(r.summary) && /1 fail/.test(r.summary) && /1 skip/.test(r.summary),
+    /1 pass/.test(r.summary) && /1 fail/.test(r.summary) &&
+    /1 skip/.test(r.summary) && /1 error/.test(r.summary),
     r.summary);
   check('fail row carries its explanation', r.hasHint && /hardware/.test(r.hintText),
     r.hintText.slice(0, 70));
