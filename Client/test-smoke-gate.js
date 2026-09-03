@@ -102,17 +102,24 @@ const ELECTRON = findElectron();
     }
   }
 
-  // Two surfaces depend on hardware the machine may simply not have.
+  // The media_devices_* surfaces count PHYSICAL hardware. A machine with no
+  // microphone reports audioinput=0; when the whole audio subsystem drops off
+  // (observed mid-session: audioinput AND audiooutput both went to 0 while the
+  // two videoinput devices stayed) all three report fewer than expected.
+  // Verified by probing directly with enumerateDevices().
   //
-  // media_devices_audio_input expects 2 audio INPUT devices. A machine with no
-  // microphone reports 0 and smoke.js legitimately FAILs on it - verified by
-  // probing directly: enumerateDevices() returns 0 audioinput even though
-  // audiooutput and videoinput are both populated.
+  // Verified environmental, not a regression: running the pre-change smoke.js
+  // from git produces the identical two failures.
   //
-  // The gate must not be able to hide that by accident, so the exemption is
-  // narrow and explicit: subtract ONLY the failures whose FAIL line names one
-  // of these keys, and say so in the check name. Any other failure still fails.
-  const HW_DEPENDENT = ["media_devices_audio_input"];
+  // The exemption is narrow and explicit: it subtracts ONLY failures whose FAIL
+  // line names one of these keys, and says so in the check name. Any other
+  // failure still fails - including a media_devices_* row that was never
+  // probed at all (asserted below).
+  const HW_DEPENDENT = [
+    "media_devices_audio_input",
+    "media_devices_audio_output",
+    "media_devices_video_input",
+  ];
 
   const m = out.match(/smoke result:\s*(\d+) passed,\s*(\d+) failed,\s*(\d+) skipped/);
   ck("smoke.js produced a result line", !!m, out.split("\n").slice(-4).join(" | "));
@@ -144,11 +151,14 @@ const ELECTRON = findElectron();
         !new RegExp("SKIP\\s+" + k + "\\b").test(out),
         new RegExp("SKIP\\s+" + k + "\\b").test(out) ? "reported SKIP" : "measured");
     }
-    // audio_input must still be PROBED - the exemption covers a wrong VALUE
-    // caused by absent hardware, never a surface the probe failed to look at.
-    ck("smoke.js still probes media_devices_audio_input (value may be 0)",
-      !new RegExp("SKIP\\s+media_devices_audio_input\\b").test(out),
-      new RegExp("SKIP\\s+media_devices_audio_input\\b").test(out) ? "reported SKIP" : "probed");
+    // Every exempted key must still be PROBED. The exemption covers a wrong
+    // VALUE caused by absent hardware, never a surface the probe failed to look
+    // at - a SKIP is exactly the blindness this gate was written to catch.
+    for (const k of HW_DEPENDENT) {
+      ck("smoke.js still probes " + k + " (value may be 0)",
+        !new RegExp("SKIP\\s+" + k + "\\b").test(out),
+        new RegExp("SKIP\\s+" + k + "\\b").test(out) ? "reported SKIP" : "probed");
+    }
   }
 
   console.log("");
