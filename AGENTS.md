@@ -122,6 +122,18 @@ node shims that spawn ninja/electron as children, so the tree walk covers them.
 
 ## 2. Related project constraints
 
+- **Hard-won traps are documented in `fingerprint/README.md`** — read it before
+  touching anything in `fingerprint/`. The expensive ones:
+  - *"注册一个新 WebUI scheme 需要三处独立注册"* — three independent scheme
+    registrations, each with a DIFFERENT failure mode; plus
+    `ShouldServiceRequest` must be overridden or the data source is found and
+    then silently rejected.
+  - *"配置值格式陷阱"* — five measured traps where a config value looks set but
+    is silently ignored (`FpConfigString()` quote truncation, quoted numeric
+    keys, `audio_data_strength` as a number, …).
+  - *"构造期约束（HTTP/2，踩过坑，勿"简化"）"* — HTTP/2 settings must be sent at
+    a specific point in construction.
+
 - **Never use `npx`** — silently fetches and executes arbitrary packages. Spawn
   from `node_modules/.bin/` or use `yarn <tool>`. (See `CLAUDE.md`.)
 - **`Client/run-tests.js` only counts lines starting with `PASS`/`FAIL`/`SKIP`** —
