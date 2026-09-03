@@ -4,7 +4,7 @@
 Simplified for electron-fp isolation:
 - paths rooted at fingerprint/ (not patches/series)
 - isolation enforced: fingerprint patch stays outside patches/chromium/
-- 56 keys completeness, debug residue, hunks, doc blocks, INTEGRATION sync
+- 63 keys completeness, debug residue, hunks, doc blocks, INTEGRATION sync
 Exit 0 = pass, 1 = fail.
 """
 import argparse
@@ -116,7 +116,7 @@ ALLOWED_RESIDUE = [
 
 def main():
     parser = argparse.ArgumentParser(description="Fingerprint patch checks")
-    parser.add_argument("--helpers-only", action="store_true", help="only check helpers/56 keys existence (Task 2)")
+    parser.add_argument("--helpers-only", action="store_true", help="only check helpers/63 keys existence (Task 2)")
     args = parser.parse_args()
 
     failures = []
@@ -369,6 +369,76 @@ def main():
                 failures.append(
                     "patch set contains net files but fingerprint/README.md "
                     "is missing")
+
+        # 9. DOC DRIFT: prose stating an outdated key count.
+        #
+        # HISTORY: the tree grew from 56 (upstream) to 63 keys, and the docs kept
+        # saying 56/60 in five files. The merge guide is the worst place for that:
+        # a future porter regenerating patches on a new Chromium baseline would
+        # read "60-key integrity check", see 63, and believe three keys had
+        # appeared or vanished.
+        #
+        # The gate scans docs for a number-qualified key count that disagrees with
+        # EXPECTED_KEYS (derived from the schema, so it cannot drift from code).
+        # A count explicitly labelled as the upstream baseline is history, not
+        # drift, and is allowed.
+        DOC_FILES = (
+            "fingerprint/README.md",
+            "fingerprint/scripts/check.py",
+            "docs/superpowers/plans/2026-08-26-electron-fingerprint.md",
+            "docs/superpowers/specs/2026-08-26-electron-fingerprint-design.md",
+            "docs/superpowers/specs/2026-08-29-fingerprint-patch-split-design.md",
+        )
+        _n = len(EXPECTED_KEYS)
+        # Counts that could plausibly be a former/current total. Deliberately
+        # excludes realistic false positives (e.g. "2 keys" in a prose sentence).
+        _stale_re = re.compile(
+            r"(?<![\w.])(4[0-9]|5[0-9]|6[0-9]|7[0-9])\s*(?:键|keys?\b)")
+        for rel in DOC_FILES:
+            p = os.path.join(REPO, *rel.split("/"))
+            if not os.path.exists(p):
+                continue
+            try:
+                body = io.open(p, encoding="utf-8", errors="replace").read()
+            except OSError:
+                continue
+            is_py = rel.endswith(".py")
+            for lineno, line in enumerate(body.splitlines(), 1):
+                # In source files, count-bearing prose lives in comments, and
+                # THIS file's comments quote stale numbers as worked examples
+                # ("fp-fingerprint.patch really did ship 56 keys"), which would
+                # flag the file implementing the check. Skip Python comments and
+                # only inspect real code lines there; docs are all prose, so
+                # every line counts.
+                if is_py and line.lstrip().startswith("#"):
+                    continue
+                hit = _stale_re.search(line)
+                if not hit:
+                    continue
+                if int(hit.group(1)) == _n:
+                    continue
+                # A count labelled as the UPSTREAM BASELINE is history, not
+                # drift: fp-fingerprint.patch really did ship 56 keys and this
+                # project extended it to 63.
+                #
+                # The label has to be ADJACENT to the count, not merely on the
+                # same line. A merge-guide line reading "...用上游 devutils/
+                # gen_patch6.py ... （含 60 键完整性校验）" mentions an upstream
+                # TOOL while the count describes OUR gate - matching on a bare
+                # "上游" anywhere in the line suppressed a genuinely stale count.
+                # Require the label within a few characters of the number.
+                window = line[max(0, hit.start() - 12):hit.end() + 12]
+                if re.search(r"上游|upstream", window, re.I):
+                    continue
+                # "余 N 键" / "remaining N keys" is a REMAINDER, not a total: a
+                # config example listing 9 of 63 legitimately says "余 54 键".
+                # Only claims about the overall total are drift.
+                if re.search(r"余|剩|remaining|other", line, re.I):
+                    continue
+                failures.append(
+                    "doc drift: %s:%d states %s keys but the schema has %d "
+                    "-- update the prose (or mark it as the upstream baseline "
+                    "if that is what it means)" % (rel, lineno, hit.group(1), _n))
 
     if failures:
         print("PATCH CHECK FAILED:")

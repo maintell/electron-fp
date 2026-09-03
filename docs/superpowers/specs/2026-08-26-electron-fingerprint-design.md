@@ -3,12 +3,12 @@
 **Date:** 2026-08-26
 **Status:** Draft — 已通过 §1-§3 分段确认，待用户复审
 **Decisions:** A. 1:1 Chromium patch 移植 + 完全隔离目录 + session+webContents 双入口 JS 动态隔离
-**Ref:** `F:\code\ungoogled-chromium-windows\patches\ungoogled-chromium\windows\fp-fingerprint.patch` (1881 行, 36 文件, 56 键), `INTEGRATION.md`, `electron-fp/patches/config.json` / `chromium_src/BUILD.gn` / `shell/browser/web_contents_preferences.cc`
+**Ref:** `F:\code\ungoogled-chromium-windows\patches\ungoogled-chromium\windows\fp-fingerprint.patch` (1881 行, 36 文件, 上游 56 键；本项目已扩展到 63 键), `INTEGRATION.md`, `electron-fp/patches/config.json` / `chromium_src/BUILD.gn` / `shell/browser/web_contents_preferences.cc`
 
 ## 1. 目标与约束
 
 ### 1.1 目标
-- 将 `ungoogled-chromium-windows` 的 56 键指纹能力完整移植到 `electron-fp`（当前 Chromium 154.0.8015.0），保持与未配置时原生一致。
+- 将 `ungoogled-chromium-windows` 的指纹能力（上游 56 键，本项目 63 键）完整移植到 `electron-fp`（当前 Chromium 154.0.8015.0），保持与未配置时原生一致。
 - 窗口级隔离：每个 `BrowserWindow` / `WebContents` 可独立指纹，跨窗口不串扰。
 - JS 动态配置：`session.setFingerprintConfig` + `webContents.setFingerprintConfig` / `new BrowserWindow({webPreferences:{fingerprint}})`，运行时可切换。
 - 零配置原生：不传 `fingerprint` 时不注入，透传原生；`fingerprint:false|{}` 显式禁用。
@@ -38,7 +38,7 @@ electron-fp/                  # 不动上游布局
       check.py                # 镜像 devutils/check_patch.py 8 项检查
       smoke.js                # Electron 版 CDP 烟雾（替代 smoke_fp.ps1）
     README.md
-    INTEGRATION.md            # 镜像未改 56 键规格表 + C1-C17 一致性
+    INTEGRATION.md            # 镜像未改规格表（63 键） + C1-C17 一致性
   docs/superpowers/specs/2026-08-26-electron-fingerprint-design.md # 本文
 ```
 
@@ -65,7 +65,7 @@ new BrowserWindow({
 })
 ```
 
-`FingerprintConfig` 为 56 键扁平对象，类型按 `fp_config_helpers.h` 保持：`int` 键无引号、`string` 键带引号，例如：
+`FingerprintConfig` 为 63 键扁平对象，类型按 `fp_config_helpers.h` 保持：`int` 键无引号、`string` 键带引号，例如：
 
 ```js
 {
@@ -74,7 +74,7 @@ new BrowserWindow({
   webgl_vendor: "Google Inc. (NVIDIA)", webgl_renderer: "ANGLE (NVIDIA, ...)",
   canvas_noise_seed: 123456, fonts_blocklist: "Arial,Helvetica",
   tz_id: "America/New_York", webrtc_ip: "1.2.3.4",
-  // ... 余 46 键同未改 spec 表
+  // ... 余 54 键同未改 spec 表（本例列出 9 键，9 + 54 = 63）
 }
 ```
 
@@ -130,7 +130,7 @@ CI：新增 `fingerprint-patch` job（`ubuntu-latest`, 无容器）先于 `fork-
 
 ### 5.2 验证
 
-- **静态**：`fingerprint/scripts/check.py` 镜像未改 8 项（series 引用、头注释、56 键完整性、debug 残留、hunk 数、INTEGRATION 同步），<1s。
+- **静态**：`fingerprint/scripts/check.py` 镜像未改 8 项（series 引用、头注释、63 键完整性、debug 残留、hunk 数、INTEGRATION 同步），<1s。
 - **烟雾**：`fingerprint/scripts/smoke.js` 用 `BrowserWindow` + `webContents.debugger` / `remote-debugging`（复用未改 `smoke_fp.ps1` 的 20+ 断言：`navigator.hardwareConcurrency`/`deviceMemory`/`screen`/`Intl.DateTimeFormat().resolvedOptions().timeZone`/`gl.getParameter(0x9245)`/`canvas.toDataURL` hash/`storage.estimate`/`gpu.requestAdapter` 等），零配置时对比原生指纹一致。
 
 ### 5.3 CI 集成
@@ -146,7 +146,7 @@ CI：新增 `fingerprint-patch` job（`ubuntu-latest`, 无容器）先于 `fork-
 ## 7. 验收
 
 - [ ] `fingerprint/` 目录独立，`patches/chromium/.patches` 未动
-- [ ] `session` + `webContents` 双入口可设 56 键，窗口隔离验证（两窗口不同指纹）
+- [ ] `session` + `webContents` 双入口可设 63 键，窗口隔离验证（两窗口不同指纹）
 - [ ] 零配置时 20+ 面与原生一致（smoke 零配置对比通过）
 - [ ] `fingerprint/scripts/check.py` 8 项通过
 - [ ] Chromium 154 基线构建通过，patch 冲突仅影响 fingerprint job

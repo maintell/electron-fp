@@ -124,7 +124,7 @@ marker 定义随补丁配置（脚本内表驱动），新增补丁时同步登�
 
 | 检查 | 命令 | 期望 |
 |---|---|---|
-| 静态检查 | `python fingerprint/scripts/check.py` | 56 keys、hunks ok、no residue |
+| 静态检查 | `python fingerprint/scripts/check.py` | 63 keys、hunks ok、no residue |
 | 补丁可应用 | `python fingerprint/scripts/apply.py --dry-run --src src` | 各补丁均可应用 |
 | 幂等性 | 连续运行两次 apply | 第二次全部 skip，无重复应用 |
 | 顺序敏感 | 用干净 tree，只应用 00-core 后跑 10/20/30 | 不误报 already-applied |
@@ -144,7 +144,7 @@ marker 定义随补丁配置（脚本内表驱动），新增补丁时同步登�
 1. 备份现有 monolith 补丁与 `src` 工作树改动
 2. 以源码为准，程序化切分为 4 个补丁（重算 hunk 计数）
 3. 改造 `apply.py`（目录扫描 + 每补丁独立 marker）
-4. 改造 `check.py`（全集合校验 + 56 key 覆盖检查）
+4. 改造 `check.py`（全集合校验 + 63 key 覆盖检查）
 5. 处理第 4 节的 3 项既有缺陷
 6. 跑第 5 节全部验证
 7. 重新编译 + 抽样回归

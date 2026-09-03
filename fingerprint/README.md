@@ -4,7 +4,7 @@
 
 - `patches/*.patch` 补丁集（按运行时子系统拆分为 4 个，按文件名顺序施加）；整块替换源仍为 `ungoogled-chromium-windows`，升级时按需替换单个补丁
 - 不改 `patches/chromium/.patches` / `patches/config.json`，施加由 `fingerprint/scripts/apply.py` 独立完成
-- `helpers/fp_config_helpers.h` 仅改注入源为 `--fingerprint-config`（per-Renderer，`ElectronBrowserClient::AppendExtraCommandLineSwitchesForRenderer`），其余 60 键语义与上游一致
+- `helpers/fp_config_helpers.h` 仅改注入源为 `--fingerprint-config`（per-Renderer，`ElectronBrowserClient::AppendExtraCommandLineSwitchesForRenderer`），其余 63 键语义与上游一致
 
 ## 目录结构
 
@@ -43,7 +43,7 @@
 cp "F:/code/ungoogled-chromium-windows/patches/ungoogled-chromium/windows/fp-fingerprint.patch" \
    fingerprint/patches/fp-fingerprint.patch
 
-# 方式 B：用上游 devutils/gen_patch6.py 在新 src 重生成后覆盖（推荐，含 60 键完整性校验）
+# 方式 B：用上游 devutils/gen_patch6.py 在新 src 重生成后覆盖（推荐，含 63 键完整性校验）
 ```
 
 若单文件冲突难定位，可临时拆为 `fingerprint/patches/fp-*.patch` 多文件调试，稳定后合回单文件（见上游 `INTEGRATION.md` 风险分级）。
@@ -262,7 +262,7 @@ Node 用协议默认值补齐了 4 项，且会**丢弃未知（GREASE）id**—
 
 > **2026-08-29 更新**：User-Agent 与 `navigator.platform` **已覆盖**，不再是缺口。
 > UA 由客户端 `session.setUserAgent()` 处理（非内核 key，`Client/main.js`）；
-> `navigator.platform` 由内核 key `navigator_platform`（60 键之一）处理，注入点为
+> `navigator.platform` 由内核 key `navigator_platform`（63 键之一）处理，注入点为
 > `NavigatorBase::platform()`（**不是** `NavigatorID::platform()`，后者在
 > Windows/macOS/Linux 上是死代码，详见 `10-blink-core.patch` 中的注释）。
 > 两者均需在 `profiles.json` 中显式配置：UA 为 `profile.userAgent`（平级字段），
@@ -320,7 +320,7 @@ Chrome/154.0.8015.0 Electron/45.0.0-nightly.20260825 Safari/537.36
 | 方案 | 解决什么 | 状态 |
 |---|---|---|
 | A. UA 覆盖 | 消除 `Electron/` 暴露与预设自相矛盾 | **已完成**。客户端 `session.setUserAgent()`，`profile.userAgent` 平级字段 |
-| B. `navigator.platform` | 让预设名副其实 | **已完成**。内核 key `navigator_platform`（60 键之一） |
+| B. `navigator.platform` | 让预设名副其实 | **已完成**。内核 key `navigator_platform`（63 键之一） |
 | B′. Sec-CH-UA 客户端提示 | 与 UA 保持一致 | **已完成**。键 58-60（`ua_platform`/`ua_mobile`/`ua_brands`），两个面都已打补丁：`navigator.userAgentData`（`NavigatorBase::GetUserAgentMetadata()`）与 `Sec-CH-UA*` 请求头（`LocalFrameClientImpl::UserAgentMetadata()`）。未显式配置时从 UA 派生 |
 | C. TLS/JA3 定制 | 真正的网络层指纹 | 未做，见上节 |
 | D. 明确不实现 | — | TLS 仍属此类 |

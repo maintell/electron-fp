@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 1:1 移植 ungoogled-chromium-windows 的 56 键指纹能力到 electron-fp，窗口级隔离，JS 动态可控，零配置时与原生一致，且指纹 patch 完全隔离于 `fingerprint/` 目录以保证 Chromium 大版本合流无干扰。
+**Goal:** 1:1 移植 ungoogled-chromium-windows 的指纹能力到 electron-fp（上游 56 键，本项目已扩展到 63 键），窗口级隔离，JS 动态可控，零配置时与原生一致，且指纹 patch 完全隔离于 `fingerprint/` 目录以保证 Chromium 大版本合流无干扰。
 
 **Architecture:** 保留未改单文件 `fp-fingerprint.patch` 于 `fingerprint/patches/`，通过独立 `fingerprint/scripts/apply.py` 在主 patch 之后施加；`fp_config_helpers.h` 仅改注入源为 `--fingerprint-config` 命令行开关；Electron 粘合层为 `options_switches`→`web_contents_preferences`→`ElectronBrowserClient::AppendExtraCommandLineSwitchesForRenderer` 的 per-RenderProcess 透传；JS 层为 `session`/`webContents` 双入口 gin 绑定 + TS 透出；验证为 `check.py` 静态 + `smoke.js` CDP 动态。
 
@@ -13,7 +13,7 @@
 - 目录完全隔离：指纹 patch/脚本/helpers 必须位于顶层 `fingerprint/` 且不改 `patches/chromium/.patches`，仅允许对 `shell/`/`lib/` 的最小粘合改动（本计划 Task 3-6）。
 - 零配置一致：不传 `fingerprint` 时不注入开关，Renderer 直接走原生；`fingerprint:false|null` 显式禁用亦透传。
 - 窗口级隔离：每个 `BrowserWindow`/`WebContents` 的 `RenderProcessHost` 独立 `--fingerprint-config`，不可全局单例。
-- 56 键全量按未改 `INTEGRATION.md` 规格表，类型保持 `FpConfigInt`(无引号数) / `FpConfigString`(带引号串) 语义。
+- 63 键全量按未改 `INTEGRATION.md` 规格表，类型保持 `FpConfigInt`(无引号数) / `FpConfigString`(带引号串) 语义。
 - Chromium 升级仅替换 `fingerprint/patches/fp-fingerprint.patch` 单文件。
 - JS API 形态：`session.setFingerprintConfig` + `webContents.setFingerprintConfig` + `webPreferences.fingerprint` 双入口。
 
@@ -120,7 +120,7 @@ std::string FpConfigContent() {
 - [ ] **Step 2: 验证头文件可编译**
 ```bash
 # 仅语法检查，无需全量
-python3 fingerprint/scripts/check.py --helpers-only  # 预期 PASS（56 键完整性）
+python3 fingerprint/scripts/check.py --helpers-only  # 预期 PASS（63 键完整性）
 ```
 
 - [ ] **Step 3: Commit**
@@ -326,7 +326,7 @@ sys.exit(ret)
 
 - [ ] **Step 2: 写 check.py（镜像未改 8 项，<1s）**
 ```python
-# 复用未改 devutils/check_patch.py 逻辑：series 引用、头注释、56 键完整性等
+# 复用未改 devutils/check_patch.py 逻辑：series 引用、头注释、63 键完整性等
 ```
 
 - [ ] **Step 3: 本地验证**
@@ -415,4 +415,4 @@ git commit -m "ci(fingerprint): isolated patch job, no blocking main build"
 - Spec §1 隔离 → Task 1/7/9 覆盖，不改 `patches/chromium/.patches` 已保障
 - Spec §2 JS 双入口 → Task 3-6 覆盖，per-Renderer 命令行注入保证窗口隔离
 - Spec §3 构建验证 → Task 7/8/9 覆盖，check+smoke，失败不阻断
-- 无占位符，类型（`FingerprintConfig` 扁平 56 键，int/str 区分）与未改一致，helpers 仅改注入源
+- 无占位符，类型（`FingerprintConfig` 扁平 63 键，int/str 区分）与未改一致，helpers 仅改注入源
