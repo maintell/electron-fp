@@ -47,7 +47,22 @@ MARKERS = {
         "third_party/webrtc/rtc_base/network.cc",
         "SetCustomWebRtcIpOverride",
     ),
+    # Without a marker, apply.py reported "patch does not apply" on a tree where
+    # 40-net-tls was ALREADY applied - it retried the hunk instead of skipping,
+    # and the failure looked like a broken tree. The needle is a symbol only
+    # this patch introduces.
+    "40-net-tls": (
+        "net/socket/ssl_client_socket_impl.cc",
+        "GetSSLContextForGrease",
+    ),
 }
+
+# 50-electron-glue and 60-electron-inspector target the ELECTRON tree, not the
+# Chromium tree: every one of their paths is shell/... under the electron-fp
+# checkout. This script only ever applies to Chromium, so they are expected to
+# report "No such file or directory" here - that is NOT a broken patch. Verify
+# them with check.py and by applying them to the electron-fp tree directly.
+ELECTRON_PATCHES = {"50-electron-glue", "60-electron-inspector"}
 
 
 def is_applied(src: pathlib.Path, name: str) -> bool:
@@ -128,6 +143,15 @@ def main() -> int:
 
         if is_applied(src, name):
             print(f"  {name}: already applied (marker), skipping")
+            continue
+
+        # Electron-tree patches (see the note above MARKERS). Their paths do not
+        # exist under the Chromium tree, so git apply can only ever report
+        # "No such file or directory". Reporting that as a failure made a
+        # healthy checkout look broken; skip them here and say why.
+        if name in ELECTRON_PATCHES:
+            print(f"  {name}: Electron-tree patch, not applicable to Chromium "
+                  f"(verify with check.py)")
             continue
 
         if a.dry_run:

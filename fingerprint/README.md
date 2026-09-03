@@ -469,6 +469,34 @@ gin 转换器读的是 `std::vector<uint16_t>`。传逗号字符串会让**整�
 
 `Brand=99,Chromium=131`；带引号的线上式（`"Brand";v="99"`）传不过去。
 
+### 5. `audio_data_strength` 必须传**字符串**，传数字会静默失效
+
+这是唯一一个"内核用 `FpConfigString()` 读、但 schema 类型看起来像数值"的
+key，所以它最容易踩。其余 string 类 key 都是 `str`/`csv`/`bool`，天然是
+字符串，不会踩到。
+
+**根因（已验证，非推断）**：`Session::SetFingerprintConfig` 用
+`base::WriteJson` 直接序列化传入的 JS 对象，**不经过 `fpNormalizeConfig()`**。
+所以 `setFingerprintConfig({ audio_data_strength: 0.01 })` 发出的是 JSON
+数字 `"audio_data_strength":0.01`（已用 `getFingerprintConfig()` 确认），
+而内核用 `FpConfigString()` 读取，该函数要求**带引号的字符串**，遇到数字
+返回 `""`，于是 strength 静默停留在默认 `0.0005`。
+
+实测（同一 seed，改 strength，离线渲染 256 采样的 |d[i]| 之和与未加噪的差值）：
+
+| 传法 | dev |
+|---|---|
+| 数字 `0.0001` / `0.01` / `1` | 1247 / 1247 / 1247（全都等于默认值） |
+| 字符串 `"0.0001"` / `"0.005"` | 249 / 12470（线性放大） |
+
+数字三种取值全给 1247，正是字符串 `"0.0005"` 的值——即数字一律落到默认。
+`Client/test-audio-strength.js` 同时钉住两侧：字符串形式必须线性放大
+（比值 50x → 实测 50.1），数字形式必须**仍**回落到默认；后者是将来的探针——
+一旦 `setFingerprintConfig` 改为规范化成字符串，该断言会失败，提示本节可删。
+
+> 顺带：`audio_data_strength` 超出 `[0,1]` 会被夹回默认值（内核
+> `vd >= 0.0 && vd <= 1.0`），这也是有意的。
+
 ---
 
 ## Inspector：`electron://fingerprint/`（已实现）
