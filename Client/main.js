@@ -36,9 +36,10 @@ let activeTabId = null;
 let mainWindow = null;
 let tabIdCounter = 0;
 let panelOpen = true; // fingerprint panel is a permanent sidebar — open by default
-const PANEL_WIDTH = 420; // must match #fp-panel width in renderer/style.css
-const TOP_HEIGHT = 72;   // tab bar (36) + address bar (36) — must match #top-bar in DOM
-const STATUS_HEIGHT = 22;// status bar height — must match #status-bar in DOM
+// Chrome heights and the panel width are defined in layout.js, shared with
+// Client/test-panel.js. They must match the renderer's CSS - see the comments
+// in renderer/style.css for the corresponding rules.
+const { PANEL_WIDTH, TOP_HEIGHT, STATUS_HEIGHT, viewBounds } = require('./layout');
 
 // Sites opened automatically at startup. These two are the references the
 // fingerprint leak audit was validated against, and they are what an operator
@@ -63,9 +64,11 @@ function resizeActiveView() {
   if (activeTabId && mainWindow && !mainWindow.isDestroyed()) {
     const tab = tabs.get(activeTabId);
     if (tab) {
+      // Geometry lives in layout.js, shared with Client/test-panel.js. That
+      // test used to carry its own copy and it had already drifted - it
+      // dropped the STATUS_HEIGHT subtraction and renamed TOP_HEIGHT.
       const [width, height] = mainWindow.getContentSize();
-      const viewWidth = panelOpen ? Math.max(200, width - PANEL_WIDTH) : width;
-      tab.view.setBounds({ x: 0, y: TOP_HEIGHT, width: viewWidth, height: height - TOP_HEIGHT - STATUS_HEIGHT });
+      tab.view.setBounds(viewBounds(width, height, panelOpen));
     }
   }
 }
@@ -211,8 +214,11 @@ function recreateTabView(tabId, fingerprint, keepUrl, userAgent) {
 
   // Re-attach if active
   if (activeTabId === tabId && mainWindow && !mainWindow.isDestroyed()) {
+    // Same shared geometry as resizeActiveView(). This site previously
+    // hardcoded the panel-closed formula inline, so a change to the panel
+    // width would have applied here and nowhere else.
     const [width, height] = mainWindow.getContentSize();
-    view.setBounds({ x: 0, y: TOP_HEIGHT, width, height: height - TOP_HEIGHT - STATUS_HEIGHT });
+    view.setBounds(viewBounds(width, height, panelOpen));
     view.setAutoResize({ width: true, height: true });
     mainWindow.addBrowserView(view);
   }

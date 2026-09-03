@@ -5,8 +5,13 @@
 
 const { app, BrowserWindow, BrowserView } = require('electron');
 
-const CHROME_HEIGHT = 72;
-const PANEL_WIDTH = 420;
+// The geometry under test comes from layout.js - the SAME module main.js uses.
+// This file used to re-implement resizeActiveView(), and the copy had drifted:
+// it renamed TOP_HEIGHT and dropped the STATUS_HEIGHT subtraction. Asserting
+// against a re-implementation can only be accidentally right, and stays right
+// only while nobody touches either side.
+const { PANEL_WIDTH, viewBounds } = require('./layout');
+
 const WIN_W = 1400, WIN_H = 900;
 
 app.whenReady().then(async () => {
@@ -19,10 +24,11 @@ app.whenReady().then(async () => {
   win.addBrowserView(view);
 
   let panelOpen = false;
+  // Thin adapter: the shared function is pure, so this only supplies the
+  // window's live content size. There is no geometry left to drift.
   function resizeActiveView() {
     const [w, h] = win.getContentSize();
-    const vw = panelOpen ? Math.max(200, w - PANEL_WIDTH) : w;
-    view.setBounds({ x: 0, y: CHROME_HEIGHT, width: vw, height: h - CHROME_HEIGHT });
+    view.setBounds(viewBounds(w, h, panelOpen));
   }
   resizeActiveView();
 
