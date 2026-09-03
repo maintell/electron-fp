@@ -165,7 +165,8 @@ explicitly so a deployment does not assume more protection than it has.
 | HTTP `User-Agent` header | yes | same call covers both |
 | `navigator.platform` | yes | kernel key `navigator_platform`. Defaults to disabled (`''`), so a profile opts in explicitly |
 | `Sec-CH-UA` client hints | yes | keys 58–60 (`ua_platform`/`ua_mobile`/`ua_brands`); unset derives from the UA, so they cannot drift apart |
-| TLS / JA3 / JA4 | **no** | network-stack fingerprint; see `fingerprint/README.md` |
+| TLS / JA3 / JA4 | **yes** | `40-net-tls.patch`; per-URLRequestContext, so per-tab. Only `fpExtensionOrder` is unimplemented (it errors rather than lying). See `fingerprint/README.md` |
+| `webgpu_device` / `webgpu_description` | **partly** | the keys apply, but upstream Blink only exposes `adapter.info.device/description` when `WebGPUDeveloperFeatures` is on (`--enable-blink-features=WebGPUDeveloperFeatures`). Without it they read `''` |
 
 For consistency, `navigator_platform` should agree with any UA override: a Mac
 UA wants `MacIntel`, Android wants `Linux armv8l`. The two are **separate

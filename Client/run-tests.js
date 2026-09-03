@@ -16,6 +16,15 @@
 //    every check after it. Sequential child processes keep failures contained.
 //
 // 3. Honest exit code and a per-file summary, so a regression is obvious.
+//
+// 4. Writing a new test? Hold a keepAlive window if you destroy every window
+//    between measurements. Electron QUITS when the last BrowserWindow closes,
+//    so a test that destroys its probe window after each measurement dies
+//    partway through the run - and the process still exits 0, because it never
+//    reaches the app.exit(fail === 0 ? 0 : 1) line. The symptom is an
+//    ERR_FAILED on the load after the first measurement, plus far fewer checks
+//    than expected. Measured: 4/4 loads succeed with a keepAlive window,
+//    1/4 without. Client/test-webgpu-audio-values.js carries the pattern.
 'use strict';
 
 const { spawnSync } = require('child_process');

@@ -149,9 +149,25 @@ async function probe(fp) {
   // 400 samples collapse to a single whole-millisecond value. So the assertion
   // is on GRANULARITY, not on a threshold - checking "still returns a number"
   // would pass even if the feature were completely dead.
+  //
+  // Asserted as "at most a few distinct WHOLE values", not "exactly one".
+  //
+  // The 400 samples are taken in a tight loop; if it straddles a quantisation
+  // boundary, two adjacent buckets appear - e.g. distinct=2 withFractions=0.
+  // That is still correctly quantised, but the original `=== 1` failed on it.
+  // It surfaced only under the full suite (39 processes competing for CPU):
+  // 3/3 passes standalone, ~1 in 3 fails in the suite, and when it failed the
+  // baseline had collapsed to 51 distinct values (vs 45-66 when idle) - i.e.
+  // the machine was slow enough that sampling crossed a boundary.
+  //
+  // The real invariant is: (a) NO fractional parts remain, and (b) the value
+  // count collapses from dozens to a handful. Both hold regardless of timing.
+  // fracCount === 0 is the load-independent part; a dead feature would leave
+  // sub-ms fractions intact, so it still fails if the key stops working.
   const coarse = await probe({ perf_now_precision_ms: 100 });
   ck("perf_now_precision_ms quantises performance.now() to whole ms",
-    coarse.distinctCount === 1 && coarse.fracCount === 0,
+    coarse.fracCount === 0 && coarse.distinctCount <= 3 &&
+      coarse.distinctCount < base.distinctCount,
     "distinct=" + coarse.distinctCount + " withFractions=" + coarse.fracCount +
       " (base: distinct=" + base.distinctCount + " withFractions=" + base.fracCount + ")");
   ck("perf_now_precision_ms still advances time (not frozen)",

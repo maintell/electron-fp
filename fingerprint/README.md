@@ -421,6 +421,56 @@ BoringSSL 只提供 `SSL_[CTX_]set_permute_extensions(on|off)`，没有"指定�
 
 ---
 
+## 配置值格式陷阱（三个已实测，第四个是 `webgpu_limits`）
+
+这一节收集"值写对了但静默不生效"的情况。它们的共同危险在于：**不报错，
+profile 声称一个它并未产生的指纹。**
+
+### 1. `FpConfigString()` 在第一个引号处截断
+
+`fp_config_helpers.h` 的值解析是 `content.find('"', i + 1)`——从起始引号
+之后遇到的**第一个**引号就当作值结束。所以：
+
+| key | 写法 | 结果 |
+|---|---|---|
+| `webgpu_limits` | `{"maxTextureDimension2D":256}` | **静默失效**（值被截成 `{`） |
+| `webgpu_limits` | `{maxTextureDimension2D:256}` | 生效 |
+
+实测（同一 key、同一数值、四种写法）：
+
+```
+{"maxTextureDimension2D":256}    -> 16384   （未改动，即陷阱）
+{maxTextureDimension2D:256}      -> 256     （正确）
+maxTextureDimension2D:256        -> 16384   （缺花括号）
+{maxTextureDimension2D:256,maxBindGroups:2} -> 两项都生效
+```
+
+被截成 `{` 后 `!fp_limits.empty()` 仍为真（所以覆盖分支会进入），但找不到
+闭合花括号，解析器立即 `break`——**一行代码都没执行，且不打日志**。
+63 个 key 里只有 `webgpu_limits` 需要 JSON 对象值，所以只有它受影响；
+`webgl_aliased_*` 用的是 `"min,max"` 逗号式，不含引号，不受影响。
+
+`Client/test-webgpu-audio-values.js` 把带引号的写法作为**反向断言**钉住：
+若将来 `FpConfigString()` 改成支持引号，该断言会失败，提示本节需更新。
+
+### 2. 数值型 key 不得加引号
+
+内核用 `StringToInt` 解析，引号形式被拒绝并**静默回退到真实硬件值**。
+实测 `webgl_max_viewport_dims`：`'8192'`（字符串）→ `32767,32767`（真机），
+`8192`（数字）→ `8192,8192`。详见"本地自检"节。
+
+### 3. `fpSignatureAlgorithms` 必须是数字数组
+
+gin 转换器读的是 `std::vector<uint16_t>`。传逗号字符串会让**整个**
+`setSSLConfig` 转换失败（不只是这一个字段），抛
+`conversion failure from ...`。
+
+### 4. `ua_brands` 必须写成无引号的配置式
+
+`Brand=99,Chromium=131`；带引号的线上式（`"Brand";v="99"`）传不过去。
+
+---
+
 ## Inspector：`electron://fingerprint/`（已实现）
 
 一个特权 WebUI，报告它所在 BrowserContext 的**当前生效**指纹配置：全部 63 个
