@@ -394,8 +394,26 @@ partition 时显示默认 context 的配置是明确错误的。
 Client 用的是**第二个**（`Client/main.js` 每个 tab 建一个 BrowserView，把
 `fingerprint` 放在 `webPreferences` 里）。只读 `SessionPreferences` 会对真实
 Client tab 显示空 profile——而这正是 Inspector 存在的意义所在。更糟的是它会显示
-"未发现问题"，而实际上什么都没读。两处合并，冲突时以 per-tab 配置为准（那才是
-tab 真正跑的配置），且合并必须在覆盖率统计**之前**完成。
+"未发现问题"，而实际上什么都没读。
+
+两处合并必须在覆盖率统计**之前**完成。但**合并规则必须跟随渲染进程，而不是
+"看起来更合理"的那个**——渲染进程用的是**整体替换**，不是逐键覆盖：
+
+```
+// electron_browser_client.cc（AppendCommandLineSwitches 路径）
+fp_b64 = web_preferences->GetFingerprintConfigBase64();
+if (fp_b64.empty())          // 注意：判断的是整份配置是否为空
+  fp_b64 = session_prefs->GetFingerprintConfigBase64();
+```
+
+即：per-tab 配置非空时**整份替换** session 配置，渲染进程根本看不到 session 的键。
+逐键覆盖（"更具体的优先"这句直觉）是错的，而且错在危险的方向：tab 设 `{vendor}`、
+session 设 `{platform, hw}` 时，渲染进程只应用 vendor，而逐键覆盖会报三处都已
+配置——面板把两个实际跑原生的面说成已伪装。实测：渲染进程 `platform=Win32
+hw=16`（原生），Inspector 却报 active=3（正确值是 1）。
+
+Inspector 的唯一职责就是报告**实际**伪装了什么，所以即便渲染进程的规则看起来
+"不帮忙"，也必须照跟。
 
 ### 一致性规则：8 条全量，且必须能说"没检查"
 

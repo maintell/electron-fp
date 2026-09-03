@@ -315,17 +315,35 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
     return !numeric;
   };
 
-  // Merge in the per-WebContents (webPreferences) configs for this context.
+  // Fold in the per-WebContents (webPreferences) configs for this context.
   //
   // These are what the Client actually sets (Client/main.js builds a
   // BrowserView per tab with `fingerprint` in webPreferences, which lands in
-  // WebContentsPreferences - NOT SessionPreferences). Without this merge the
+  // WebContentsPreferences - NOT SessionPreferences). Without this the
   // Inspector reports an empty profile for a real Client tab, which is both
   // wrong and actively harmful: it reads as "verified clean" when in fact
   // nothing was read.
   //
-  // This must run BEFORE the coverage loop, which counts the merged dict.
+  // This must run BEFORE the coverage loop, which counts the resolved dict.
+  //
+  // PRECEDENCE MUST MATCH THE RENDERER, NOT WHAT SEEMS REASONABLE.
+  // electron_browser_client.cc (~L700, AppendCommandLineSwitches path) does:
+  //     fp_b64 = web_preferences->GetFingerprintConfigBase64();
+  //     if (fp_b64.empty()) fp_b64 = session_prefs->GetFingerprintConfigBase64();
+  // That is WHOLE-config precedence: a non-empty per-tab config REPLACES the
+  // session config outright. The renderer never sees the session keys.
+  //
+  // A per-key overlay (the obvious "more specific wins" reading) is therefore
+  // wrong, and wrong in the dangerous direction: with a tab setting
+  // {vendor} and a session setting {platform, hw}, the renderer applies ONLY
+  // the vendor while the overlay reported all three - so the panel showed two
+  // surfaces as configured that were genuinely running native. Measured:
+  // renderer platform=Win32 hw=16 (native), Inspector active=3 instead of 1.
+  //
+  // The Inspector's whole job is to report what IS spoofed, so it must follow
+  // the renderer even where the renderer's rule looks unhelpful.
   int wc_configs = 0;
+  bool wc_config_applied = false;
   for (electron::api::WebContents* ewc :
        electron::api::WebContents::GetWebContentsList()) {
     if (!ewc) {
@@ -352,10 +370,13 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
       continue;
     }
     ++wc_configs;
-    // WebContents config wins on conflict: it is the more specific of the two,
-    // and it is what a real tab actually runs with.
-    for (auto [key, value] : wc_val->GetDict()) {
-      config.Set(key, std::move(value));
+    // First non-empty per-tab config REPLACES the session config, matching the
+    // renderer. Later tabs in the same context are separate renderers, each of
+    // which resolved the same way; counting them is still useful, but they
+    // cannot reintroduce session keys once one tab has replaced them.
+    if (!wc_config_applied) {
+      config = std::move(wc_val->GetDict());
+      wc_config_applied = true;
     }
   }
 
