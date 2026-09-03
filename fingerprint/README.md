@@ -22,7 +22,7 @@
   用 `scripts/split_patch.js` 从源码树重新生成（以源码为准，同时修正注释漂移并重算 hunk 计数）。
 - `helpers/fp_config_helpers.h` — 命令行优先 `FpConfigContent()`（`--fingerprint-config` base64 JSON → `FP_CONFIG_DATA` → `FP_CONFIG` 文件 → `FP_*` env）
 - `scripts/apply.py` — 扫描 `patches/` 下 `[0-9][0-9]-*.patch` 并按序用 `git apply` 施加（无 split 补丁时回退到 monolith）。每个补丁有**独立**的幂等标记，无 `src/third_party/blink` 时跳过返回 exit 0
-- `scripts/check.py` — 本地未接 `devutils/check_patch.py` 8 项静态检查（<1s）：60 配置项（跨全集合校验）/ 头注释 / doc-segment 匹配 / empty-segment / debug 残留 / hunks / 头计数 / 隔离 / 文件不得被多个补丁重复拥有
+- `scripts/check.py` — 本地未接 `devutils/check_patch.py` 9 项静态检查（<1s）：63 配置项（跨全集合校验）/ 头注释 / doc-segment 匹配 / empty-segment / debug 残留 / hunks / 头计数 / 隔离 / 文件不得被多个补丁重复拥有 / 文档里的键数不得与 schema 漂移
 - `scripts/split_patch.js` — 从当前源码树重新生成 4 个补丁（保留 doc 块，以源码为准消除注释漂移并重算 hunk 计数）
 - `scripts/revert_webrtc.js` — 将单个 webrtc 文件还原到未打补丁状态（webrtc 是未初始化的 submodule，git 无法还原）
 - `scripts/smoke.js` — Electron CDP 烟雾（20+ 面：hardwareConcurrency/screen/Audio/WebGL/Canvas/Geolocation 等，零配置与原生一致）
@@ -66,9 +66,28 @@ python3 fingerprint/scripts/apply.py --dry-run
 ```bash
 e sync --3 && e build         # 主 165 patches 照常合入，不受 fingerprint 影响
 python3 fingerprint/scripts/apply.py --src src   # 实际施加到 src
-node fingerprint/scripts/smoke.js                # 窗口隔离 + 20 面
+node fingerprint/scripts/smoke.js                # 27 面 + 窗口隔离
 node fingerprint/scripts/smoke.js --no-fingerprint  # 零配置应与原生一致
+node fingerprint/scripts/smoke.js --isolation       # 两窗口不同指纹
 ```
+
+`smoke.js` 有两个不显眼的前提，破坏了它不会报错，只会静默地把面报成
+`SKIP ... (not probed)`——于是"功能关闭"和"探针瞎了"无法区分。改这个脚本时要留意：
+
+- **必须探测真实 origin，不能是 `about:blank`。** `about:blank` 是不透明源
+  （origin 为 `null`），`navigator.storage` 与 `navigator.mediaDevices` 在那里是
+  `undefined`，实测直接抛 `Cannot read properties of undefined`。这曾让 5 个面
+  （storage 配额/用量、三个 media_devices）变成 SKIP。
+- **webgl 必须用新 canvas。** 一个 canvas 只能持有一种 context；上面量
+  `measure_text` / `canvas_noise` 时已经取过 `2d`，再对同一个 canvas 取
+  `getContext('webgl')` 返回 `null`（实测 `{got2d:true, glSameCanvas:false,
+  glFreshCanvas:true}`）。这曾让全部 `webgl_*` 面变成 SKIP。
+- **数值型 key 不要加引号。** 内核用 `StringToInt` 解析，引号形式会被拒绝并
+  **静默回退到真实硬件值**。实测 `webgl_max_viewport_dims`：`'8192'`（字符串）
+  → `32767,32767`（真机），`8192`（数字）→ `8192,8192`。
+
+`Client/test-smoke-gate.js` 把这三条钉住了（要求实测面数 ≥27、SKIP ≤1），
+四个已修 bug 都做了变异验证。
 
 ### 4) 提交
 

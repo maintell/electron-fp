@@ -5,6 +5,12 @@
 // --isolation: two windows different configs (window-level isolation)
 'use strict';
 const { app, BrowserWindow } = require('electron');
+const http = require('http');
+
+// A real origin for the probe - see evalProbe() for why about:blank is wrong.
+// 127.0.0.1 is treated as potentially-trustworthy, so navigator.storage and
+// navigator.mediaDevices are defined there.
+const PROBE_ORIGIN_HOLDER = { url: null };
 
 const args = process.argv.slice(1);
 const NO_FP = args.includes('--no-fingerprint');
@@ -47,7 +53,12 @@ const EXPECTED = {
   webgl_max_texture_size: 8192,
   webgl_vendor: 'Google Inc. (NVIDIA)',
   webgl_renderer: 'ANGLE (NVIDIA GeForce RTX 4090 Direct3D11 vs_5_0 ps_5_0)',
-  webgl_max_viewport_dims: '8192',
+  // MUST be an unquoted NUMBER. The kernel parses this key with StringToInt,
+  // which rejects the quoted form and silently FALLS BACK TO THE NATIVE VALUE -
+  // measured: '8192' (string) -> 32767,32767 (real hardware), 8192 (number) ->
+  // 8192,8192. The comparison below accepts "v,v" or "v", so a fallback simply
+  // FAILs rather than passing; that is the point.
+  webgl_max_viewport_dims: 8192,
   media_devices_audio_input: 2,
   media_devices_video_input: 1,
   media_devices_audio_output: 1,
@@ -73,7 +84,14 @@ const PROBE = `(async () => {
     try{ r.permissions_status=(await navigator.permissions.query({name:'notifications'})).state; }catch(e){ r.permissions_status='unknown'; }
     try{ const s=await navigator.storage.estimate(); r.storage_usage_bytes=s.usage; r.storage_quota_bytes=s.quota; }catch(e){}
     r.prefers_color_scheme=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
-    const gl=c.getContext('webgl')||c.getContext('experimental-webgl');
+    // A canvas can hold only ONE context type. The canvas used above already
+    // has a 2d context (measure_text / canvas_noise), so getContext('webgl')
+    // on it returns NULL - verified: {got2d:true, glSameCanvas:false,
+    // glFreshCanvas:true}. That made every webgl_* surface report
+    // "SKIP (not probed)" rather than being measured, so the smoke test could
+    // not distinguish "WebGL spoofing is off" from "we never looked".
+    const glc=document.createElement('canvas');
+    const gl=glc.getContext('webgl')||glc.getContext('experimental-webgl');
     if(gl){
       r.webgl_max_texture_size=gl.getParameter(gl.MAX_TEXTURE_SIZE);
       try{ const d=gl.getParameter(gl.MAX_VIEWPORT_DIMS); r.webgl_max_viewport_dims=Array.from(d).join(','); }catch(e){}
@@ -97,7 +115,22 @@ const PROBE = `(async () => {
 })()`;
 
 async function evalProbe(win, timeoutMs=15000){
-  await win.loadURL('about:blank');
+  // Probe a REAL http origin, not about:blank.
+  //
+  // about:blank is an OPAQUE ORIGIN ("null"), and Chromium gates several
+  // fingerprint surfaces behind a secure/potentially-trustworthy context:
+  //   * navigator.storage           -> undefined (killed storage_quota_bytes,
+  //                                    storage_usage_bytes)
+  //   * navigator.mediaDevices      -> undefined (killed all three
+  //                                    media_devices_* counts)
+  // Measured: on about:blank both throw "Cannot read properties of undefined";
+  // on http://127.0.0.1 (which IS treated as trustworthy) both populate.
+  //
+  // The failure mode is silent: the probe's `try{}catch{}` swallows it, the key
+  // is absent, and the caller reports `SKIP ... (not probed)` - so 5 surfaces
+  // looked "not applicable" when they were simply unmeasurable. A smoke test
+  // that reports SKIP cannot tell "feature off" from "probe blind".
+  await win.loadURL(PROBE_ORIGIN_HOLDER.url);
   // wait a tick for renderer ready
   await new Promise(r=>setTimeout(r, 300));
   const p = win.webContents.executeJavaScript(PROBE, true);
@@ -194,6 +227,15 @@ async function runIsolation(){
 
 app.whenReady().then(async ()=>{
   let overall=true;
+  // Start the probe origin before any window loads it.
+  const srv = http.createServer((q, s) => {
+    s.writeHead(200, { 'Content-Type': 'text/html' });
+    s.end('<html><body>fp-smoke</body></html>');
+  });
+  await new Promise((res) => srv.listen(0, '127.0.0.1', res));
+  PROBE_ORIGIN_HOLDER.url =
+    'http://127.0.0.1:' + srv.address().port + '/';
+  dbg('probe origin:', PROBE_ORIGIN_HOLDER.url);
   try{
     if(ISOLATION){
       overall=await runIsolation() && overall;
@@ -211,6 +253,7 @@ app.whenReady().then(async ()=>{
   log('');
   log(`smoke result: ${pass} passed, ${fail} failed, ${skip} skipped`);
   // ensure windows closed before exit
+  try { srv.close(); } catch (e) {}
   setTimeout(()=>{ app.exit(fail>0?1:0); }, 300);
 });
 
