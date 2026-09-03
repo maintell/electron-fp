@@ -67,6 +67,11 @@ const PROBE = `(async () => {
     out.sampleRate = ac.sampleRate;
     out.maxChannels = ac.destination ? ac.destination.maxChannelCount : null;
     out.baseLatency = ac.baseLatency;
+    // outputLatency is the surface audio_output_latency_ms actually patches
+    // (AudioContext::outputLatency() in the blink patch). baseLatency is a
+    // different value and never moves under this key - measured 0.01 both with
+    // and without it.
+    out.outputLatency = ac.outputLatency;
   } catch (e) { out.audioErr = String(e); }
 
   out.hasGpu = !!navigator.gpu;
@@ -281,23 +286,39 @@ let URL_;
     // ---------- audio_* ------------------------------------------------------
     // audio_sample_rate / audio_max_channels / audio_output_latency_ms
     console.log('\n--- audio_* ---');
+    // audio_output_latency_ms is in MILLISECONDS and is read with FpConfigInt.
+    // The old value of 0.05 truncated to the integer 0, so the kernel's
+    // `if (fp_lat > 0)` guard fell through to the native latency and the key
+    // did nothing - the test had been asserting a no-op.
+    //
+    // It also controls AudioContext::outputLatency(), NOT baseLatency(). The
+    // old assertion watched baseLatency, which never moves (measured: 0.01
+    // with and without the key). Asserting the wrong surface made a working
+    // key look broken.
     const aud = await probeWith({
       audio_sample_rate: 44100,
       audio_max_channels: 6,
-      audio_output_latency_ms: 0.05,
+      audio_output_latency_ms: 50,
     });
     console.log('  got sampleRate=' + aud.sampleRate +
-      ' maxChannels=' + aud.maxChannels + ' baseLatency=' + aud.baseLatency);
+      ' maxChannels=' + aud.maxChannels + ' outputLatency=' + aud.outputLatency +
+      ' baseLatency=' + aud.baseLatency);
     check('audio_sample_rate applies the exact value',
       aud.sampleRate === 44100, String(aud.sampleRate));
     check('audio_max_channels applies the exact value',
       aud.maxChannels === 6, String(aud.maxChannels));
-    // baseLatency is derived from output latency; assert it MOVED rather than
-    // pinning an exact float, since the host value is a float division.
-    check('audio_output_latency_ms changes the observed baseLatency',
-      typeof aud.baseLatency === 'number' &&
-        Math.abs(aud.baseLatency - base.baseLatency) > 1e-9,
-      aud.baseLatency + ' vs baseline ' + base.baseLatency);
+    // 50 ms -> 0.05 s. Exact, because the kernel does fp_lat / 1000.0.
+    check('audio_output_latency_ms is applied as seconds on outputLatency',
+      typeof aud.outputLatency === 'number' &&
+        Math.abs(aud.outputLatency - 0.05) < 1e-9,
+      String(aud.outputLatency));
+    // A fractional millisecond cannot be honoured: FpConfigInt truncates it to
+    // 0 and the key is skipped, leaving the native latency. Pinned so the
+    // documented int-milliseconds contract is not silently broken later.
+    const frac = await probeWith({ audio_output_latency_ms: 0.05 });
+    check('audio_output_latency_ms: fractional ms is ignored (int key)',
+      frac.outputLatency === base.outputLatency,
+      String(frac.outputLatency) + ' vs baseline ' + String(base.outputLatency));
 
     srv.close();
     await closeAllWindows();
