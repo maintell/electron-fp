@@ -20,6 +20,9 @@
 
 const path = require('path');
 const { app, BrowserWindow, session } = require('electron');
+// The schema is the authoritative definition of "this surface is active"; the
+// Inspector reimplements fpCoverage() in C++, so this test compares them.
+const S = require('./fp-schema.js');
 
 // Letting the default window-all-closed handler quit races with the spare
 // renderer warmup and aborts with
@@ -384,6 +387,70 @@ async function run() {
       /nothing to check|not a clean bill of health/i.test(status), status.trim());
   }
   await winEmpty.destroy();
+
+  // ---- 6. C++ coverage counters must agree with the JS schema -------------
+  //
+  // The Inspector mirrors fpIsActive()/fpCoverage() from Client/fp-schema.js in
+  // C++, because the kernel side has no JS. The two diverged once: the C++ tested
+  // only emptiness, so a numeric key holding the STRING "0" counted as active
+  // there but inactive in fpIsActive() (which compares against the default).
+  // 25 of 63 keys are numeric, and any JSON round-trip quotes numbers.
+  //
+  // This pins parity using the string forms, which is where they disagreed.
+  const sessParity = session.fromPartition('persist:inspector-parity-test');
+  const parityCfg = {
+    hardware_concurrency: '0',   // numeric, string zero  -> NOT active
+    device_memory: '7',          // numeric, non-zero     -> active
+    screen_width: '1920',        // numeric, string       -> active
+    screen_avail_width: '0',     // numeric, string zero  -> NOT active
+    navigator_platform: 'Win32', // string, non-empty     -> active
+    tz_id: '',                   // string, empty         -> NOT active
+  };
+  sessParity.setFingerprintConfig(parityCfg);
+
+  const winParity = await openWindow(sessParity);
+  const rParity = await load(winParity, URL);
+  check('parity window loads', rParity.ok === true, rParity.error || rParity.finalUrl);
+  if (rParity.ok) {
+    const raw = await grabData(winParity);
+    let d = null;
+    try { d = JSON.parse(raw); } catch (e) { /* reported below */ }
+    check('parity run: data parses', d && typeof d === 'object');
+    if (d) {
+      const jsCov = S.fpCoverage(parityCfg);
+      const jsTotal = jsCov.reduce((n, g) => n + g.active, 0);
+      const cppTotal = d.summary.active;
+      check('coverage total matches fpCoverage() exactly',
+        cppTotal === jsTotal, 'C++=' + cppTotal + ' JS=' + jsTotal);
+
+      // Per-group, so a total that happens to match is not enough.
+      let groupsOk = true;
+      const mismatches = [];
+      for (const g of jsCov) {
+        const cpp = (d.coverage || []).find((x) => x.id === g.id);
+        if (!cpp || cpp.active !== g.active) {
+          groupsOk = false;
+          mismatches.push(g.id + ': C++=' + (cpp ? cpp.active : '?') + ' JS=' + g.active);
+        }
+      }
+      check('per-group coverage matches fpCoverage()', groupsOk,
+        mismatches.join('; ') || 'all 15 groups agree');
+
+      // The specific divergence: numeric keys holding "0" are NOT active.
+      const hw = (d.coverage || []).find((x) => x.id === 'hardware');
+      check('numeric key holding "0" is NOT counted as active',
+        hw && hw.active === 1, 'hardware active=' + (hw && hw.active) + ' expected 1');
+
+      // And a rule that consumes a numeric key must not evaluate it as a value
+      // when coverage considers it unset - otherwise the two disagree about
+      // whether the surface is even configured.
+      const c = d.consistency || {};
+      const dmFinding = (c.findings || []).find((f) => f.id === 'device-memory-plausible');
+      check('device_memory=7 is evaluated (power-of-two rule fires)',
+        !!dmFinding, JSON.stringify((c.findings || []).map((f) => f.id)));
+    }
+  }
+  await winParity.destroy();
 
   await win.destroy();
 

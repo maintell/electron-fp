@@ -6,6 +6,7 @@
 
 #include <array>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -164,15 +165,88 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
        "Navigator",
        {"navigator_platform", "ua_brands", "ua_platform", "ua_mobile",
          "navigator_vendor", "navigator_languages"}}});
-    return &*v;
-  }();
+     return &*v;
+   }();
+
+  // Numeric-kind keys, generated from Client/fp-schema.js (see the generator
+  // note in Client/test-inspector.js "schema parity" section).
+  //
+  // is_set() needs these because "is this key set" is defined against the key's
+  // DEFAULT, not against emptiness: 0 / "" are the schema's disabled
+  // placeholder values, NOT real values. A numeric key holding the string "0"
+  // is non-empty (an emptiness test says "set") but equals the default
+  // (fpIsActive() says "unset") - and a JSON round-trip produces exactly that.
+  //
+  // Every numeric default in the schema is 0 and every non-numeric default is
+  // "", so a per-key default TABLE is not needed - only the numeric/non-numeric
+  // distinction, which is what this list carries. Keeping it as names rather
+  // than a 63-entry table also means it fails loudly (test-schema parity check)
+  // instead of drifting silently.
+  static constexpr std::string_view kNumericKeyNames[] = {
+      "audio_output_latency_ms",
+      "audio_sample_rate",
+      "canvas_noise_seed",
+      "canvas_noise_strength",
+      "client_rects_seed",
+      "device_memory",
+      "hardware_concurrency",
+      "max_touch_points",
+      "media_devices_audio_input",
+      "media_devices_audio_output",
+      "media_devices_video_input",
+      "net_rtt_ms",
+      "perf_now_precision_ms",
+      "screen_avail_height",
+      "screen_avail_width",
+      "screen_color_depth",
+      "screen_height",
+      "screen_width",
+      "speech_voices_count",
+      "storage_quota_bytes",
+      "storage_usage_bytes",
+      "webgl_max_renderbuffer_size",
+      "webgl_max_texture_size",
+      "webgl_max_viewport_dims",
+  };
 
   // A key counts as "set" when it carries a non-default value. 0 / "" are the
-  // schema's disabled placeholder values, NOT real values - treating them as set would
-  // report every key as configured.
-  auto is_set = [](const base::Value* v) {
+  // Mirrors fpIsActive() in Client/fp-schema.js, which is the authoritative
+  // definition of "this surface is configured". The two MUST agree: the panel's
+  // coverage counts, the skip/pass decisions and the app's own coverage() all
+  // read the same config, and a disagreement silently misreports how much of a
+  // profile is active.
+  //
+  // The naive version tested only emptiness, which disagrees with fpIsActive for
+  // numeric keys holding the STRING "0" (or "0.0"): non-empty, so counted as
+  // set here - but equal to the default, so fpIsActive() counts it as unset.
+  // A JSON round-trip or an editor that quotes numbers produces exactly this,
+  // and 25 of the 63 keys are numeric, so it is not a corner case.
+  //
+  // Deciding correctly needs the key's DEFAULT, not just the value: the schema's
+  // disabled placeholder is 0 for numeric keys and "" for the rest. Every
+  // numeric default in the schema is 0 and every string default is "", so this
+  // only needs to know which keys are numeric.
+  static const base::NoDestructor<std::set<std::string_view>> kNumericKeys([] {
+    std::set<std::string_view> s;
+    for (std::string_view k : kNumericKeyNames) {
+      s.insert(k);
+    }
+    return s;
+  }());
+
+  auto is_set = [](const std::string& key, const base::Value* v) {
     if (!v) return false;
-    if (v->is_string()) return !v->GetString().empty();
+    const bool numeric = kNumericKeys->count(key) != 0;
+    if (v->is_string()) {
+      const std::string& s = v->GetString();
+      if (s.empty()) return false;
+      if (!numeric) return true;
+      // Numeric key held as text: compare against the default "0", accepting
+      // the "0" / "0.0" / " 0 " spellings a round-trip can produce.
+      double d = 0;
+      if (!base::StringToDouble(s, &d)) return true;  // non-numeric text = set
+      return d != 0.0;
+    }
     if (v->is_int()) return v->GetInt() != 0;
     if (v->is_double()) return v->GetDouble() != 0.0;
     if (v->is_bool()) return v->GetBool();
@@ -236,7 +310,7 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
         continue;  // unused tail slots in the fixed-size array
       }
       ++total;
-      if (is_set(config.Find(std::string_view(key)))) {
+      if (is_set(std::string(key), config.Find(std::string_view(key)))) {
         ++active;
       }
     }
@@ -504,7 +578,10 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
     // 0/"" so an untouched key means "do not spoof". Warning on it would flag
     // every empty profile, so use the same is_set() notion as the coverage
     // counters above.
-    if (dm && !dm->empty() && *dm != "0") {
+    // is_set(), not a bare `*dm != "0"`: it applies the same default-aware rule
+    // as the coverage counters, so a key reported as inactive is never also
+    // evaluated as a real value.
+    if (is_set("device_memory", config.Find("device_memory"))) {
       ++rules_evaluated;
       // base::StringToDouble, not std::stod: Chromium builds with exceptions
       // disabled, so a try/catch here does not even compile.
@@ -533,7 +610,8 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
   {
     auto w = cfg_str("screen_width");
     auto h = cfg_str("screen_height");
-    if (w && !w->empty() && *w != "0" && h && !h->empty() && *h != "0") {
+    if (is_set("screen_width", config.Find("screen_width")) &&
+        is_set("screen_height", config.Find("screen_height"))) {
       ++rules_evaluated;
       double dw = 0, dh = 0;
       if (!base::StringToDouble(*w, &dw) || !base::StringToDouble(*h, &dh)) {
@@ -586,7 +664,7 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
           if (!key || std::string_view(key) == "webrtc_ip") {
             continue;
           }
-          if (is_set(config.Find(std::string_view(key)))) {
+          if (is_set(std::string(key), config.Find(std::string_view(key)))) {
             ++others;
           }
         }
