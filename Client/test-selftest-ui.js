@@ -68,8 +68,27 @@ const PRELOAD = fs.readFileSync(path.join(CLIENT, 'preload.js'), 'utf8');
   ipcMain.handle('tab:list', async () => [TAB]);
   ipcMain.removeHandler('tab:get-active');
   ipcMain.handle('tab:get-active', async () => TAB.id);
+  // fpSchema is what the grouping reads. tz_id and webgl_max_viewport_dims sit
+  // in DIFFERENT groups, so the grouping assertion is meaningful. 'boom_key' is
+  // unknown to the schema and must fall into "Other" rather than vanishing.
+  const FAKE_SCHEMA = {
+    version: 1,
+    keyCount: 3,
+    keys: {
+      tz_id: { group: 'locale', def: '' },
+      webgl_max_viewport_dims: { group: 'webgl', def: '' },
+      battery_level: { group: 'battery', def: '' },
+    },
+    groups: [
+      { id: 'webgl', label: 'WebGL' },
+      { id: 'locale', label: 'Locale' },
+      { id: 'battery', label: 'Battery' },
+    ],
+    defaults: {},
+  };
+
   for (const [ch, val] of [
-    ['fp:schema', { version: 1, keyCount: 63, keys: {}, groups: [], defaults: {} }],
+    ['fp:schema', FAKE_SCHEMA],
     ['ua:presets', []],
     ['tab:get-ua', ''],
     ['profile:list', []],
@@ -99,6 +118,8 @@ const PRELOAD = fs.readFileSync(path.join(CLIENT, 'preload.js'), 'utf8');
   // Replacing ipcRenderer.invoke in the preload's isolated world is also not
   // reachable, so instead intercept in the MAIN process: register the stub
   // result for 'selftest:run' before the page can call it.
+  // tz_id and webgl_max_viewport_dims are in DIFFERENT schema groups, so the
+  // grouping assertion below is meaningful (two groups must render, not one).
   const FAKE = {
     rows: [
       { key: 'tz_id', expected: 'America/New_York', got: 'America/New_York', verdict: 'pass', reason: '' },
@@ -162,9 +183,45 @@ const PRELOAD = fs.readFileSync(path.join(CLIENT, 'preload.js'), 'utf8');
     r.summary);
   check('fail row carries its explanation', r.hasHint && /hardware/.test(r.hintText),
     r.hintText.slice(0, 70));
-  check('rows are ordered fail/error before pass',
-    r.classes[0].includes('fp-st-fail') && r.classes[1].includes('fp-st-error'),
+  // Within a row's own group the rows are not what this asserts any more:
+  // grouping moved the primary ordering to the GROUP level, so the flat row
+  // order is now "within group". The group-level ordering is asserted below.
+  check('rows carry a verdict class',
+    r.classes.every((c) => /fp-st-(pass|fail|skip|error)/.test(c)),
     r.classes.join(' | '));
+
+  // Grouping: the spec calls for a table grouped by the schema's functional
+  // groups, so webgl_* rows read alongside other webgl_* rows.
+  const grp = await win.webContents.executeJavaScript(`JSON.stringify({
+    groups: Array.from(document.querySelectorAll('.fp-st-group')).map(function(g){
+      return {
+        head: (g.querySelector('.fp-st-group-head')||{}).textContent
+          .replace(/\\s+/g,' ').trim(),
+        rows: g.querySelectorAll('.fp-st-row').length
+      };
+    })
+  })`, true);
+  const g = JSON.parse(grp);
+  // Visible rows are tz_id (Locale, pass), webgl_max_viewport_dims (WebGL,
+  // fail), boom_key (unknown -> Other, error). Three distinct groups.
+  check('rows are grouped by schema group', g.groups.length === 3,
+    g.groups.map((x) => x.head).join(' || '));
+  // Severity order is fail(0) < error(1) < pass(2), so the WebGL group (fail)
+  // must come before Other (error) and Locale (pass).
+  check('the failing group sorts first',
+    /fail/i.test(g.groups[0].head) && /WebGL/i.test(g.groups[0].head),
+    g.groups.map((x) => x.head).join(' || '));
+  check('groups sort fail before error before pass',
+    /WebGL/i.test(g.groups[0].head) &&
+    /Other/i.test(g.groups[1].head) &&
+    /Locale/i.test(g.groups[2].head),
+    g.groups.map((x) => x.head).join(' || '));
+  check('a key unknown to the schema lands in a group, not nowhere',
+    g.groups.some((x) => /Other/i.test(x.head)),
+    g.groups.map((x) => x.head).join(' || '));
+  check('every visible row sits inside a group',
+    g.groups.reduce((n, x) => n + x.rows, 0) === 3,
+    g.groups.reduce((n, x) => n + x.rows, 0) + ' rows in groups');
 
   // 5) the "show skipped" toggle must reveal the hidden skip row
   await win.webContents.executeJavaScript(`

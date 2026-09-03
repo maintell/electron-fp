@@ -634,13 +634,39 @@ function renderSelfTest(result) {
     return;
   }
 
-  // Failures and errors first: the point of the pane is what is wrong.
+  // Group by the schema's functional groups, same as the Config pane, so a
+  // failure reads in context (a webgl_* row sits with the other webgl_* rows)
+  // instead of in an undifferentiated alphabetical list.
+  //
+  // Within a group, failures first: the pane exists to surface what is wrong.
   const order = { fail: 0, error: 1, pass: 2, skip: 3 };
-  const sorted = [...visible].sort((a, b) =>
-    (order[a.verdict] ?? 9) - (order[b.verdict] ?? 9) ||
-    a.key.localeCompare(b.key));
+  // Same shape the Config pane uses: schema.keys[k].group === group.id.
+  const groupsById = new Map();
+  for (const g of ((fpSchema && fpSchema.groups) || [])) {
+    groupsById.set(g.id, g.label || g.id);
+  }
+  const buckets = new Map();
+  for (const r of visible) {
+    const meta = fpSchema && fpSchema.keys && fpSchema.keys[r.key];
+    const gid = (meta && meta.group && groupsById.has(meta.group))
+      ? meta.group : 'other';
+    if (!buckets.has(gid)) {
+      buckets.set(gid, { label: groupsById.get(gid) || 'Other', rows: [] });
+    }
+    buckets.get(gid).rows.push(r);
+  }
+  for (const b of buckets.values()) {
+    b.rows.sort((a, b2) =>
+      (order[a.verdict] ?? 9) - (order[b2.verdict] ?? 9) ||
+      a.key.localeCompare(b2.key));
+  }
+  const order2 = [...buckets.values()].sort((a, b) => {
+    const aw = Math.min(...a.rows.map((r) => order[r.verdict] ?? 9));
+    const bw = Math.min(...b.rows.map((r) => order[r.verdict] ?? 9));
+    return aw - bw || a.label.localeCompare(b.label);
+  });
 
-  const html = sorted.map((r) => {
+  const renderRow = (r) => {
     const badge = '<span class="fp-badge fp-badge-' + r.verdict + '">' +
       r.verdict + '</span>';
     const detail = r.verdict === 'skip'
@@ -655,6 +681,17 @@ function renderSelfTest(result) {
       '<div class="fp-st-line">' + badge +
       '<span class="fp-st-key">' + escapeHtml(r.key) + '</span>' +
       detail + '</div>' + hint + '</div>';
+  };
+
+  const html = order2.map((b) => {
+    const worst = Math.min(...b.rows.map((r) => order[r.verdict] ?? 9));
+    const worstName = Object.keys(order).find((k) => order[k] === worst) || 'skip';
+    return '<div class="fp-st-group">' +
+      '<div class="fp-st-group-head">' +
+      '<span class="fp-badge fp-badge-' + worstName + '">' + worstName + '</span>' +
+      escapeHtml(b.label) +
+      '<span class="fp-st-group-count">' + b.rows.length + '</span>' +
+      '</div>' + b.rows.map(renderRow).join('') + '</div>';
   }).join('');
 
   $fpSelfTestResults.innerHTML = html;

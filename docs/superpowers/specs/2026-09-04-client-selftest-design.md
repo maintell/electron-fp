@@ -125,15 +125,36 @@ ipcMain.handle('selftest:run', async (e, tabId) => { ... });
 
 ## 测试
 
-新增 `Client/test-selftest.js`，用真实 BrowserWindow 验证：
-1. `fp-probe.js` 的 `compare()` 对全部 28 个字段行为正确（含 3 个特殊格式）
-2. `smoke.js` 改为 require 模块后**行为不变**（跑 smoke.js，断言仍是 27/0/1）
-3. 自检对「配置 = 实测」判 pass
-4. 自检对「配置了但回退到真机值」判 fail（用 `webgl_max_viewport_dims: '8192'`
-   字符串这个已知陷阱构造，它会静默回退到 32767）
-5. 未配置的 key 判 skip 而不是 fail
+新增两个文件：
 
-第 4 条是核心：它证明自检真能抓到「配了但没生效」，而不是一个只会报全绿的摆设。
+**`Client/test-selftest.js`** — 用真实 BrowserWindow 验证判定逻辑：
+1. 探针本身可用（返回对象、不抛错、能读到 storage / webgl 表面，证明跑在真实
+   origin 而非 opaque origin）
+2. 未配置任何 key 时**不产生任何 fail 行**
+3. 正确生效的 key 判 pass
+4. **核心**：配置了但回退到真机值必须判 fail。用 `webgl_max_viewport_dims: '8192'`
+   （字符串）这个实测过的陷阱构造，它会静默回退到 32767。并配一条对照：同样的
+   key 传数字 8192 必须判 pass —— 否则「陷阱」断言可能只是因为这个 key 根本不工作
+   才通过的
+5. `audio_data_strength` 传数字落在 0.0005 默认值上；传字符串则不同
+6. 判定值域只有 pass/fail/skip/error
+
+第 4 条的对照是关键：没有它，陷阱断言可能因为「该 key 永远失败」而通过。
+
+**`Client/test-selftest-ui.js`** — 验证 DOM / IPC 契约，这是单元测试看不到的部分：
+- 8 个 DOM id 在 `index.html` 中存在且被 `app.js` 引用（改名会被立刻抓住）
+- 点击标签页真的切换面板并移动高亮
+- 点 Run 真的调到 IPC bridge
+- skip 行默认隐藏、勾选后显示
+- 结果按 schema 分组，且 **fail 组排在 error 组之前、error 组排在 pass 组之前**
+- 不在 schema 里的 key 落在 Other 组而不是消失
+
+分组排序那条断言抓到过一个真实 typo：组内排序的比较函数误写成
+`order[b.verdict]`（bucket 对象）而非 `order[r.verdict]`（行对象），导致所有分组
+权重都取到默认值 9，排序退化成纯字母序。已修复并突变验证。
+
+`smoke.js` 改为 require 模块后行为不变这一条，由既有的
+`Client/test-smoke-gate.js` 覆盖（它断言 smoke.js 的 pass / skip 数量）。
 
 ## 文件清单
 
