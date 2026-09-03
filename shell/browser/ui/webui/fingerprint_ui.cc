@@ -428,22 +428,47 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
         ua.find("iPad") != std::string::npos ||
         ua.find("Macintosh") != std::string::npos ||
         ua.find("Mac OS X") != std::string::npos) return "Apple Computer, Inc.";
-    if (ua.find("Firefox") != std::string::npos &&
-        ua.find("Chrome") == std::string::npos &&
-        ua.find("Chromium") == std::string::npos) return "";
-    if (ua.find("Edg/") != std::string::npos) return "Google Inc.";
-    if (ua.find("CriOS") != std::string::npos ||
-        ua.find("Chrome") != std::string::npos) return "Google Inc.";
+    // Exactly fpVendorForUserAgent(): Apple first, then anything on
+    // Windows/Android/X11/Linux reports Google. There is deliberately NO
+    // per-browser case - an earlier port invented a Firefox/Edg/CriOS special
+    // case that is not in the JS, and it made Firefox UAs return "" so the
+    // vendor rule SKIPPED instead of FAILED. A rule that skips looks clean.
+    if (ua.find("Windows") != std::string::npos ||
+        ua.find("Android") != std::string::npos ||
+        ua.find("X11") != std::string::npos ||
+        ua.find("Linux") != std::string::npos) return "Google Inc.";
     return "";
   };
 
   // fpUaMetadataForUserAgent: only the `mobile` and `platform` fields are
   // needed by these rules.
-  auto ua_is_mobile = [](const std::string& ua) -> bool {
-    return ua.find("Android") != std::string::npos ||
-           ua.find("iPhone") != std::string::npos ||
-           ua.find("iPad") != std::string::npos ||
-           ua.find("Mobile") != std::string::npos;
+  // fpUaMetadataForUserAgent() returns NULL for a UA it cannot classify
+  // (e.g. "curl/8.4.0"), and both rules that read `mobile` guard on that:
+  // `if (!meta || typeof meta.mobile !== 'boolean') return { skip: ... }`.
+  //
+  // Returning a plain bool loses that third state and turns "cannot classify"
+  // into "definitely desktop" - so rule 5 would EVALUATE and could emit a
+  // "desktop UA but max_touch_points is set" warning for a UA that JS skips
+  // entirely. The tri-state is the point: unclassifiable must stay a skip.
+  auto ua_mobile_state = [](const std::string& ua) -> int {
+    if (ua.empty()) return -1;  // no UA at all
+    // Mirrors the branches of fpUaMetadataForUserAgent(): it returns null when
+    // none of Firefox/Edg/CriOS|Chrome/Safari/Android/Windows matched.
+    const bool known =
+        ua.find("Firefox") != std::string::npos ||
+        ua.find("Edg/") != std::string::npos ||
+        ua.find("CriOS") != std::string::npos ||
+        ua.find("Chrome") != std::string::npos ||
+        ua.find("Safari") != std::string::npos ||
+        ua.find("Android") != std::string::npos ||
+        ua.find("Windows") != std::string::npos;
+    if (!known) return -1;  // unclassifiable -> rules must skip
+    return (ua.find("Android") != std::string::npos ||
+            ua.find("iPhone") != std::string::npos ||
+            ua.find("iPad") != std::string::npos ||
+            ua.find("Mobile") != std::string::npos)
+               ? 1
+               : 0;
   };
   auto ua_ch_platform = [](const std::string& ua) -> std::string {
     if (ua.empty()) return "";
@@ -514,22 +539,27 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
   // --- rule 3: ua-mobile-matches-ua (error) --------------------------------
   {
     auto mobile = cfg_str("ua_mobile");
-    if (!user_agent.empty() && mobile && !mobile->empty()) {
+    // Mirrors the JS guard order exactly: missing inputs first, THEN
+    // "could not derive mobility from this UA".
+    const int mobile_state = ua_mobile_state(user_agent);
+    if (user_agent.empty() || !mobile || mobile->empty()) {
+      skip("ua-mobile-matches-ua", "needs both user_agent and ua_mobile");
+    } else if (mobile_state < 0) {
+      skip("ua-mobile-matches-ua", "could not derive mobility from this UA");
+    } else {
       ++rules_evaluated;
       // ua_mobile is stored as the STRING "true"/"false", but the editor can
       // hand us a boolean or 0/1. Treating the string "false" as truthy would
       // make every desktop profile look mobile.
       const std::string m = norm(*mobile);
       const bool got = (m == "true" || m == "1");
-      const bool want = ua_is_mobile(user_agent);
+      const bool want = (mobile_state == 1);
       if (got != want) {
         fail("ua-mobile-matches-ua", kError,
              "UA implies mobile=" + std::string(want ? "true" : "false") +
                  " but ua_mobile=" + *mobile,
-             "ua_mobile (Client Hint) agrees with the UA being a mobile device");
+              "ua_mobile (Client Hint) agrees with the UA being a mobile device");
       }
-    } else {
-      skip("ua-mobile-matches-ua", "needs both user_agent and ua_mobile");
     }
   }
 
@@ -555,14 +585,23 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
 
   // --- rule 5: mobile-hardware-consistent (warn) ---------------------------
   {
-    if (!user_agent.empty()) {
+    const int mobile_state = ua_mobile_state(user_agent);
+    if (user_agent.empty()) {
+      skip("mobile-hardware-consistent", "needs a user_agent");
+    } else if (mobile_state < 0) {
+      // JS skips when meta is null. Evaluating here would treat an
+      // unclassifiable UA as desktop and could warn "desktop UA but
+      // max_touch_points is set" for a UA the JS never even considers.
+      skip("mobile-hardware-consistent",
+           "could not derive mobility from this UA");
+    } else {
       ++rules_evaluated;
       auto touch = cfg_str("max_touch_points");
       double touch_val = 0;
       const bool touch_parsed =
           touch && !touch->empty() && base::StringToDouble(*touch, &touch_val);
       const bool has_touch = touch_parsed && touch_val != 0.0;
-      const bool want_mobile = ua_is_mobile(user_agent);
+      const bool want_mobile = (mobile_state == 1);
       if (want_mobile && !has_touch) {
         fail("mobile-hardware-consistent", kWarning,
              "mobile UA but max_touch_points is not set (real phones report "
@@ -571,12 +610,10 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
              "one");
       } else if (!want_mobile && has_touch) {
         fail("mobile-hardware-consistent", kWarning,
-             "desktop UA but max_touch_points is set - a mobile-emulation tell",
-             "touch points are set for a mobile UA, and absent for a desktop "
-             "one");
+              "desktop UA but max_touch_points is set - a mobile-emulation tell",
+              "touch points are set for a mobile UA, and absent for a desktop "
+              "one");
       }
-    } else {
-      skip("mobile-hardware-consistent", "needs a user_agent");
     }
   }
 
