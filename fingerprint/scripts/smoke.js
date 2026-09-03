@@ -167,8 +167,25 @@ app.whenReady().then(async ()=>{
   log(`smoke result: ${pass} passed, ${fail} failed, ${skip} skipped`);
   // ensure windows closed before exit
   try { srv.close(); } catch (e) {}
-  setTimeout(()=>{ app.exit(fail>0?1:0); }, 300);
+
+  // The exit code must survive the last window closing.
+  //
+  // runSingleWindow() calls win.close(). Electron's default window-all-closed
+  // handler then quits the process with code 0, so this line's app.exit() never
+  // ran and a FAILING smoke exited 0 - measured: "26 passed, 1 failed" printed,
+  // process exit code 0. A gate that trusts the exit code waved it through.
+  //
+  // process.exitCode was tried first and is NOT enough: Electron's quit path
+  // overrides it. The reliable fix is to suppress the default handler (below)
+  // so the only exit is the explicit one here.
+  finalCode = fail > 0 ? 1 : 0;
+  setTimeout(() => { app.exit(finalCode); }, 300);
 });
+
+// Stop Electron quitting on window-all-closed, so the exit code above is the
+// one that actually takes effect. See the comment above.
+let finalCode = 0;
+app.on('window-all-closed', (e) => { e.preventDefault(); });
 
 // graceful timeout guard
 setTimeout(()=>{ console.error('smoke timeout 30s'); try{ app.exit(2);}catch(e){ process.exit(2);} }, 30000);
