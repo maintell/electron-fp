@@ -196,4 +196,111 @@ function compare(key, expected, got) {
   return String(got) === String(expected);
 }
 
-module.exports = { PROBE, EXPECTED, PROBE_FIELDS, compare };
+// ---------------------------------------------------------------------------
+// verdicts(config, observed, options) -> { rows, summary }
+//
+// The self-test's decision table, in ONE place.
+//
+// This used to live twice: once inside main.js's `selftest:run` handler and
+// once copy-pasted into Client/test-selftest.js. Two copies of a verdict rule
+// are two verdict rules, and they had already drifted - the handler carried the
+// expected/got strings and the explainMismatch() hints, the test's copy carried
+// neither. A test that asserts against its own re-implementation can stay green
+// while the shipped behaviour is wrong, which is the worst possible outcome for
+// a test.
+//
+// The comparison is against the config the CALLER supplies, not against
+// EXPECTED. smoke.js asks "did MY chosen values apply?"; the panel asks "did
+// YOUR chosen values apply?". Same logic, different reference set.
+//
+// Four verdicts, and only two are failures:
+//   pass  - configured, and the surface reports exactly what was configured
+//   fail  - configured, but the surface reports something else. This is the
+//           case the panel exists to catch: the knob looked set, the UI said
+//           "active", and the renderer quietly used something else - most often
+//           the real hardware value.
+//   skip  - not configured (nothing was asked for) or the probe cannot see it
+//   error - compare() itself threw
+//
+// An inactive key is skip, NOT fail: judging only what the user actually asked
+// for, otherwise a default profile shows a wall of red.
+//
+// options.isActive  - (key, value) => boolean, defaults to a truthiness test.
+//                     Pass fpIsActive to match the kernel's own rule.
+// options.explain   - (key, expected, got) => string, attached to fail/error.
+// ---------------------------------------------------------------------------
+// String() that cannot throw. Used for every value the verdict rows report.
+//
+// A value whose toString() throws is unusual but not exotic, and it matters
+// exactly where it is least likely to be noticed: if reporting a failure
+// throws, the failure is never reported and the whole pass rejects.
+function SAFE(v) {
+  try {
+    const s = String(v);
+    return s;
+  } catch (_) {
+    return '<unstringifiable: ' + Object.prototype.toString.call(v) + '>';
+  }
+}
+
+function verdicts(config, observed, options) {
+  const opts = options || {};
+  const isActive = opts.isActive || ((k, v) => v !== undefined && v !== null && v !== '');
+  const explain = opts.explain || (() => '');
+  const cfg = config || {};
+  const seen = observed || {};
+
+  const rows = [];
+  for (const key of PROBE_FIELDS) {
+    const got = seen[key];
+
+    // Not probed on this page -> honest skip, never a pass. A probe that never
+    // looked cannot have found anything wrong.
+    if (got === undefined || got === null) {
+      rows.push({
+        key, expected: null, got: null, verdict: 'skip',
+        reason: 'probe could not read this surface here',
+      });
+      continue;
+    }
+
+    // Not configured -> nothing was asked for, so nothing can be wrong.
+    if (!isActive(key, cfg[key])) {
+      rows.push({
+        key, expected: null, got: SAFE(got), verdict: 'skip',
+        reason: 'not configured',
+      });
+      continue;
+    }
+
+    const expected = cfg[key];
+    let ok = false;
+    try {
+      ok = compare(key, expected, got);
+    } catch (err) {
+      // SAFE() guards the error handler itself. The obvious `String(got)` is a
+      // trap when `got` is the very thing that could not be stringified - the
+      // catch block then throws while handling the error, the row is never
+      // pushed, and the whole verdict pass rejects instead of reporting one
+      // broken surface. Caught by a poisoned-toString probe.
+      rows.push({
+        key, expected: SAFE(expected), got: SAFE(got), verdict: 'error',
+        reason: 'compare threw: ' + (err && err.message),
+      });
+      continue;
+    }
+    rows.push({
+      key,
+      expected: SAFE(expected),
+      got: SAFE(got),
+      verdict: ok ? 'pass' : 'fail',
+      reason: ok ? '' : SAFE(explain(key, expected, got)),
+    });
+  }
+
+  const summary = { pass: 0, fail: 0, skip: 0, error: 0 };
+  for (const r of rows) summary[r.verdict] = (summary[r.verdict] || 0) + 1;
+  return { rows, summary };
+}
+
+module.exports = { PROBE, EXPECTED, PROBE_FIELDS, compare, verdicts };

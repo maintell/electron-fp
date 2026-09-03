@@ -6,7 +6,7 @@ const fs = require('fs');
 const http = require('http');
 // Shared probe: the SAME PROBE / compare() that fingerprint/scripts/smoke.js
 // uses. One probe, two callers - see Client/fp-probe.js.
-const { PROBE, PROBE_FIELDS, compare } = require('./fp-probe');
+const { PROBE, compare, verdicts } = require('./fp-probe');
 const { fpDefaultConfig, fpNormalizeConfig, fpCoverage, fpKeysInGroup, fpIsActive,
         FP_KEYS, FP_KEY_NAMES, FP_SCHEMA_VERSION, FP_GROUPS, FP_GROUP_IDS,
 FP_UA_PRESETS, fpRandomUserAgent, fpNormalizeUserAgent,
@@ -599,42 +599,15 @@ function setupIPC() {
       return { error: 'probe threw: ' + observed._probe_error, rows: [] };
     }
 
-    const rows = [];
-    for (const key of PROBE_FIELDS) {
-      const got = observed[key];
+    // The decision table lives in fp-probe.js, shared with the tests. It used
+    // to be duplicated here and in test-selftest.js, and the copies had already
+    // drifted (this one carried the explainMismatch hints, the test's did not),
+    // so a test could stay green against behaviour that was not shipping.
+    const { rows, summary } = verdicts(cfg, observed, {
+      isActive: fpIsActive,
+      explain: explainMismatch,
+    });
 
-      // Not probed on this page -> honest skip, never a pass.
-      if (got === undefined || got === null) {
-        rows.push({ key, expected: null, got: null, verdict: 'skip',
-          reason: 'probe could not read this surface here' });
-        continue;
-      }
-
-      // Not configured -> nothing was asked for, so nothing can be wrong.
-      if (!fpIsActive(key, cfg[key])) {
-        rows.push({ key, expected: null, got: String(got), verdict: 'skip',
-          reason: 'not configured' });
-        continue;
-      }
-
-      const expected = cfg[key];
-      let ok = false;
-      try { ok = compare(key, expected, got); } catch (err) {
-        rows.push({ key, expected: String(expected), got: String(got),
-          verdict: 'error', reason: 'compare threw: ' + err.message });
-        continue;
-      }
-      rows.push({
-        key,
-        expected: String(expected),
-        got: String(got),
-        verdict: ok ? 'pass' : 'fail',
-        reason: ok ? '' : explainMismatch(key, expected, got),
-      });
-    }
-
-    const summary = { pass: 0, fail: 0, skip: 0, error: 0 };
-    for (const r of rows) summary[r.verdict] = (summary[r.verdict] || 0) + 1;
     return { rows, summary, url: needsTempOrigin ? '(temporary probe origin)' : priorUrl };
   });
 }

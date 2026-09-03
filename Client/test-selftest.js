@@ -23,7 +23,7 @@
 
 const { app, BrowserWindow, session } = require('electron');
 const http = require('http');
-const { PROBE, PROBE_FIELDS, compare } = require('./fp-probe');
+const { PROBE, verdicts } = require('./fp-probe');
 const { fpIsActive } = require('./fp-schema');
 
 let pass = 0, fail = 0, skip = 0;
@@ -49,29 +49,16 @@ const srv = http.createServer((q, s) => {
 });
 let URL_;
 
-// Mirror of main.js's selftest:run verdict logic, so what is tested here IS
-// what the panel reports. Kept structurally identical on purpose.
-function verdicts(cfg, observed) {
-  const rows = [];
-  for (const key of PROBE_FIELDS) {
-    const got = observed[key];
-    if (got === undefined || got === null) {
-      rows.push({ key, verdict: 'skip', reason: 'not probed' });
-      continue;
-    }
-    if (!fpIsActive(key, cfg[key])) {
-      rows.push({ key, verdict: 'skip', reason: 'not configured' });
-      continue;
-    }
-    let ok = false;
-    try { ok = compare(key, cfg[key], got); } catch (e) {
-      rows.push({ key, verdict: 'error', reason: 'compare threw' });
-      continue;
-    }
-    rows.push({ key, verdict: ok ? 'pass' : 'fail', expected: cfg[key], got });
-  }
-  return rows;
-}
+// Thin wrapper around the SHARED verdict logic in fp-probe.js - the same
+// function main.js's selftest:run handler calls.
+//
+// This file used to carry its own copy of the decision table, which meant it
+// was asserting against a re-implementation rather than the shipped behaviour.
+// The copies had already drifted: main.js's version produced expected/got
+// strings and explainMismatch() hints, the duplicate here produced neither. A
+// test can stay green on its own copy while the panel does something else.
+const runVerdicts = (cfg, observed) =>
+  verdicts(cfg, observed, { isActive: fpIsActive });
 
 async function probeWith(cfg) {
   const sess = session.fromPartition('st-' + Math.random().toString(36).slice(2));
@@ -148,7 +135,7 @@ async function audioNoise(strength) {
       'webgl_max_texture_size=' + base.observed.webgl_max_texture_size);
 
     // ---- 2) an unconfigured profile must produce NO failures ------------
-    const emptyRows = verdicts({}, base.observed);
+    const emptyRows = runVerdicts({}, base.observed).rows;
     const emptyFail = emptyRows.filter((r) => r.verdict === 'fail');
     check('unconfigured config yields zero FAIL rows',
       emptyFail.length === 0,
@@ -156,7 +143,7 @@ async function audioNoise(strength) {
 
     // ---- 3) a correctly-configured key must PASS ------------------------
     const good = await probeWith({ tz_id: 'America/New_York' });
-    const goodRows = verdicts({ tz_id: 'America/New_York' }, good.observed);
+    const goodRows = runVerdicts({ tz_id: 'America/New_York' }, good.observed).rows;
     const tzRow = goodRows.find((r) => r.key === 'tz_id');
     check('correctly applied key verdicts pass',
       tzRow && tzRow.verdict === 'pass',
@@ -167,7 +154,7 @@ async function audioNoise(strength) {
     // '8192' as a string is rejected by the kernel's StringToInt, so the
     // surface reports the real hardware value instead of 8192,8192.
     const trapA = await probeWith({ webgl_max_viewport_dims: '8192' });
-    const trapARows = verdicts({ webgl_max_viewport_dims: '8192' }, trapA.observed);
+    const trapARows = runVerdicts({ webgl_max_viewport_dims: '8192' }, trapA.observed).rows;
     const rowA = trapARows.find((r) => r.key === 'webgl_max_viewport_dims');
     check('TRAP A: webgl_max_viewport_dims="8192" (quoted) verdicts FAIL',
       rowA && rowA.verdict === 'fail',
@@ -179,7 +166,7 @@ async function audioNoise(strength) {
     // Control: the SAME key as an unquoted number must PASS. Without this the
     // trap assertion could pass simply because the key never works.
     const ctrlA = await probeWith({ webgl_max_viewport_dims: 8192 });
-    const ctrlARows = verdicts({ webgl_max_viewport_dims: 8192 }, ctrlA.observed);
+    const ctrlARows = runVerdicts({ webgl_max_viewport_dims: 8192 }, ctrlA.observed).rows;
     const cRowA = ctrlARows.find((r) => r.key === 'webgl_max_viewport_dims');
     check('TRAP A control: webgl_max_viewport_dims=8192 (number) verdicts PASS',
       cRowA && cRowA.verdict === 'pass',
@@ -214,6 +201,36 @@ async function audioNoise(strength) {
     check('verdicts only use pass/fail/skip/error',
       [...kinds].every((k) => ['pass', 'fail', 'skip', 'error'].includes(k)),
       [...kinds].join(','));
+
+    // ---- 7) the error branch must not throw while reporting --------------
+    //
+    // A value whose toString() throws is the one input that reaches the
+    // `error` verdict. The obvious handler body, `String(got)`, throws AGAIN
+    // on exactly that input - the catch block dies while handling the error,
+    // the row is never pushed and the whole pass rejects instead of reporting
+    // one broken surface. Found by probing the branch directly; it had never
+    // been exercised by any generated input.
+    const poisoned = {};
+    Object.defineProperty(poisoned, 'toString', {
+      value: () => { throw new Error('poisoned toString'); },
+      enumerable: false,
+    });
+    let errRes = null, errThrew = null;
+    try {
+      errRes = runVerdicts({ tz_id: 'America/New_York' }, { tz_id: poisoned });
+    } catch (e) { errThrew = e; }
+    check('a throwing compare is REPORTED, not re-thrown',
+      errThrew === null, errThrew ? 're-threw: ' + errThrew.message : 'handled');
+    const errRow = errRes && errRes.rows.find((r) => r.key === 'tz_id');
+    check('a throwing compare yields verdict=error',
+      errRow && errRow.verdict === 'error',
+      errRow ? errRow.verdict : 'no row');
+    check('the error reason names the underlying failure',
+      errRow && /poisoned toString/.test(errRow.reason || ''),
+      errRow ? errRow.reason : '');
+    check('error is counted, and not as pass or fail',
+      errRes && errRes.summary.error === 1 && errRes.summary.pass === 0 &&
+      errRes.summary.fail === 0, errRes ? JSON.stringify(errRes.summary) : '');
 
     srv.close();
     for (const w of [...liveWindows]) {
