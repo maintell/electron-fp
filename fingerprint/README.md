@@ -307,6 +307,13 @@ Node 用协议默认值补齐了 4 项，且会**丢弃未知（GREASE）id**—
 
 ### 为什么不能套用现有机制
 
+> **2026-09-02 更正：本节描述的是 `40-net-tls.patch` 之前的状态，已被推翻。**
+> 下方"TLS 跨标签页共享、需解决 per-tab 隔离"曾是正确的，但 `40-net-tls.patch`
+> 已经解决了它（见上节：per-URLRequestContext 的 `SSLClientContext` +
+> `GetSSLContextForGrease()` 按 GREASE 组合选 CTX）。**这里保留原文，是因为它
+> 解释了一个真实的历史约束，以及为什么不能走 `fp_config_helpers.h` 那条路**
+> ——但"网络层指纹还没做"这个结论已失效，勿据此决策。
+
 配置优先级见 `fp_config_helpers.h`：
 
 ```
@@ -317,6 +324,12 @@ Node 用协议默认值补齐了 4 项，且会**丢弃未知（GREASE）id**—
 ```
 
 第 1 条是 **per-renderer** 的，这是"每个标签页独立指纹"的实现基础。而 TLS 指纹产生于网络栈，**跨标签页共享**。因此网络层指纹不只是"还没做"，还额外要求解决一个现有架构未覆盖的问题：如何在共享网络栈上做 per-tab 差异化。环境变量（第 2/4 条）网络栈能读到，但那是进程级全局的，做不出 per-tab 隔离。
+
+> **这段推导的结论已被推翻。** 它正确指出了"不能走 `fp_config_helpers.h`"，
+> 但错误地推出"所以做不了 per-tab"。`40-net-tls.patch` 绕开了这个入口，走
+> `session.setSSLConfig()` → mojo → per-URLRequestContext 的 `SSLClientContext`
+> （每个 tab 已独占 partition，天然逐 profile）。**共享网络栈不是障碍——
+> `SSLClientContext` 本就是 per-URLRequestContext 的，不需要新建机制。**
 
 ### （已解决）User-Agent 与 navigator.platform 泄露
 
@@ -341,8 +354,8 @@ Chrome/154.0.8015.0 Electron/45.0.0-nightly.20260825 Safari/537.36
 | A. UA 覆盖 | 消除 `Electron/` 暴露与预设自相矛盾 | **已完成**。客户端 `session.setUserAgent()`，`profile.userAgent` 平级字段 |
 | B. `navigator.platform` | 让预设名副其实 | **已完成**。内核 key `navigator_platform`（63 键之一） |
 | B′. Sec-CH-UA 客户端提示 | 与 UA 保持一致 | **已完成**。键 58-60（`ua_platform`/`ua_mobile`/`ua_brands`），两个面都已打补丁：`navigator.userAgentData`（`NavigatorBase::GetUserAgentMetadata()`）与 `Sec-CH-UA*` 请求头（`LocalFrameClientImpl::UserAgentMetadata()`）。未显式配置时从 UA 派生 |
-| C. TLS/JA3 定制 | 真正的网络层指纹 | 未做，见上节 |
-| D. 明确不实现 | — | TLS 仍属此类 |
+| C. TLS/JA3 定制 | 真正的网络层指纹 | **已完成**（2026-09-01，`40-net-tls.patch`）。见"网络层指纹"节：per-URLRequestContext，逐 profile 隔离 |
+| D. 明确不实现 | — | **仅剩一项**：`fpExtensionOrder` 显式报错拒绝（BoringSSL 无指定扩展顺序的 API）。其余 TLS 字段均已实现 |
 
 **两个易踩的坑（均已实测）**：
 
@@ -378,11 +391,31 @@ Chrome/154.0.8015.0 Electron/45.0.0-nightly.20260825 Safari/537.36
 闭合引号就截断，实测得到的是一个内容为空的垃圾条目。内核解析器同时接受两种
 形式，但引号在到达解析器之前就已经被截断了。
 
-### 剩余未决：TLS/JA3 定制（方案 C，仍未做）
+### 剩余未决：TLS/JA3 定制（方案 C）— **已关闭，无需决策**
 
-需先决策：接受全局统一 TLS，还是投入改造网络栈做 per-tab 隔离。后者受架构约束——
-配置注入是 per-renderer 的，而 TLS 指纹产生于共享网络栈。
+> **2026-09-02 更正。** 本节此前写着"仍未做，需先决策：接受全局统一 TLS，
+> 还是投入改造网络栈做 per-tab 隔离"。**该二选一的前提是错的。**
+>
+> 决策之所以被卡住，是因为它假设"per-tab 隔离需要改造网络栈"。实测源码：
+> `SSLClientContext` 本就是 **per-URLRequestContext** 的
+> （`net/socket/ssl_client_socket_impl.cc` 的 `GetSSLContextForGrease()`），
+> 而每个 tab 已独占 partition（`Client/main.js` 的 `fp-tab-${tabId}`）。
+> 所以 per-tab TLS 隔离**不需要改造网络栈，也不需要放弃它**——
+> 两个选项都不必选。
+>
+> `40-net-tls.patch` 已实现（见"网络层指纹"节）。真正剩余的只有一项，
+> 见下。
 
+**真正剩余的唯一未实现项：`fpExtensionOrder`。**
+
+BoringSSL 只提供 `SSL_[CTX_]set_permute_extensions(on|off)`，没有"指定扩展
+顺序"的 API；实现它需要改 BoringSSL 的 ClientHello 拼装（安全关键路径）。
+当前行为是**显式报错拒绝**（`ERR_NOT_IMPLEMENTED` + `LOG(ERROR)`），而不是
+发出与 profile 声明不符的 ClientHello —— 静默忽略比缺失更糟，因为 profile
+会声称一个它并未产生的指纹。该行为由 `Client/test-tls-control.js` 钉死。
+
+这是有意的取舍，不是待办。若将来确需此能力，路径是给 BoringSSL 加 API 或
+在 `SSLClientSocketImpl::Init()` 里手工重排扩展，二者都在安全关键路径上。
 
 （该节此前被截断在此处，已在实现 Inspector 后补齐。）
 
