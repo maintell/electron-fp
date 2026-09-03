@@ -207,7 +207,16 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
       "webgl_max_renderbuffer_size",
       "webgl_max_texture_size",
       "webgl_max_viewport_dims",
-  };
+      // These three were missing: they are numeric in the schema but were
+      // absent here, so is_set() treated them as string-kind and reported
+      // "0" / 0.0 / " 0 " as ACTIVE where fpIsActive() says inactive. Found by
+      // diffing this list against FP_KEYS, not by any existing test:
+      // test-inspector.js checks only 6 hand-picked keys, so it cannot see a
+      // key it never mentions.
+      "audio_data_seed",
+      "audio_max_channels",
+      "measure_text_seed",
+      };
 
   // A key counts as "set" when it carries a non-default value. 0 / "" are the
   // Mirrors fpIsActive() in Client/fp-schema.js, which is the authoritative
@@ -234,23 +243,76 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
     return s;
   }());
 
+  // fpIsActive() is:
+  //   null/undefined/"" -> false
+  //   numeric default   -> Number(value) !== 0
+  //   otherwise         -> String(value) !== String(def)   // def is ""
+  //
+  // The key kind decides WHICH conversion happens, so it must be consulted for
+  // every value form - not just strings. The previous version fell through to
+  // `GetInt() != 0` / `GetBool()` for non-strings, which quietly applies the
+  // NUMERIC rule to string-kind keys. Consequences:
+  //   * string-kind key holding 0      -> C++ inactive, JS active ("0" !== "")
+  //   * string-kind key holding false  -> C++ inactive, JS active ("false" !== "")
+  // Both are false negatives: the panel under-reports coverage for exactly the
+  // boolean-ish keys a user is most likely to set to 0/false.
   auto is_set = [](const std::string& key, const base::Value* v) {
     if (!v) return false;
     const bool numeric = kNumericKeys->count(key) != 0;
     if (v->is_string()) {
       const std::string& s = v->GetString();
-      if (s.empty()) return false;
-      if (!numeric) return true;
-      // Numeric key held as text: compare against the default "0", accepting
-      // the "0" / "0.0" / " 0 " spellings a round-trip can produce.
+      if (s.empty()) return false;  // fpIsActive's early return, both kinds
+      if (!numeric) return true;    // String(s) !== "" is true for any non-empty
+      // Numeric key held as text: JS Number() semantics.
+      //
+      // base::StringToDouble() is NOT Number(): it accepts "0x0" (hex) and
+      // rejects " 0 " (leading/trailing space). Number("0x0") == 0 -> inactive,
+      // Number(" 0 ") == 0 -> inactive. So StringToDouble disagrees with the JS
+      // in both directions. Trim first, and handle hex separately.
+      std::string t;
+      base::TrimWhitespaceASCII(s, base::TRIM_ALL, &t);
+      if (t.empty()) return false;  // trimmed to nothing -> Number() is 0
+      {
+        std::string u = t;
+        // Sign is irrelevant here: we only test != 0, and in JS -0 !== 0 is
+        // false, so "+0x0" and "-0x0" are both inactive. Strip and compare
+        // magnitude.
+        if (!u.empty() && (u[0] == '+' || u[0] == '-')) {
+          u.erase(0, 1);
+        }
+        // Hex is where base::StringToDouble() and Number() genuinely diverge:
+        // Number("0x0") is 0 (inactive) while an earlier version treated any
+        // hex as unparseable text -> active. Parse it explicitly.
+        if (u.size() > 2 && u[0] == '0' && (u[1] == 'x' || u[1] == 'X')) {
+          uint64_t hv = 0;
+          if (base::HexStringToUInt64(u, &hv)) {
+            return hv != 0;  // Number("0x0") === 0 -> inactive
+          }
+          return true;  // malformed hex: Number() is NaN, NaN !== 0 -> active
+        }
+      }
       double d = 0;
-      if (!base::StringToDouble(s, &d)) return true;  // non-numeric text = set
+      if (base::StringToDouble(t, &d)) {
+        return d != 0.0;
+      }
+      // Not numeric at all: Number() is NaN, and NaN !== 0 is true -> active.
+      return true;
+    }
+    if (v->is_int() || v->is_double()) {
+      const double d = v->is_int() ? static_cast<double>(v->GetInt())
+                                   : v->GetDouble();
+      if (!numeric) return true;  // String(0) == "0" !== "" -> active
       return d != 0.0;
     }
-    if (v->is_int()) return v->GetInt() != 0;
-    if (v->is_double()) return v->GetDouble() != 0.0;
-    if (v->is_bool()) return v->GetBool();
-    return false;
+    if (v->is_bool()) {
+      // String(false) == "false" !== "" -> ACTIVE on a string-kind key.
+      // Number(false) == 0              -> inactive on a numeric key.
+      if (!numeric) return true;
+      return v->GetBool();
+    }
+    if (v->is_none()) return false;  // maps to JS undefined
+    // Objects/lists: String(v) is never "" -> active on a string-kind key.
+    return !numeric;
   };
 
   // Merge in the per-WebContents (webPreferences) configs for this context.

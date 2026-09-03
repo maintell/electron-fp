@@ -397,7 +397,57 @@ async function run() {
   // 25 of 63 keys are numeric, and any JSON round-trip quotes numbers.
   //
   // This pins parity using the string forms, which is where they disagreed.
-  const sessParity = session.fromPartition('persist:inspector-parity-test');
+      // The 6-key check above cannot see a key it does not mention. Three
+      // numeric keys (audio_data_seed, audio_max_channels, measure_text_seed)
+      // were missing from the C++ is_set() numeric list entirely, so they were
+      // judged by the STRING rule and reported "0"/0.0/" 0 " as active. Every
+      // check here passed the whole time.
+      //
+      // Pin the list itself: extract kNumericKeyNames from the C++ source and
+      // require it to equal exactly the schema's numeric-default keys. This is
+      // a static check - no rebuild, no browser - so it also runs when the
+      // kernel binary is stale.
+      {
+        const fs = require('fs');
+        const path = require('path');
+        const CPP = path.join(__dirname, '..', 'shell', 'browser', 'ui', 'webui',
+                              'fingerprint_ui.cc');
+        let src = null;
+        try {
+          src = fs.readFileSync(CPP, 'utf8');
+        } catch (e) {
+          src = null;
+        }
+        check('numeric-key source is readable',
+          !!src, src ? '' : CPP + ' unreadable - list cannot be verified');
+        if (src) {
+          const m = src.match(/kNumericKeyNames\[\]\s*=\s*\{([\s\S]*?)\};/);
+          check('kNumericKeyNames found in fingerprint_ui.cc',
+            !!m, m ? '' : 'pattern not found - is_set() list is unverifiable');
+          if (m) {
+            // Only capture identifiers that LOOK like schema keys: the list
+            // sits inside a block whose comments quote numbers, and a bare
+            // /"([A-Za-z0-9_]+)"/ also matches those ("0"), producing a bogus
+            // "unknown key: 0" failure.
+            const cppNums = [...m[1].matchAll(/"([a-z][a-z0-9_]+)"/g)].map((x) => x[1]);
+            const jsNums = S.FP_KEY_NAMES.filter(
+              (k) => typeof S.FP_KEYS[k].def === 'number');
+            const missing = jsNums.filter((k) => !cppNums.includes(k));
+            // hasOwnProperty, not truthiness: FP_KEYS[k] is an object for every
+            // real key, so a bad name would compare as "known".
+            const extra = cppNums.filter(
+              (k) => !Object.prototype.hasOwnProperty.call(S.FP_KEYS, k));
+            check('every schema-numeric key is in the C++ numeric list',
+              missing.length === 0,
+              missing.length ? 'missing: ' + missing.join(', ') : jsNums.length + ' keys');
+            check('C++ numeric list names no unknown keys',
+              extra.length === 0,
+              extra.length ? 'unknown: ' + extra.join(', ') : cppNums.length + ' entries');
+          }
+        }
+      }
+
+      const sessParity = session.fromPartition('persist:inspector-parity-test');
   const parityCfg = {
     hardware_concurrency: '0',   // numeric, string zero  -> NOT active
     device_memory: '7',          // numeric, non-zero     -> active
