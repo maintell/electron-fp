@@ -18,7 +18,12 @@ contextBridge.exposeInMainWorld('api', {
   getFingerprint: (tabId) => ipcRenderer.invoke('tab:get-fingerprint', tabId),
   setFingerprint: (tabId, config, userAgent) => ipcRenderer.invoke('tab:set-fingerprint', { tabId, config, userAgent }),
 
-  // User-Agent per-tab (Electron-level surface, not one of the kernel's 60 keys)
+  // Self-test: runs the shared probe (Client/fp-probe.js, the same one
+  // fingerprint/scripts/smoke.js uses) inside the live tab and compares each
+  // surface against that tab's own config.
+  runSelfTest: (tabId) => ipcRenderer.invoke('selftest:run', tabId),
+
+  // User-Agent per-tab (Electron-level surface, not one of the kernel's 63 keys)
   getUserAgent: (tabId) => ipcRenderer.invoke('tab:get-ua', tabId),
   setUserAgent: (tabId, userAgent) => ipcRenderer.invoke('tab:set-ua', { tabId, userAgent }),
   listUaPresets: () => ipcRenderer.invoke('ua:presets'),
@@ -38,7 +43,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // App info
   getVersions: () => ipcRenderer.invoke('app:versions'),
-  // Fingerprint schema (60 keys in 15 functional groups) + coverage report
+  // Fingerprint schema (63 keys in 15 functional groups) + coverage report
   getFpSchema: () => ipcRenderer.invoke('fp:schema'),
   getFpCoverage: (cfg) => ipcRenderer.invoke('fp:coverage', cfg),
 

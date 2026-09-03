@@ -8,6 +8,8 @@
 // the test suite stays green - because the tests run Client/ directly.
 //
 // Root cause of the 2026-08-31 white screen: the copy was the 56-key version,
+  // (historical: 56 was correct when this was written - the copy predated
+  //  the ua_* keys. Do NOT update it to the current schema count.)
 // missing FP_UA_PRESETS / fpRandomUserAgent / fpNormalizeUserAgent /
 // fpPlatformForUserAgent. main.js destructures all four at the top level.
 //
@@ -74,7 +76,13 @@ ck("packaged key count matches source", srcKeys === copyKeys,
 
 // 3. Code files identical by content. profiles.json is deliberately excluded:
 //    the packaged copy holds user-created profiles the source does not have.
-const CODE = ["main.js", "fp-schema.js", "preload.js", "package.json",
+//
+// fp-probe.js is in this list because main.js requires it at module scope. It
+// was added to Client/ without being added here, so it was never copied into
+// the packaged app - launching electron.exe would have failed on
+// "Cannot find module './fp-probe'". A required module is exactly the kind of
+// file this check must cover.
+const CODE = ["main.js", "fp-schema.js", "fp-probe.js", "preload.js", "package.json",
   "renderer/app.js", "renderer/index.html", "renderer/style.css"];
 for (const f of CODE) {
   const a = path.join(APP, f);

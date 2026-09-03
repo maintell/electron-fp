@@ -1,0 +1,199 @@
+// Shared fingerprint probe: the SINGLE source of truth for what surfaces exist,
+// how to read them, and how to decide "did the configured value actually apply".
+//
+// Extracted from fingerprint/scripts/smoke.js so the Client's self-test panel
+// and the command-line smoke test cannot drift apart. Before this existed, the
+// probe lived only inside smoke.js - a self-running `#!/usr/bin/env electron`
+// script - so anything wanting the same checks had to copy the logic, and two
+// copies of a probe are two probes that silently disagree.
+//
+// MOVED VERBATIM, NOT REWRITTEN: PROBE, EXPECTED and compare() are character-
+// for-character the versions that the 27-passing smoke run was validated
+// against. Rewriting them "more cleanly" would have invalidated that.
+//
+// Three exports:
+//   PROBE        - JS source string; run in a page, returns {key: observedValue}
+//   EXPECTED     - the fixed config smoke.js applies when it drives itself
+//   compare()    - (key, expected, got) -> boolean
+//   PROBE_FIELDS - every key PROBE can actually populate
+
+'use strict';
+
+// ---------------------------------------------------------------------------
+// EXPECTED: the config smoke.js applies to its own window.
+//
+// These are NOT "correct fingerprint values" - they are arbitrary but
+// distinctive values chosen so that "the surface reports the real hardware"
+// cannot be mistaken for "the surface reports what we asked for".
+// ---------------------------------------------------------------------------
+const EXPECTED = {
+  hardware_concurrency: 2,
+  device_memory: 4,
+  max_touch_points: 5,
+  screen_width: 1280,
+  screen_height: 800,
+  screen_avail_width: 1280,
+  screen_avail_height: 740,
+  screen_color_depth: 24,
+  do_not_track: '1',
+  tz_id: 'America/New_York',
+  canvas_noise_seed: 12345,
+  canvas_noise_strength: 2,
+  net_effective_type: '4g',
+  net_rtt_ms: 50,
+  net_downlink_mbps: '10',
+  permissions_status: 'granted',
+  storage_usage_bytes: 1048576,
+  storage_quota_bytes: 10737418240,
+  prefers_color_scheme: 'dark',
+  webgl_max_texture_size: 8192,
+  webgl_vendor: 'Google Inc. (NVIDIA)',
+  webgl_renderer: 'ANGLE (NVIDIA GeForce RTX 4090 Direct3D11 vs_5_0 ps_5_0)',
+  // MUST be an unquoted NUMBER. The kernel parses this key with StringToInt,
+  // which rejects the quoted form and silently FALLS BACK TO THE NATIVE VALUE -
+  // measured: '8192' (string) -> 32767,32767 (real hardware), 8192 (number) ->
+  // 8192,8192. The comparison below accepts "v,v" or "v", so a fallback simply
+  // FAILs rather than passing; that is the point.
+  webgl_max_viewport_dims: 8192,
+  media_devices_audio_input: 2,
+  media_devices_video_input: 1,
+  media_devices_audio_output: 1,
+  audio_sample_rate: 48000,
+  client_rects_seed: 999,
+};
+
+// ---------------------------------------------------------------------------
+// PROBE: read-only script run inside a page.
+//
+// Design rule: it must be safe to inject into a page the user is looking at.
+// It is an IIFE, every variable is local, and the only mutation of the DOM is a
+// temporary <div> for client_rects_seed which is removed immediately after
+// measuring. Nothing is written to window.
+//
+// Context requirement: MUST run on a real http(s) origin, never about:blank.
+// about:blank is an OPAQUE ORIGIN ("null") and Chromium gates several surfaces
+// behind a potentially-trustworthy context:
+//   * navigator.storage       -> undefined (kills storage_quota/usage_bytes)
+//   * navigator.mediaDevices  -> undefined (kills all three media_devices_*)
+// The failure is SILENT: the try/catch swallows it, the key is absent, and the
+// caller reports SKIP - so 5 surfaces looked "not applicable" when they were
+// merely unmeasurable. A probe that reports SKIP cannot tell "feature off" from
+// "probe blind". 127.0.0.1 IS treated as potentially-trustworthy.
+// ---------------------------------------------------------------------------
+const PROBE = `(async () => {
+  const r={};
+  try{
+    r.hardware_concurrency=navigator.hardwareConcurrency;
+    r.device_memory=navigator.deviceMemory;
+    r.max_touch_points=navigator.maxTouchPoints;
+    r.screen_width=screen.width; r.screen_height=screen.height;
+    r.screen_avail_width=screen.availWidth; r.screen_avail_height=screen.availHeight;
+    r.screen_color_depth=screen.colorDepth;
+    r.do_not_track=navigator.doNotTrack;
+    r.tz_id=Intl.DateTimeFormat().resolvedOptions().timeZone;
+    r.fonts_blocklist=document.fonts.check('12px Consolas');
+    const c=document.createElement('canvas'); c.width=100; c.height=100;
+    const x=c.getContext('2d'); if(x){ x.font='20px Arial'; r.measure_text_seed=x.measureText('The quick brown fox').width; r.canvas_noise_seed=c.toDataURL().length; }
+    const conn=navigator.connection||{}; r.net_effective_type=conn.effectiveType; r.net_rtt_ms=conn.rtt; r.net_downlink_mbps=conn.downlink;
+    try{ r.permissions_status=(await navigator.permissions.query({name:'notifications'})).state; }catch(e){ r.permissions_status='unknown'; }
+    try{ const s=await navigator.storage.estimate(); r.storage_usage_bytes=s.usage; r.storage_quota_bytes=s.quota; }catch(e){}
+    r.prefers_color_scheme=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
+    // A canvas can hold only ONE context type. The canvas used above already
+    // has a 2d context (measure_text / canvas_noise), so getContext('webgl')
+    // on it returns NULL - verified: {got2d:true, glSameCanvas:false,
+    // glFreshCanvas:true}. That made every webgl_* surface report
+    // "SKIP (not probed)" rather than being measured, so the smoke test could
+    // not distinguish "WebGL spoofing is off" from "we never looked".
+    const glc=document.createElement('canvas');
+    const gl=glc.getContext('webgl')||glc.getContext('experimental-webgl');
+    if(gl){
+      r.webgl_max_texture_size=gl.getParameter(gl.MAX_TEXTURE_SIZE);
+      try{ const d=gl.getParameter(gl.MAX_VIEWPORT_DIMS); r.webgl_max_viewport_dims=Array.from(d).join(','); }catch(e){}
+      try{ const dbg=gl.getExtension('WEBGL_debug_renderer_info'); if(dbg){ r.webgl_vendor=gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL); r.webgl_renderer=gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL); } }catch(e){}
+      try{ r.webgl_extensions=(gl.getSupportedExtensions()||[]).join(','); }catch(e){}
+    }
+    try{
+      const devs=await navigator.mediaDevices.enumerateDevices(); let ai=0,vi=0,ao=0;
+      devs.forEach(d=>{ if(d.kind==='audioinput') ai++; if(d.kind==='videoinput') vi++; if(d.kind==='audiooutput') ao++; });
+      r.media_devices_audio_input=ai; r.media_devices_video_input=vi; r.media_devices_audio_output=ao;
+    }catch(e){}
+    try{
+      if(navigator.gpu){ const ag=await navigator.gpu.requestAdapter(); if(ag){ const inf=ag.info||{}; r.webgpu_vendor=inf.vendor; r.webgpu_architecture=inf.architecture; r.webgpu_device=inf.device; r.webgpu_description=inf.description; r.webgpu_features=Array.from(ag.features||[]).sort().join(','); const ln=['maxTextureDimension2D','maxBufferSize']; const lo={}; ln.forEach(n=>{ lo[n]=ag.limits[n]; }); r.webgpu_limits=JSON.stringify(lo); } }
+    }catch(e){}
+    try{ const ac=new (window.AudioContext||window.webkitAudioContext)(); r.audio_sample_rate=ac.sampleRate; ac.close(); }catch(e){ try{ r.audio_sample_rate=new OfflineAudioContext(1,1,48000).sampleRate; }catch(_e){} }
+    try{ if(navigator.getBattery){ const b=await navigator.getBattery(); r.battery_charging=String(b.charging); r.battery_level=String(b.level); } }catch(e){}
+    try{ const el=document.createElement('div'); el.style.cssText='position:absolute;left:10px;top:20px;width:100px;height:10px'; document.body.appendChild(el); const rect=el.getBoundingClientRect(); r.client_rects_seed=rect.x+','+rect.y; el.remove(); }catch(e){}
+    try{ const vs=speechSynthesis.getVoices(); r.speech_voices_count=vs.length; r.speech_voices_lang=vs[0]?vs[0].lang:''; }catch(e){}
+  }catch(e){ r._probe_error=String(e&&e.message||e); }
+  return r;
+})()`;
+
+// Every key PROBE can populate. Used to tell "the probe never looked at this
+// surface" (SKIP) apart from "the probe looked and the value is wrong" (FAIL) -
+// the distinction that makes a SKIP honest instead of a blind spot.
+const PROBE_FIELDS = [
+  'hardware_concurrency', 'device_memory', 'max_touch_points',
+  'screen_width', 'screen_height', 'screen_avail_width', 'screen_avail_height',
+  'screen_color_depth', 'do_not_track', 'tz_id', 'fonts_blocklist',
+  'measure_text_seed', 'canvas_noise_seed',
+  'net_effective_type', 'net_rtt_ms', 'net_downlink_mbps',
+  'permissions_status', 'storage_usage_bytes', 'storage_quota_bytes',
+  'prefers_color_scheme',
+  'webgl_max_texture_size', 'webgl_max_viewport_dims', 'webgl_vendor',
+  'webgl_renderer', 'webgl_extensions',
+  'media_devices_audio_input', 'media_devices_video_input',
+  'media_devices_audio_output',
+  'webgpu_vendor', 'webgpu_architecture', 'webgpu_device',
+  'webgpu_description', 'webgpu_features', 'webgpu_limits',
+  'audio_sample_rate', 'battery_charging', 'battery_level',
+  'client_rects_seed', 'speech_voices_count', 'speech_voices_lang',
+];
+
+// ---------------------------------------------------------------------------
+// compare(key, expected, got): did the configured value actually land?
+//
+// Several keys need special handling because the OBSERVED value's shape is not
+// the CONFIGURED value's shape. Getting these wrong is how a key can pass while
+// doing nothing - e.g. webgl_max_viewport_dims takes ONE number but the surface
+// reports "v,v", so a naive equality would compare 8192 to "8192,8192" and,
+// depending on coercion, either always fail or always pass.
+// ---------------------------------------------------------------------------
+function compare(key, expected, got) {
+  // special semantics mirroring smoke_fp.ps1
+  if (key === 'canvas_noise_seed') return Number(got) > 0;
+  if (key === 'measure_text_seed') return Number(got) !== 0;
+  if (key === 'fonts_blocklist') return got === false; // blocked
+  if (key === 'webgl_max_viewport_dims') {
+    return String(got) === `${expected},${expected}` || String(got) === String(expected);
+  }
+  if (key === 'perf_now_precision_ms') return Number(got) % Number(expected) === 0;
+  if (key === 'webgpu_features') {
+    const g = String(got).split(',').sort().join(',');
+    const e = String(expected).split(',').sort().join(',');
+    return g === e;
+  }
+  if (key === 'webgpu_limits') {
+    try {
+      const o = JSON.parse(got);
+      for (const kv of String(expected).split(',')) {
+        const [k, v] = kv.split('=');
+        if (String(o[k]) !== String(v)) return false;
+      }
+      return true;
+    } catch (e) { return false; }
+  }
+  if (key === 'client_rects_seed') {
+    // element laid out at left:10px top:20px; fingerprint perturbs by <0.2px.
+    const parts = String(got).split(',');
+    const gx = Number(parts[0]), gy = Number(parts[1]);
+    if (!isFinite(gx) || !isFinite(gy)) return false;
+    return (Math.abs(gx - 10) > 0 && Math.abs(gx - 10) < 0.3) ||
+           (Math.abs(gy - 20) > 0 && Math.abs(gy - 20) < 0.3);
+  }
+  if (key === 'device_memory' && got === undefined) return false; // SKIP by caller
+  // default: string equality with numeric coercion tolerance
+  if (typeof expected === 'number') return Number(got) === Number(expected);
+  return String(got) === String(expected);
+}
+
+module.exports = { PROBE, EXPECTED, PROBE_FIELDS, compare };

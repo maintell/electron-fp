@@ -36,6 +36,15 @@ const $fpUaReset = document.getElementById('fp-ua-reset');
 const $statusProfile = document.getElementById('status-profile');
 const $statusInfo = document.getElementById('status-info');
 const $statusVersion = document.getElementById('status-version');
+// --- Self-test pane ---
+const $fpTabConfig = document.getElementById('fp-tab-config');
+const $fpTabSelfTest = document.getElementById('fp-tab-selftest');
+const $fpPaneConfig = document.getElementById('fp-pane-config');
+const $fpPaneSelfTest = document.getElementById('fp-pane-selftest');
+const $fpSelfTestRun = document.getElementById('fp-selftest-run');
+const $fpSelfTestSummary = document.getElementById('fp-selftest-summary');
+const $fpSelfTestResults = document.getElementById('fp-selftest-results');
+const $fpSelfTestShowSkipped = document.getElementById('fp-selftest-show-skipped');
 
 // --- Tab Rendering ---
 function renderTabs(tabs) {
@@ -351,7 +360,7 @@ function tryParseJson(str) {
 // ============================================================================
 // Grouped fingerprint UI
 //
-// Renders the kernel's 60 keys as collapsible sections, one per functional
+// Renders the kernel's 63 keys as collapsible sections, one per functional
 // group (hardware / screen / audio / webgl / webgpu / geo / speech / media /
 // canvas / env / network / storage / fonts / battery). The JSON textarea remains
 // the source of truth: editing a field rewrites the JSON, and editing the JSON
@@ -575,6 +584,103 @@ window.api.on('tab:profile-changed', async (data) => {
   }
 });
 
+// --- Self-test ---
+//
+// Runs the shared probe inside the live tab and renders a row per surface.
+//
+// The verdict wording matters: `skip` means "you did not configure this, so
+// there is nothing to check", NOT "this passed". Rendering skips as successes
+// would turn a default profile into a wall of green and hide the failures -
+// which is the exact opposite of what a self-test is for.
+let lastSelfTest = null;
+
+function setSelfTestTab(which) {
+  const isConfig = which === 'config';
+  $fpPaneConfig.hidden = !isConfig;
+  $fpPaneSelfTest.hidden = isConfig;
+  $fpTabConfig.classList.toggle('fp-tab-active', isConfig);
+  $fpTabSelfTest.classList.toggle('fp-tab-active', !isConfig);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+function renderSelfTest(result) {
+  if (result.error) {
+    $fpSelfTestSummary.textContent = 'error';
+    $fpSelfTestResults.innerHTML =
+      '<div class="fp-selftest-error">' + escapeHtml(result.error) + '</div>';
+    return;
+  }
+
+  const rows = result.rows || [];
+  const s = result.summary || {};
+  $fpSelfTestSummary.innerHTML =
+    '<span class="fp-badge fp-badge-pass">' + (s.pass || 0) + ' pass</span> ' +
+    '<span class="fp-badge fp-badge-fail">' + (s.fail || 0) + ' fail</span> ' +
+    '<span class="fp-badge fp-badge-skip">' + (s.skip || 0) + ' skip</span>';
+
+  const showSkipped = $fpSelfTestShowSkipped.checked;
+  const visible = showSkipped ? rows : rows.filter((r) => r.verdict !== 'skip');
+
+  if (!visible.length) {
+    $fpSelfTestResults.innerHTML = showSkipped
+      ? '<div class="fp-selftest-empty">No surfaces probed.</div>'
+      : '<div class="fp-selftest-empty">No configured surfaces to check. ' +
+        'Set some fingerprint keys, or tick "Show skipped surfaces".</div>';
+    return;
+  }
+
+  // Failures and errors first: the point of the pane is what is wrong.
+  const order = { fail: 0, error: 1, pass: 2, skip: 3 };
+  const sorted = [...visible].sort((a, b) =>
+    (order[a.verdict] ?? 9) - (order[b.verdict] ?? 9) ||
+    a.key.localeCompare(b.key));
+
+  const html = sorted.map((r) => {
+    const badge = '<span class="fp-badge fp-badge-' + r.verdict + '">' +
+      r.verdict + '</span>';
+    const detail = r.verdict === 'skip'
+      ? '<span class="fp-st-reason">' + escapeHtml(r.reason || '') + '</span>'
+      : '<span class="fp-st-expected">' + escapeHtml(r.expected) + '</span>' +
+        '<span class="fp-st-arrow">&rarr;</span>' +
+        '<span class="fp-st-got">' + escapeHtml(r.got) + '</span>';
+    const hint = (r.verdict === 'fail' || r.verdict === 'error') && r.reason
+      ? '<div class="fp-st-hint">' + escapeHtml(r.reason) + '</div>'
+      : '';
+    return '<div class="fp-st-row fp-st-' + r.verdict + '">' +
+      '<div class="fp-st-line">' + badge +
+      '<span class="fp-st-key">' + escapeHtml(r.key) + '</span>' +
+      detail + '</div>' + hint + '</div>';
+  }).join('');
+
+  $fpSelfTestResults.innerHTML = html;
+}
+
+async function runSelfTest() {
+  if (!currentTabId) {
+    $fpSelfTestSummary.textContent = 'no active tab';
+    return;
+  }
+  $fpSelfTestRun.disabled = true;
+  $fpSelfTestSummary.textContent = 'running…';
+  $fpSelfTestResults.innerHTML = '<div class="fp-selftest-empty">Probing…</div>';
+  try {
+    const result = await window.api.runSelfTest(currentTabId);
+    lastSelfTest = result;
+    renderSelfTest(result);
+  } catch (e) {
+    $fpSelfTestSummary.textContent = 'error';
+    $fpSelfTestResults.innerHTML =
+      '<div class="fp-selftest-error">' + escapeHtml(String(e && e.message || e)) + '</div>';
+  } finally {
+    $fpSelfTestRun.disabled = false;
+  }
+}
+
 // --- Init ---
 async function init() {
   const versions = await window.api.getVersions();
@@ -595,6 +701,15 @@ async function init() {
   await loadUaPresets();
   await loadCurrentUserAgent();
   await renderFpGroups();
+  setSelfTestTab('config');
 }
+
+// --- Self-test pane wiring ---
+$fpTabConfig.addEventListener('click', () => setSelfTestTab('config'));
+$fpTabSelfTest.addEventListener('click', () => setSelfTestTab('selftest'));
+$fpSelfTestRun.addEventListener('click', runSelfTest);
+$fpSelfTestShowSkipped.addEventListener('change', () => {
+  if (lastSelfTest) renderSelfTest(lastSelfTest);
+});
 
 init();

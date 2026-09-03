@@ -7,6 +7,8 @@ let pass = 0, fail = 0;
 const ck = (n, ok, d) => { console.log((ok ? "PASS  " : "FAIL  ") + n + (d ? "  (" + d + ")" : "")); ok ? pass++ : fail++; };
 
 // An old-style profile: 56 keys, no ua_*, with a userAgent sibling.
+  // (historical: this INPUT is a legacy 56-key profile on purpose - the
+  //  migration under test is what upgrades it. Do NOT update the count.)
 const OLD_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15";
 const old = JSON.parse(require("fs").readFileSync(__dirname + "/profiles.json", "utf8"))
   .profiles.find(p => p.id === "win10-chrome");

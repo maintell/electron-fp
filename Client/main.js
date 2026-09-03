@@ -3,6 +3,10 @@
 const { app, BrowserWindow, BrowserView, ipcMain, session, protocol, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const http = require('http');
+// Shared probe: the SAME PROBE / compare() that fingerprint/scripts/smoke.js
+// uses. One probe, two callers - see Client/fp-probe.js.
+const { PROBE, PROBE_FIELDS, compare } = require('./fp-probe');
 const { fpDefaultConfig, fpNormalizeConfig, fpCoverage, fpKeysInGroup, fpIsActive,
         FP_KEYS, FP_KEY_NAMES, FP_SCHEMA_VERSION, FP_GROUPS, FP_GROUP_IDS,
 FP_UA_PRESETS, fpRandomUserAgent, fpNormalizeUserAgent,
@@ -373,7 +377,7 @@ function setupIPC() {
     const tab = tabs.get(tid);
     if (!tab) return false;
     try {
-      // Normalize against the canonical 60-key schema: fill missing keys with
+      // Normalize against the canonical 63-key schema: fill missing keys with
       // their disabled default and drop anything the kernel does not parse, so
       // a hand-edited JSON blob can never ship an unknown/no-op field.
       let apply = null;
@@ -387,7 +391,7 @@ function setupIPC() {
 
       // UA travels beside the fingerprint, never inside it: fpNormalizeConfig()
       // would silently drop it, and it is an Electron-level surface rather than
-      // one of the kernel's 60 keys. undefined means "leave the current UA
+      // one of the kernel's 63 keys. undefined means "leave the current UA
       // alone"; only an explicit value (including '') overrides it.
       const ua = (userAgent === undefined)
         ? tab.userAgent
@@ -406,7 +410,7 @@ function setupIPC() {
   });
 
   // User-Agent is a client-level (Electron) surface, kept separate from the
-  // kernel's 60-key fingerprint config. See applyTabUserAgent() for why the
+  // kernel's 63-key fingerprint config. See applyTabUserAgent() for why the
   // order of operations matters.
   ipcMain.handle('tab:get-ua', (e, tabId) => {
     const tab = tabs.get(tabId || activeTabId);
@@ -492,7 +496,7 @@ function setupIPC() {
     v8: process.versions.v8
   }));
   // Fingerprint schema: lets the renderer build grouped sections and validate
-  // the JSON editor against the exact kernel key set (60 keys / 15 groups).
+  // the JSON editor against the exact kernel key set (63 keys / 15 groups).
   ipcMain.handle('ua:presets', () => FP_UA_PRESETS);
 
   // Derive navigator_platform from a UA string in the main process rather than
@@ -509,6 +513,159 @@ function setupIPC() {
     defaults: fpDefaultConfig()
   }));
   ipcMain.handle('fp:coverage', (e, cfg) => fpCoverage(cfg || {}));
+
+  // --- Self-test ---------------------------------------------------------
+  //
+  // Runs the shared probe (Client/fp-probe.js - the same one smoke.js uses)
+  // INSIDE the live tab, then compares each surface against that tab's OWN
+  // config rather than a fixed expected table.
+  //
+  // That difference is the whole point. smoke.js asks "did MY chosen values
+  // apply?"; the panel asks "did YOUR chosen values apply?". So a key has four
+  // possible verdicts, and only two of them are a failure:
+  //
+  //   pass  - configured, and the surface reports exactly what was configured
+  //   fail  - configured, but the surface reports something else. This is the
+  //           case the panel exists to catch: the knob looked set, the UI said
+  //           "active", and the renderer quietly used something else - most
+  //           often the real hardware value.
+  //   skip  - not configured (nothing to check) or the probe cannot see it
+  //   error - the probe itself threw
+  //
+  // An inactive key is skip, NOT fail: the panel judges only what the user
+  // actually asked for, otherwise a default profile would show 63 red rows.
+  ipcMain.handle('selftest:run', async (e, tabId) => {
+    const tab = tabs.get(tabId || activeTabId);
+    if (!tab || !tab.view) return { error: 'no active tab', rows: [] };
+
+    // Read the config the tab is really running with. getFingerprintConfig()
+    // returns the decoded object, so this is post-normalisation - what the
+    // kernel received, not what the UI sent.
+    let cfg = null;
+    try { cfg = tab.view.webContents.getFingerprintConfig(); } catch (_) { cfg = null; }
+    if (!cfg) cfg = {};
+
+    const wc = tab.view.webContents;
+    const priorUrl = (() => { try { return wc.getURL(); } catch (_) { return ''; } })();
+
+    // The probe MUST run on a real http origin. about:blank is an opaque origin
+    // where navigator.storage and navigator.mediaDevices are undefined, which
+    // silently blinds 5 surfaces. If the tab is not already on a usable origin,
+    // borrow one for the duration and put the tab back afterwards.
+    const needsTempOrigin = !/^https?:/i.test(priorUrl);
+    let srv = null, tempUrl = null;
+    if (needsTempOrigin) {
+      srv = http.createServer((q, s) => {
+        s.writeHead(200, { 'Content-Type': 'text/html' });
+        s.end('<!doctype html><html><body>fp-selftest</body></html>');
+      });
+      try {
+        await new Promise((res, rej) => {
+          srv.listen(0, '127.0.0.1', res);
+          srv.once('error', rej);
+        });
+        tempUrl = 'http://127.0.0.1:' + srv.address().port + '/';
+        await wc.loadURL(tempUrl);
+        await new Promise((r) => setTimeout(r, 300));
+      } catch (err) {
+        try { srv.close(); } catch (_) {}
+        return { error: 'probe origin unavailable: ' + (err && err.message), rows: [] };
+      }
+    }
+
+    let observed = null, probeError = null;
+    try {
+      const p = wc.executeJavaScript(PROBE, true);
+      const t = new Promise((_, rej) =>
+        setTimeout(() => rej(new Error('probe timeout after 15s')), 15000));
+      observed = await Promise.race([p, t]);
+    } catch (err) {
+      probeError = String((err && err.message) || err);
+    }
+
+    // Put the tab back where it was before we borrowed it for the probe.
+    if (needsTempOrigin) {
+      try { srv.close(); } catch (_) {}
+      if (priorUrl) {
+        try { await wc.loadURL(priorUrl); } catch (_) { /* best effort */ }
+      }
+    }
+
+    if (probeError) return { error: probeError, rows: [] };
+    if (!observed || typeof observed !== 'object') {
+      return { error: 'probe returned nothing', rows: [] };
+    }
+    if (observed._probe_error) {
+      return { error: 'probe threw: ' + observed._probe_error, rows: [] };
+    }
+
+    const rows = [];
+    for (const key of PROBE_FIELDS) {
+      const got = observed[key];
+
+      // Not probed on this page -> honest skip, never a pass.
+      if (got === undefined || got === null) {
+        rows.push({ key, expected: null, got: null, verdict: 'skip',
+          reason: 'probe could not read this surface here' });
+        continue;
+      }
+
+      // Not configured -> nothing was asked for, so nothing can be wrong.
+      if (!fpIsActive(key, cfg[key])) {
+        rows.push({ key, expected: null, got: String(got), verdict: 'skip',
+          reason: 'not configured' });
+        continue;
+      }
+
+      const expected = cfg[key];
+      let ok = false;
+      try { ok = compare(key, expected, got); } catch (err) {
+        rows.push({ key, expected: String(expected), got: String(got),
+          verdict: 'error', reason: 'compare threw: ' + err.message });
+        continue;
+      }
+      rows.push({
+        key,
+        expected: String(expected),
+        got: String(got),
+        verdict: ok ? 'pass' : 'fail',
+        reason: ok ? '' : explainMismatch(key, expected, got),
+      });
+    }
+
+    const summary = { pass: 0, fail: 0, skip: 0, error: 0 };
+    for (const r of rows) summary[r.verdict] = (summary[r.verdict] || 0) + 1;
+    return { rows, summary, url: needsTempOrigin ? '(temporary probe origin)' : priorUrl };
+  });
+}
+
+// Human-readable explanations for the failure modes this panel is meant to
+// surface. Each one is a mistake that was actually made and measured - these
+// are not speculative hints.
+function explainMismatch(key, expected, got) {
+  if (key === 'webgl_max_viewport_dims') {
+    return 'Expected ' + expected + ' expanded to "' + expected + ',' + expected +
+      '". A quoted value (e.g. "' + expected + '") is rejected by the kernel and ' +
+      'silently falls back to the real hardware value.';
+  }
+  if (key === 'webgpu_limits') {
+    return 'Must be a brace-wrapped, quote-free object, e.g. {k:v}. A JSON value ' +
+      'containing quotes is truncated at the first quote and applies nothing.';
+  }
+  if (key === 'audio_data_strength') {
+    return 'Must be passed as a STRING. A number is serialised unquoted, which ' +
+      'FpConfigString cannot read, so the 0.0005 default is used instead.';
+  }
+  if (/^(webgl_max_texture_size|webgl_max_renderbuffer_size|hardware_concurrency|device_memory|max_touch_points|screen_|net_rtt_ms|storage_|audio_sample_rate|audio_max_channels|perf_now_precision_ms)/.test(key)) {
+    return 'Numeric keys must be unquoted. A quoted value is rejected and the ' +
+      'surface falls back to the real hardware value.';
+  }
+  if (key === 'webgpu_device' || key === 'webgpu_description') {
+    return 'These surfaces are only exposed when WebGPUDeveloperFeatures is on ' +
+      '(--enable-blink-features=WebGPUDeveloperFeatures); otherwise they read as empty.';
+  }
+  return 'Configured ' + expected + ' but the surface reports ' + got +
+    '. The key is active yet did not take effect.';
 }
 
 // --- Random Profile Generator ---
@@ -905,7 +1062,7 @@ function generateRandomProfile() {
 
   // --- Keys 61-63: the surfaces that leaked the host in the external audit ---
   // Found by diffing browserleaks.com / creepjs output between a baseline and a
-  // spoofed run: with every one of the original 60 keys set, navigator.vendor,
+  // spoofed run: with every one of the original 63 keys set, navigator.vendor,
   // navigator.language/languages and window.devicePixelRatio all still reported
   // the host's real values, each contradicting the UA.
   //

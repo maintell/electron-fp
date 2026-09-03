@@ -67,7 +67,7 @@
         </div>
 
         <!-- User-Agent: a client-level (Electron) surface, NOT one of the
-             kernel's 60 keys. It lives beside `fingerprint` in a profile
+             kernel's 63 keys. It lives beside `fingerprint` in a profile
              because fpNormalizeConfig() would silently drop it if nested. -->
         <div class="fp-section fp-ua">
           <label>User-Agent <span class="fp-ua-tag">client-level</span></label>
@@ -85,7 +85,40 @@
           </div>
         </div>
 
-        <!-- Grouped key sections (built from the kernel schema, 60 keys / 15 groups) -->
+        <!-- Sidebar tabs: Config vs Self-test.
+             The self-test runs the shared probe (Client/fp-probe.js - the same
+             one smoke.js uses) inside the LIVE tab and compares each surface
+             against that tab's OWN config, so it answers "did MY settings
+             apply?" rather than "did some fixed set of values apply?". -->
+        <div class="fp-tabs">
+          <button id="fp-tab-config" class="fp-tab fp-tab-active">Config</button>
+          <button id="fp-tab-selftest" class="fp-tab">Self-test</button>
+        </div>
+
+        <!-- ===== Self-test pane (hidden until selected) ===== -->
+        <div id="fp-pane-selftest" class="fp-selftest" hidden>
+          <div class="fp-section">
+            <div class="fp-row">
+              <button id="fp-selftest-run" class="fp-btn fp-btn-primary">Run Self-test</button>
+              <span id="fp-selftest-summary" class="fp-selftest-summary"></span>
+            </div>
+            <div class="fp-selftest-note">
+              Probes the <b>current tab</b> and checks every surface you have
+              configured. Keys you have not set are reported
+              <span class="fp-badge fp-badge-skip">skip</span> &mdash; they are
+              not failures.
+            </div>
+            <label class="fp-checkbox-row">
+              <input type="checkbox" id="fp-selftest-show-skipped" />
+              Show skipped surfaces
+            </label>
+          </div>
+          <div id="fp-selftest-results"></div>
+        </div>
+
+        <!-- ===== Config pane ================================ -->
+        <div id="fp-pane-config">
+        <!-- Grouped key sections (built from the kernel schema, 63 keys / 15 groups) -->
         <div class="fp-section fp-groups">
           <div id="fp-groups-summary"></div>
           <div id="fp-groups"></div>
@@ -102,6 +135,7 @@
           <button id="fp-apply-config" class="fp-btn fp-btn-primary">Apply to Current Tab</button>
           <span id="fp-status"></span>
         </div>
+        </div><!-- /fp-pane-config -->
       </div>
     </div>
   </div>

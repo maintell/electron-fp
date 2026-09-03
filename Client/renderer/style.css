@@ -307,7 +307,7 @@ body {
   color: #4caf50;
 }
 
-/* === Fingerprint grouped sections (60 keys / 15 functional groups) === */
+/* === Fingerprint grouped sections (63 keys / 15 functional groups) === */
 .fp-groups { padding: 0; }
 #fp-groups-summary { padding: 8px 16px; border-bottom: 1px solid #333; }
 .fp-cov { font-size: 11px; color: #9aa0a6; }
@@ -402,4 +402,118 @@ body {
   background: #2a2a2a;
   padding: 0 3px;
   border-radius: 2px;
+}
+
+/* === Sidebar tabs: Config / Self-test === */
+.fp-tabs {
+  display: flex;
+  border-bottom: 1px solid #333;
+  flex: 0 0 auto;
+}
+.fp-tab {
+  flex: 1;
+  padding: 9px 8px;
+  background: #1e1e1e;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #9aa0a6;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.fp-tab:hover { background: #252525; color: #e8eaed; }
+.fp-tab-active {
+  color: #4ec9ff;
+  border-bottom-color: #4ec9ff;
+  background: #222;
+}
+
+/* === Self-test pane === */
+.fp-selftest { overflow-y: auto; }
+.fp-selftest-summary { font-size: 12px; margin-left: 8px; }
+.fp-selftest-note {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: #999;
+}
+.fp-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: #9aa0a6;
+  cursor: pointer;
+}
+.fp-selftest-empty {
+  padding: 16px;
+  font-size: 12px;
+  color: #9aa0a6;
+  text-align: center;
+  line-height: 1.6;
+}
+.fp-selftest-error {
+  margin: 12px;
+  padding: 10px;
+  border: 1px solid #5a2b2b;
+  border-radius: 3px;
+  background: #2a1a1a;
+  color: #f48771;
+  font-size: 11px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+/* Verdict badges. skip is deliberately grey rather than green: an unconfigured
+   key was never checked, and painting it as a success would let a default
+   profile read as all-clear. */
+.fp-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  vertical-align: middle;
+}
+.fp-badge-pass  { background: #1e3a24; color: #4caf50; }
+.fp-badge-fail  { background: #3a1e1e; color: #f48771; }
+.fp-badge-skip  { background: #2a2a2a; color: #9aa0a6; }
+.fp-badge-error { background: #3a2e1e; color: #f4a742; }
+
+.fp-st-row {
+  padding: 7px 16px;
+  border-bottom: 1px solid #2a2a2a;
+  font-size: 11px;
+}
+.fp-st-row:hover { background: #232323; }
+.fp-st-fail  { background: #241616; }
+.fp-st-error { background: #241f14; }
+
+.fp-st-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.fp-st-key {
+  font-family: Consolas, 'Courier New', monospace;
+  color: #e8eaed;
+  font-weight: 600;
+}
+.fp-st-expected { color: #9aa0a6; font-family: Consolas, monospace; }
+.fp-st-arrow    { color: #666; }
+.fp-st-got      { color: #4ec9ff; font-family: Consolas, monospace; word-break: break-all; }
+.fp-st-reason   { color: #777; font-style: italic; }
+/* The explanation under a failure is the part that makes this actionable, so
+   it must not be clipped: these are the known trap messages. */
+.fp-st-hint {
+  margin-top: 5px;
+  padding-left: 2px;
+  color: #f4a742;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: normal;
 }

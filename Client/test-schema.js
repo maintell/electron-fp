@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Verify the client fingerprint schema matches the KERNEL patch exactly (60 keys)
+// Verify the client fingerprint schema matches the KERNEL patch exactly (63 keys)
 // and that functional grouping is complete (every key in exactly one group).
 "use strict";
 

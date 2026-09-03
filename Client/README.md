@@ -21,7 +21,7 @@ out/Release/electron.exe Client/
 - **Per-tab fingerprint isolation** — each tab gets:
   - Unique `BrowserView` with independent renderer
   - Unique `partition` for full cookie/session/storage isolation
-  - Independent 60-key fingerprint config
+  - Independent 63-key fingerprint config
   - Independent User-Agent
 - **User-Agent coverage** (client-level) — per-tab UA applied via
   `session.setUserAgent()`, covering **both** `navigator.userAgent` and the HTTP
@@ -33,6 +33,9 @@ out/Release/electron.exe Client/
 - **Live fingerprint switching** — apply profile to active tab without restart
 - **Always-on fingerprint sidebar** — permanent right-side panel showing the
   **active tab's own config**; switch tabs and the panel auto-syncs per tab
+- **Built-in self-test** — a **Self-test** tab in that sidebar runs the shared
+  probe inside the live tab and checks every surface *you* configured against
+  what that tab actually reports. See [Self-test](#self-test) below.
 - **DevTools** per tab (F12 or button)
 
 ## Keyboard Shortcuts
@@ -52,26 +55,76 @@ out/Release/electron.exe Client/
 Client/
 ├── main.js          # Main process: tab lifecycle, IPC, fingerprint injection
 ├── preload.js       # Secure bridge (contextIsolation)
+├── fp-schema.js     # 63-key schema, normalization, coverage, consistency rules
+├── fp-probe.js      # SHARED probe: PROBE script + compare(). Used by both the
+│                    # self-test panel and fingerprint/scripts/smoke.js
 ├── profiles.json    # Persistent profile storage
 ├── package.json
+├── test-*.js        # Kernel regression tests (run: node run-tests.js)
 └── renderer/
-    ├── index.html   # Browser chrome UI
+    ├── index.html   # Browser chrome UI (incl. the Self-test pane)
     ├── style.css    # Dark theme styling
-    └── app.js       # Renderer: tab bar, address bar, profile panel
+    └── app.js       # Renderer: tab bar, address bar, profile panel, self-test
 ```
+
+## Self-test
+
+The sidebar has two tabs — **Config** and **Self-test**. Self-test probes the
+**current tab** and compares each surface against **that tab's own config**, so
+it answers "did *my* settings apply?" rather than "did some fixed set of values
+apply?".
+
+Each surface gets one of four verdicts:
+
+| Verdict | Meaning |
+|---|---|
+| `pass` | configured, and the surface reports exactly what was configured |
+| `fail` | configured, but the surface reports something else |
+| `skip` | not configured, or the probe cannot read it on this page |
+| `error` | the probe itself threw |
+
+**`skip` is not a success.** A key you never set was never checked, so painting
+it green would let a default profile read as all-clear. Skipped rows are hidden
+by default; tick *Show skipped surfaces* to see all of them.
+
+The failure cases are the reason the pane exists. A key can look set — the
+config editor shows it, the Inspector counts it as active — while the renderer
+quietly uses something else, most often the real hardware value. Failures carry
+a one-line explanation drawn from traps that were actually measured:
+
+- `webgl_max_viewport_dims: "8192"` (quoted) → rejected by the kernel, falls
+  back to the real `32767,32767`
+- `webgpu_limits` with quotes inside → `FpConfigString` truncates at the first
+  quote and applies nothing
+- `audio_data_strength` as a number → serialised unquoted, so `FpConfigString`
+  cannot read it and the `0.0005` default is used
+- `webgpu_device` / `webgpu_description` → only exposed when
+  `WebGPUDeveloperFeatures` is enabled
+
+### One probe, two callers
+
+`Client/fp-probe.js` holds the probe script and `compare()`. Both the self-test
+panel and `fingerprint/scripts/smoke.js` require it — there is deliberately only
+one probe, because two copies would silently disagree about what "working"
+means. It was extracted verbatim from smoke.js and verified equivalent:
+`PROBE` byte-identical, `EXPECTED` 28/28 keys with identical values and order,
+`compare()` behaviourally identical across 39 cases.
+
+Tests: `test-selftest.js` (verdict logic, including two real trap cases) and
+`test-selftest-ui.js` (the pane's DOM/IPC wiring).
 
 ### Isolation Model
 
 Each tab creates a `BrowserView` with:
 - `partition: fp-tab-{tabId}` — full cookie/session/storage isolation
-- `fingerprint: { ... }` — 60-key config injected per-renderer via `--fingerprint-config`
+- `fingerprint: { ... }` — 63-key config injected per-renderer via `--fingerprint-config`
 - `userAgent` — applied per-partition via `session.setUserAgent()`
 - Separate renderer process — no shared JS heap
 
 The User-Agent lives **beside** `fingerprint` in a profile, never inside it.
 `fpNormalizeConfig()` drops every key the kernel does not know, so a UA nested
 in the fingerprint object would be silently discarded. It is also a different
-layer: the 60 keys are read by Blink, whereas the UA is applied by Electron.
+layer: the 63 keys are read by Blink, whereas the UA is applied by Electron.
 
 **Ordering matters:** `setUserAgent()` must be called **before** the
 `BrowserView` is constructed. Measured: setting it on an already-open session
@@ -101,7 +154,7 @@ electron Client/test-render.js
 # Verify per-tab isolation + runtime profile switch (10 checks)
 electron Client/test-integration.js
 
-# Client schema vs kernel patch: 60 keys, 15 groups, no orphans (14 checks)
+# Client schema vs kernel patch: 63 keys, 15 groups, no orphans (14 checks)
 node Client/test-schema.js
 
 # Random profile coherence over 300 samples (7 checks)
@@ -120,7 +173,7 @@ electron Client/test-webrtc-ip.js
 electron fingerprint/scripts/smoke.js --isolation --verbose
 ```
 
-### Fingerprint Keys (60 keys / 15 functional groups)
+### Fingerprint Keys (63 keys / 15 functional groups)
 
 Generated from `fp-schema.js`, the single source of truth. Every key is implemented
 in the kernel patch and verified by `test-schema.js` (60/60 exact match).
@@ -223,7 +276,7 @@ Set `ELECTRON_BIN` if your binary is not at `../src/out/Default/electron.exe`.
 - **`test-schema.js`** (static) proves the client and kernel *agree* on all 60
   keys. It proves nothing about whether the kernel *honours* a value.
 - **`test-coverage-audit.js`** (live, 34 checks) applies a config in a real
-  browser and asserts each surface actually reports it. All 60 keys are
+  browser and asserts each surface actually reports it. All 63 keys are
   covered and nothing is skipped.
 
 The gap between them is real. When the audit was first written, 10 checks

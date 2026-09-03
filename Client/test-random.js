@@ -270,7 +270,7 @@ check("randomizer exercises most groups", seenGroups.size >= 12,
   seenGroups.size + "/" + schema.FP_GROUP_IDS.length + " groups populated");
 
 // NOTE: checking that the ua_* keys are PRESENT would be a tautology.
-// fpDefaultConfig() seeds all 60 keys, so fp always carries them whether or
+// fpDefaultConfig() seeds all 63 keys, so fp always carries them whether or
 // not generateRandomProfile() assigns them - the check can never fail. What is
 // load-bearing is that an explicit value survives normalization, since that is
 // the path every operator override takes. Verified by mutation: deleting the
