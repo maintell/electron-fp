@@ -216,10 +216,10 @@ index 6b5c4ff4e2..4d5f3bddff 100644
  
 diff --git a/shell/browser/ui/webui/fingerprint_ui.cc b/shell/browser/ui/webui/fingerprint_ui.cc
 new file mode 100644
-index 0000000000..e591a25338
+index 0000000000..6a55d028fa
 --- /dev/null
 +++ b/shell/browser/ui/webui/fingerprint_ui.cc
-@@ -0,0 +1,884 @@
+@@ -0,0 +1,893 @@
 +// Copyright (c) 2026 Microsoft, Inc.
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE.
@@ -527,11 +527,19 @@ index 0000000000..e591a25338
 +  for (const GroupDef& def : kGroups) {
 +    int active = 0;
 +    int total = 0;
++    base::ListValue group_keys;
 +    for (const char* key : def.keys) {
 +      if (!key) {
 +        continue;  // unused tail slots in the fixed-size array
 +      }
 +      ++total;
++      // Exposed so a test can pin GROUP MEMBERSHIP, not just the counts. The
++      // counts alone cannot detect a key filed under the wrong group: every
++      // per-group total, the 63-key total and all 15 group ids stay identical
++      // while the key is reported under the wrong heading. Duplicating the
++      // schema in C++ (see the note in fingerprint_ui.h) makes that drift
++      // possible; this makes it observable.
++      group_keys.Append(key);
 +      if (is_set(std::string(key), config.Find(std::string_view(key)))) {
 +        ++active;
 +      }
@@ -543,6 +551,7 @@ index 0000000000..e591a25338
 +    g.Set("label", def.label);
 +    g.Set("active", active);
 +    g.Set("total", total);
++    g.Set("keys", std::move(group_keys));
 +    coverage.Append(std::move(g));
 +    if (active == 0) {
 +      empty_groups.Append(def.id);

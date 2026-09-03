@@ -441,6 +441,39 @@ async function run() {
       check('numeric key holding "0" is NOT counted as active',
         hw && hw.active === 1, 'hardware active=' + (hw && hw.active) + ' expected 1');
 
+      // GROUP MEMBERSHIP, not just counts.
+      //
+      // The C++ mirrors the schema's groups (see the note in fingerprint_ui.h).
+      // Every count-level check passes on a MIS-GROUPED key: all 15 group ids,
+      // all per-group totals and the 63 total are unchanged when a key sits in
+      // the wrong group - it would simply be reported under the wrong heading.
+      // The Inspector therefore serves each group's key list, and this asserts
+      // it against fpCoverage() exactly.
+      const membershipMismatch = [];
+      for (const g of jsCov) {
+        const cpp = (d.coverage || []).find((x) => x.id === g.id);
+        const cppKeys = ((cpp && cpp.keys) || []).slice().sort();
+        const jsKeys = g.keys.slice().sort();
+        if (JSON.stringify(cppKeys) !== JSON.stringify(jsKeys)) {
+          const onlyCpp = cppKeys.filter((k) => jsKeys.indexOf(k) === -1);
+          const onlyJs = jsKeys.filter((k) => cppKeys.indexOf(k) === -1);
+          membershipMismatch.push(g.id + ' [+C++: ' + (onlyCpp.join(',') || '-') +
+            ' +JS: ' + (onlyJs.join(',') || '-') + ']');
+        }
+      }
+      check('group membership matches fpCoverage() key-for-key',
+        membershipMismatch.length === 0,
+        membershipMismatch.join(' | ') || 'all 15 groups identical');
+
+      // And no key may be missing from, or duplicated across, the C++ table.
+      const allCppKeys = [];
+      for (const g of (d.coverage || [])) allCppKeys.push(...(g.keys || []));
+      const dupes = allCppKeys.filter((k, i) => allCppKeys.indexOf(k) !== i);
+      check('no key appears in two C++ groups', dupes.length === 0,
+        dupes.join(',') || 'none');
+      check('C++ group table covers all 63 keys',
+        allCppKeys.length === 63, String(allCppKeys.length));
+
       // And a rule that consumes a numeric key must not evaluate it as a value
       // when coverage considers it unset - otherwise the two disagree about
       // whether the surface is even configured.

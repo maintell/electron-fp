@@ -305,11 +305,19 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
   for (const GroupDef& def : kGroups) {
     int active = 0;
     int total = 0;
+    base::ListValue group_keys;
     for (const char* key : def.keys) {
       if (!key) {
         continue;  // unused tail slots in the fixed-size array
       }
       ++total;
+      // Exposed so a test can pin GROUP MEMBERSHIP, not just the counts. The
+      // counts alone cannot detect a key filed under the wrong group: every
+      // per-group total, the 63-key total and all 15 group ids stay identical
+      // while the key is reported under the wrong heading. Duplicating the
+      // schema in C++ (see the note in fingerprint_ui.h) makes that drift
+      // possible; this makes it observable.
+      group_keys.Append(key);
       if (is_set(std::string(key), config.Find(std::string_view(key)))) {
         ++active;
       }
@@ -321,6 +329,7 @@ std::string BuildInspectorDataFor(content::BrowserContext* context) {
     g.Set("label", def.label);
     g.Set("active", active);
     g.Set("total", total);
+    g.Set("keys", std::move(group_keys));
     coverage.Append(std::move(g));
     if (active == 0) {
       empty_groups.Append(def.id);
