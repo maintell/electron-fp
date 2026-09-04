@@ -241,6 +241,11 @@ electron Client/test-profile-tls.js
 # A TLS value of the wrong type must be refused, not silently ignored (43 checks)
 node Client/test-tls-types.js
 
+# The TLS group must be VISIBLE in the Config pane: first section, inside the
+# fold, styled distinctly. It once rendered as the 16th section at ~3013px in a
+# 2808px pane with no CSS at all, so users reported it as missing (9 checks)
+electron Client/test-tls-ui-visible.js
+
 # Opening a tab FROM a preset must apply that preset's TLS plane (9 checks)
 # This one caught a real bug: createTabView() passed the raw profile to
 # `fingerprint` and never called setSSLConfig(), so a Safari-preset tab
@@ -271,6 +276,18 @@ With the old loop, running Self-test on any tab except the front one reported
 fingerprint rather than a throttled timer. `test-probe-hidden-tab.js` asserts
 both halves: the loop uses no timer, and the probe actually completes while
 hidden.
+
+### Where to find the TLS settings in the UI
+
+Open the **Fingerprint** panel. The **TLS / HTTP2** group is the **first**
+section, marked with an amber left border and labelled `· setSSLConfig`. Its 9
+keys are the only ones applied to the network layer rather than the page.
+
+It is first because it was originally appended after the 15 Blink groups, which
+put it at roughly 3013px inside a 2808px pane — permanently below the fold, with
+nothing to mark it as different, so it read as absent. The amber accent exists
+because the distinguishing class (`fp-field-tls`) was being applied in JS with
+no CSS rule behind it.
 
 ### Preset profiles carry a TLS plane
 

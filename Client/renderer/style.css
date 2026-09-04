@@ -342,6 +342,22 @@ body {
 }
 .fp-field input:focus { border-color: #0078d4; }
 .fp-field input.active { border-color: #4ec9ff; color: #4ec9ff; }
+
+/* === TLS plane =============================================================
+   These 9 keys are delivered by session.setSSLConfig(), not
+   --fingerprint-config, and they are invisible to page JavaScript. They sat as
+   the 16th and last section, below the fold, with no styling at all - the
+   fp-field-tls class was applied in JS but had no CSS rule, so a user
+   scrolling the Config pane had nothing to tell them the section existed.
+   Give the plane a distinct accent so it reads as a separate layer. */
+.fp-group-tls { border-left: 3px solid #f4a742; }
+.fp-group-tls > .fp-group-head {
+  background: #332b1e; color: #f4a742;
+}
+.fp-group-tls > .fp-group-head:hover { background: #40351f; color: #ffc266; }
+.fp-field-tls label { color: #c9a26a; }
+.fp-field-tls input { border-color: #5a4a2e; }
+.fp-field-tls input.active { border-color: #f4a742; color: #f4a742; }
 /* === Status Bar === */
 #status-bar {
   display: flex;

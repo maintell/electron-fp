@@ -414,10 +414,13 @@ async function renderFpGroups() {
   const unknown = Object.keys(cfg).filter(function (k) { return !editableSet.has(k); });
 
   $fpGroups.innerHTML = '';
-  // Blink groups first, then the TLS group(s). Same rendering path for both -
-  // only the section header notes which plane a group belongs to.
-  const allGroups = (schema.groups || []).concat(
-    (schema.tls && schema.tls.groups) || []);
+  // TLS FIRST, then the Blink groups. These were appended last, which put them
+  // at roughly 3013px inside a 2808px pane - permanently below the fold, with
+  // 15 sections of page-level keys to scroll past. A user reported the TLS
+  // settings as simply absent. Putting the second delivery plane at the top
+  // also matches how it behaves: it is a different layer, not the 16th group.
+  const allGroups = ((schema.tls && schema.tls.groups) || []).concat(
+    schema.groups || []);
   for (const g of allGroups) {
     const tlsGroup = (schema.tls && schema.tls.groups || []).indexOf(g) >= 0;
     const keys = editable.filter(function (k) {
@@ -433,14 +436,24 @@ async function renderFpGroups() {
     activeTotal += active;
 
     const section = document.createElement('div');
-    section.className = 'fp-group';
+    // Tag the TLS plane so style.css can mark it: these keys travel by
+    // setSSLConfig() and are invisible to page JS, so they must read as a
+    // different layer, not as just another group at the bottom of the list.
+    section.className = 'fp-group' + (tlsGroup ? ' fp-group-tls' : '');
 
     const head = document.createElement('button');
     head.className = 'fp-group-head';
     head.type = 'button';
     const caret = fpGroupCollapsed[g.id] ? '\u25B6' : '\u25BC';
-    head.textContent = caret + ' ' + g.label + '  (' + active + '/' + keys.length + ')';
-    head.title = g.desc;
+    // The TLS group names its delivery mechanism in the header. Without it the
+    // section is just one more heading, and the one thing a user must know about
+    // these keys - that they are applied to the network layer, not the page -
+    // is nowhere on screen.
+    head.textContent = caret + ' ' + g.label + '  (' + active + '/' + keys.length + ')' +
+      (tlsGroup ? '  \u00b7 setSSLConfig' : '');
+    head.title = g.desc + (tlsGroup
+      ? ' \u2014 applied to the session, invisible to page JavaScript'
+      : '');
     if (active > 0) head.classList.add('has-active');
 
     const body = document.createElement('div');
