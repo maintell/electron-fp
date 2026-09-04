@@ -38,7 +38,11 @@ const EXPECTED = {
   do_not_track: '1',
   tz_id: 'America/New_York',
   canvas_noise_seed: 12345,
-  canvas_noise_strength: 2,
+  // canvas_noise_strength is deliberately NOT here. The probe never reads it
+  // (it perturbs pixels; it is not a value a page can read back), so listing it
+  // made smoke.js report a permanent "SKIP canvas_noise_strength (not probed)"
+  // and quietly inflated the coverage count. It is asserted properly, by
+  // measuring the perturbation magnitude, in test-canvas-strength.js.
   net_effective_type: '4g',
   net_rtt_ms: 50,
   net_downlink_mbps: '10',
@@ -166,6 +170,12 @@ function compare(key, expected, got) {
   if (key === 'webgl_max_viewport_dims') {
     return String(got) === `${expected},${expected}` || String(got) === String(expected);
   }
+  // NOTE: the shared probe does NOT read perf_now_precision_ms (it is not in
+  // PROBE_FIELDS), so this case is unreachable from the self-test panel. It is
+  // kept because smoke.js compares against EXPECTED through the same compare(),
+  // and because perf_now_precision_ms is genuinely asserted in
+  // test-covered-surfaces.js - the point being that this special case must not
+  // be read as evidence that the PROBE covers the key. It does not.
   if (key === 'perf_now_precision_ms') return Number(got) % Number(expected) === 0;
   if (key === 'webgpu_features') {
     const g = String(got).split(',').sort().join(',');
