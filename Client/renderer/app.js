@@ -375,21 +375,59 @@ async function ensureFpSchema() {
   return fpSchema;
 }
 
+/**
+ * Every key the user may put in the JSON editor: the 63 Blink keys plus the 9
+ * TLS keys.
+ *
+ * The two planes live in separate tables (see fp-schema.js) because they are
+ * delivered differently, but the editor and the group list show them together.
+ * Without this union the "unknown key" filter below would flag all 9 TLS keys
+ * as unknown and drop them - which is how they came to be missing from the
+ * client in the first place.
+ */
+function allEditableKeys(schema) {
+  const keys = Object.keys(schema.keys || {});
+  const tls = schema.tls && schema.tls.keys ? Object.keys(schema.tls.keys) : [];
+  return keys.concat(tls);
+}
+
+/** Key metadata from whichever plane owns it. */
+function keyMeta(schema, k) {
+  if (schema.keys && schema.keys[k]) return schema.keys[k];
+  if (schema.tls && schema.tls.keys && schema.tls.keys[k]) return schema.tls.keys[k];
+  return null;
+}
+
+/** Is a key from the TLS plane? */
+function isTlsKey(schema, k) {
+  return !!(schema.tls && schema.tls.keys && schema.tls.keys[k]);
+}
+
 /** Render all group sections from the current JSON editor content. */
 async function renderFpGroups() {
   const schema = await ensureFpSchema();
   const cfg = tryParseJson($fpJsonEditor.value) || {};
 
   let activeTotal = 0, keyTotal = 0;
-  const unknown = Object.keys(cfg).filter(function (k) { return !(k in schema.keys); });
+  const editable = allEditableKeys(schema);
+  const editableSet = new Set(editable);
+  const unknown = Object.keys(cfg).filter(function (k) { return !editableSet.has(k); });
 
   $fpGroups.innerHTML = '';
-  for (const g of schema.groups) {
-    const keys = Object.keys(schema.keys).filter(function (k) {
-      return schema.keys[k].group === g.id;
+  // Blink groups first, then the TLS group(s). Same rendering path for both -
+  // only the section header notes which plane a group belongs to.
+  const allGroups = (schema.groups || []).concat(
+    (schema.tls && schema.tls.groups) || []);
+  for (const g of allGroups) {
+    const tlsGroup = (schema.tls && schema.tls.groups || []).indexOf(g) >= 0;
+    const keys = editable.filter(function (k) {
+      if (tlsGroup) return isTlsKey(schema, k);
+      const meta = schema.keys[k];
+      return !!meta && meta.group === g.id;
     });
     const active = keys.filter(function (k) {
-      return isKeyActive(schema.keys[k].def, cfg[k]);
+      const meta = keyMeta(schema, k);
+      return meta ? isKeyActive(meta.def, cfg[k]) : false;
     }).length;
     keyTotal += keys.length;
     activeTotal += active;
@@ -415,32 +453,52 @@ async function renderFpGroups() {
     });
 
     for (const k of keys) {
-      const meta = schema.keys[k];
+      const meta = keyMeta(schema, k);
+      if (!meta) continue;
       const row = document.createElement('div');
-      row.className = 'fp-field';
+      row.className = 'fp-field' + (isTlsKey(schema, k) ? ' fp-field-tls' : '');
 
       const label = document.createElement('label');
-      label.textContent = k;
+      label.textContent = (meta.label ? meta.label + ' \u00b7 ' : '') + k;
       label.title = g.label + ' \u00b7 ' + meta.kind;
 
       const input = document.createElement('input');
-      input.type = (meta.kind === 'int' || meta.kind === 'int64') ? 'number' : 'text';
-      input.dataset.key = k;
-      input.value = (k in cfg) ? String(cfg[k]) : String(meta.def);
-      if (isKeyActive(meta.def, cfg[k])) input.classList.add('active');
+      // TLS bools render as a checkbox so the user cannot type "yes" and get a
+      // coercion surprise; the int/u16list kinds stay numeric text.
+      if (meta.kind === 'bool') {
+        input.type = 'checkbox';
+        input.dataset.key = k;
+        input.checked = (k in cfg) ? isKeyActive(meta.def, cfg[k]) : false;
+        if (isKeyActive(meta.def, cfg[k])) input.classList.add('active');
+      } else {
+        input.type = (meta.kind === 'int' || meta.kind === 'int64') ? 'number' : 'text';
+        input.dataset.key = k;
+        input.value = (k in cfg) ? String(cfg[k]) : String(meta.def);
+        if (isKeyActive(meta.def, cfg[k])) input.classList.add('active');
+      }
       input.title = meta.kind + ' value';
 
       // Field -> JSON: the textarea stays the single source of truth.
       input.addEventListener('change', function () {
         const next = tryParseJson($fpJsonEditor.value) || {};
-        const raw = input.value;
-        if (meta.kind === 'int' || meta.kind === 'int64') {
-          const n = Number(raw);
-          if (raw === '' || Number.isNaN(n)) delete next[k];
-          else next[k] = n;
+        // A checkbox is tri-state in meaning: unchecked means "not configured"
+        // (delete the key) rather than "false", because setting
+        // fpGreaseEnabled:false is a real, different instruction from not
+        // mentioning it. So the box is checked=configured, and a separate
+        // control would be needed to say "explicitly false" - see the hint.
+        if (meta.kind === 'bool') {
+          if (input.checked) next[k] = true;
+          else delete next[k];
         } else {
-          if (raw === '') delete next[k];
-          else next[k] = raw;
+          const raw = input.value;
+          if (meta.kind === 'int' || meta.kind === 'int64') {
+            const n = Number(raw);
+            if (raw === '' || Number.isNaN(n)) delete next[k];
+            else next[k] = n;
+          } else {
+            if (raw === '') delete next[k];
+            else next[k] = raw;
+          }
         }
         $fpJsonEditor.value = JSON.stringify(next, null, 2);
         renderFpGroups();
@@ -616,26 +674,35 @@ function renderSelfTest(result) {
     return;
   }
 
-  const rows = result.rows || [];
+  // Two planes, one list. The TLS rows come from a ClientHello captured in the
+  // main process (the page cannot see its own handshake), so they arrive in a
+  // separate array - but they are the user's fingerprints too and belong in the
+  // same verdict list, not in a corner the eye skips.
+  const rows = (result.rows || []).concat(result.tlsRows || []);
   const s = result.summary || {};
-  // All four verdicts, including error. The summary originally showed only
-  // pass/fail/skip, so a probe that threw produced a summary reading
-  // "0 pass 0 fail 0 skip" with no indication that anything went wrong.
+  const ts = result.tlsSummary || {};
+  const sum = (f) => (s[f] || 0) + (ts[f] || 0);
   $fpSelfTestSummary.innerHTML =
-    '<span class="fp-badge fp-badge-pass">' + (s.pass || 0) + ' pass</span> ' +
-    '<span class="fp-badge fp-badge-fail">' + (s.fail || 0) + ' fail</span> ' +
-    '<span class="fp-badge fp-badge-unknown">' + (s.unknown || 0) + ' unknown</span> ' +
-    '<span class="fp-badge fp-badge-skip">' + (s.skip || 0) + ' skip</span> ' +
-    '<span class="fp-badge fp-badge-error">' + (s.error || 0) + ' error</span>';
+    '<span class="fp-badge fp-badge-pass">' + sum('pass') + ' pass</span> ' +
+    '<span class="fp-badge fp-badge-fail">' + sum('fail') + ' fail</span> ' +
+    '<span class="fp-badge fp-badge-unknown">' + sum('unknown') + ' unknown</span> ' +
+    '<span class="fp-badge fp-badge-skip">' + sum('skip') + ' skip</span> ' +
+    '<span class="fp-badge fp-badge-error">' + sum('error') + ' error</span>';
+
+  // A TLS capture failure is shown even when the page probe succeeded. Hiding
+  // it behind "N pass" would let a user read the pane as fully verified.
+  const tlsError = result.tlsError
+    ? '<div class="fp-selftest-error">TLS: ' + escapeHtml(result.tlsError) + '</div>'
+    : '';
 
   const showSkipped = $fpSelfTestShowSkipped.checked;
   const visible = showSkipped ? rows : rows.filter((r) => r.verdict !== 'skip');
 
   if (!visible.length) {
-    $fpSelfTestResults.innerHTML = showSkipped
+    $fpSelfTestResults.innerHTML = tlsError + (showSkipped
       ? '<div class="fp-selftest-empty">No surfaces probed.</div>'
       : '<div class="fp-selftest-empty">No configured surfaces to check. ' +
-        'Set some fingerprint keys, or tick "Show skipped surfaces".</div>';
+        'Set some fingerprint keys, or tick "Show skipped surfaces".</div>');
     return;
   }
 
@@ -652,9 +719,15 @@ function renderSelfTest(result) {
   for (const g of ((fpSchema && fpSchema.groups) || [])) {
     groupsById.set(g.id, g.label || g.id);
   }
+  // TLS groups too, so a TLS row lands under its own heading rather than
+  // falling through to "Other" - which is where anything unrecognised goes and
+  // where a reader would not think to look for it.
+  for (const g of (((fpSchema && fpSchema.tls) ? fpSchema.tls.groups : []) || [])) {
+    groupsById.set(g.id, g.label || g.id);
+  }
   const buckets = new Map();
   for (const r of visible) {
-    const meta = fpSchema && fpSchema.keys && fpSchema.keys[r.key];
+    const meta = keyMeta(fpSchema || {}, r.key);
     const gid = (meta && meta.group && groupsById.has(meta.group))
       ? meta.group : 'other';
     if (!buckets.has(gid)) {
@@ -702,7 +775,7 @@ function renderSelfTest(result) {
       '</div>' + b.rows.map(renderRow).join('') + '</div>';
   }).join('');
 
-  $fpSelfTestResults.innerHTML = html;
+  $fpSelfTestResults.innerHTML = tlsError + html;
 }
 
 async function runSelfTest() {

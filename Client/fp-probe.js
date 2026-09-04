@@ -179,9 +179,31 @@ const PROBE = `(async () => {
     // the probe then reports the key as broken when it is working. Yield between
     // samples so the clock actually advances. (Measured: tight loop -> 1 with
     // perf_now_precision_ms=100; spaced sampling -> 100.)
+    //
+    // The yield MUST NOT be setTimeout. A BrowserView that is not the visible
+    // tab has document.visibilityState "hidden", and Chromium throttles timers
+    // in hidden pages to roughly one tick per second: 3 nested 8ms timeouts
+    // measured 2999ms, so this loop needed ~24s and blew the self-test's 15s
+    // probe timeout. The whole self-test then reported "probe timeout" for
+    // EVERY key, which reads as a broken fingerprint rather than a throttled
+    // timer. Measured while hidden: setTimeout(0) x24 = 17117ms,
+    // requestAnimationFrame x24 = never settles.
+    //
+    // The yield is a MessageChannel round-trip (no timer, so no throttling)
+    // PLUS a short busy-wait, because the two requirements pull in opposite
+    // directions:
+    //   - yielding alone is too FAST: 24 samples span 3ms with 4 distinct
+    //     values, so a quantised clock still reads granularity 1 and the probe
+    //     reports a working key as broken.
+    //   - any timer-based wait is too SLOW once throttled.
+    // The busy-wait costs real wall-clock (2ms measured) without a timer.
+    // MessageChannel + 2ms spin measured 51ms total, 48ms span, 24 distinct
+    // values while hidden - enough to resolve a 100ms quantisation grid.
     try{
       const vals=[];
-      for(let i=0;i<24;i++){ vals.push(performance.now()); await new Promise(rs=>setTimeout(rs,8)); }
+      const yieldToEventLoop=function(){ return new Promise(function(rs){ const c=new MessageChannel(); c.port1.onmessage=function(){ rs(); }; c.port2.postMessage(0); }); };
+      const spinWait=function(ms){ const end=performance.now()+ms; while(performance.now()<end){} };
+      for(let i=0;i<24;i++){ vals.push(performance.now()); spinWait(2); await yieldToEventLoop(); }
       const uniq=[...new Set(vals.map(v=>Math.round(v)))].sort((a,b)=>a-b);
       if(uniq.length>1){ let g=-1; for(let i=1;i<uniq.length;i++){ const gap=uniq[i]-uniq[i-1]; if(gap>0&&(g<0||gap<g)) g=gap; } r.perf_now_precision_ms=g; }
       else r.perf_now_precision_ms=1;   // clock not advancing within the sample

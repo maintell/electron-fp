@@ -574,6 +574,232 @@ function fpNormalizeUserAgent(value) {
   return trimmed;
 }
 
+// ============================================================================
+// TLS / HTTP2: a SECOND client-level surface, deliberately NOT in FP_KEYS.
+//
+// Same reasoning as the UA (see the block above), and for once the reason is
+// structural rather than stylistic:
+//
+//   * These 9 keys are NOT read by Blink. 40-net-tls.patch adds fp_* fields to
+//     net::SSLContextConfig and to the network::mojom::SSLConfig /
+//     NetworkContextParams mojom messages, and 50-electron-glue.patch exposes
+//     them through session.setSSLConfig(). That is a different API, a different
+//     layer and a different process (the network service) from
+//     --fingerprint-config.
+//   * fpNormalizeConfig() drops every key absent from FP_KEYS, so putting them
+//     inside `fingerprint` would silently discard them on apply.
+//   * test-schema.js asserts the client key set equals the kernel key set
+//     EXACTLY, so adding them to FP_KEYS would also break that assertion and,
+//     worse, make it look like the kernel reads them.
+//
+// So they travel beside the fingerprint, like the UA. fpSplitConfig() at the
+// bottom of this file is the single funnel that separates the two planes.
+
+const FP_TLS_KEYS = {
+  // JS option name (camelCase, what setSSLConfig() reads)
+  //   -> { kind, def, label, hint }
+  fpCipherList: { group: "tls",
+    kind: "cipherlist", def: "",
+    label: "Cipher list",
+    hint: 'OpenSSL cipher command, colon-separated. Use TLS 1.2 NAMES ' +
+      '(ECDHE-RSA-AES128-GCM-SHA256). TLS 1.3 names (TLS_AES_128_GCM_SHA256) ' +
+      'are accepted by setSSLConfig but rejected by BoringSSL, which kills ' +
+      'EVERY connection on the session - measured: 0 bytes of ClientHello, ' +
+      'net::ERR_UNEXPECTED.',
+  },
+  fpSignatureAlgorithms: { group: "tls",
+    kind: "u16list", def: "",
+    label: "Signature algorithms",
+    hint: 'Comma-separated uint16 code points, e.g. "1027,1283" ' +
+      '(0x0403 ecdsa_secp256r1_sha256, 0x0503 rsa_pss_rsae_sha256).',
+  },
+  fpGreaseEnabled: { group: "tls",
+    kind: "bool", def: "",
+    label: "GREASE",
+    hint: "Insert GREASE values into the ClientHello. Measured: false drops " +
+      "the GREASE cipher from the list (1 -> 0).",
+  },
+  fpGreaseSigalgsEnabled: { group: "tls",
+    kind: "bool", def: "",
+    label: "GREASE signature algorithms",
+    hint: "Insert a GREASE value into the signature_algorithms extension.",
+  },
+  fpPermuteExtensions: { group: "tls",
+    kind: "bool", def: "",
+    label: "Permute extensions",
+    hint: "Randomize ClientHello extension order.",
+  },
+  fpExtensionOrder: { group: "tls",
+    kind: "u16list", def: "",
+    label: "Extension order",
+    hint: 'Comma-separated uint16 extension types to force, e.g. "0,11,10". ' +
+      "Only meaningful together with Permute extensions.",
+  },
+  fpOmitAlpn: { group: "tls",
+    kind: "bool", def: "",
+    label: "Omit ALPN",
+    hint: "Drop the ALPN extension entirely (changes the JA3/JA4 shape).",
+  },
+  fpOmitSessionTicket: { group: "tls",
+    kind: "bool", def: "",
+    label: "Omit session ticket",
+    hint: "Drop the session_ticket extension. Measured: extension count 17 -> 16.",
+  },
+  fpAdvertisedVersionMax: { group: "tls",
+    kind: "int", def: 0,
+    label: "Advertised max version",
+    hint: "uint16 TLS version to advertise, e.g. 771 (TLS 1.2) or 772 " +
+      "(TLS 1.3). Measured: 771 changes the offered cipher set entirely " +
+      "(16 -> 13 ciphers, different list).",
+  },
+};
+
+const FP_TLS_KEY_NAMES = Object.keys(FP_TLS_KEYS);
+
+/** True when a TLS key holds a value that differs from its disabled default. */
+function fpTlsIsActive(key, value) {
+  const spec = FP_TLS_KEYS[key];
+  if (!spec) return false;
+  if (value === undefined || value === null || value === "") return false;
+  if (typeof spec.def === "number") return Number(value) !== 0;
+  return String(value) !== String(spec.def);
+}
+
+/**
+ * Coerce a TLS value into the type the gin converter in 50-electron-glue.patch
+ * expects. That converter reads an explicit whitelist with typed Get() calls,
+ * so a string where a bool is expected is not coerced - it throws.
+ *
+ * This is the mirror image of the fpCoerce() trap in the other direction:
+ * there, a NUMBER silently disables a string-read kernel key. Here, a STRING
+ * loudly breaks the call. Both are avoided by coercing at the funnel.
+ */
+function fpTlsCoerce(key, value) {
+  const spec = FP_TLS_KEYS[key];
+  if (!spec || value === undefined || value === null) return value;
+  if (spec.kind === "bool") {
+    if (value === true) return true;
+    if (value === false) return false;
+    const s = String(value).trim().toLowerCase();
+    if (s === "true" || s === "1") return true;
+    if (s === "false" || s === "0") return false;
+    return false;
+  }
+  if (spec.kind === "int") {
+    const n = Number(value);
+    if (!isFinite(n)) return 0;
+    return Math.trunc(n);
+  }
+  if (spec.kind === "u16list") {
+    if (Array.isArray(value)) {
+      return value.map((v) => {
+        const n = Number(v);
+        return isFinite(n) ? Math.max(0, Math.min(0xffff, Math.trunc(n))) : 0;
+      }).filter((n) => n > 0);
+    }
+    // "1027,1283" -> [1027, 1283]. Hex ("0x0403") is accepted too, since that
+    // is how the code points are written in every TLS reference.
+    return String(value).split(",").map((s) => s.trim()).filter(Boolean)
+      .map((s) => {
+        const n = /^0x/i.test(s) ? parseInt(s, 16) : Number(s);
+        return isFinite(n) ? Math.max(0, Math.min(0xffff, Math.trunc(n))) : 0;
+      }).filter((n) => n > 0);
+  }
+  // cipherlist
+  return String(value).trim();
+}
+
+// TLS 1.3 cipher suite names, as BoringSSL spells them. setSSLConfig() accepts
+// these (it only rejects the empty string) and hands them to BoringSSL, which
+// rejects the WHOLE cipher command - after which the session cannot complete a
+// handshake at all. Measured:
+//
+//   fpCipherList: 'TLS_AES_128_GCM_SHA256'  ->  0 bytes of ClientHello,
+//                                               net::ERR_UNEXPECTED on every
+//                                               request in the session
+//   fpCipherList: 'ECDHE-RSA-AES128-GCM-SHA256'  ->  1751 bytes, works
+//
+// So they are rejected HERE, at apply time, with a message naming the
+// TLS 1.2 equivalent. Silently accepting them would make the browser unable to
+// load any page while the panel showed the profile as applied.
+const FP_TLS13_CIPHERS = [
+  'TLS_AES_128_GCM_SHA256',
+  'TLS_AES_256_GCM_SHA384',
+  'TLS_CHACHA20_POLY1305_SHA256',
+];
+
+/**
+ * Validate a cipher list before it reaches setSSLConfig().
+ * Returns { ok, error, ciphers }.
+ *
+ * Only the TLS 1.3-name case is rejected; an unknown-but-valid-shaped name is
+ * left alone rather than guessed at, because a whitelist of every OpenSSL
+ * cipher would go stale and then reject working values. The specific, measured
+ * foot-gun is what gets caught.
+ */
+function fpTlsValidateCipherList(value) {
+  const s = String(value == null ? '' : value).trim();
+  if (!s) return { ok: true, error: '', ciphers: [] };
+  const parts = s.split(':').map((x) => x.trim()).filter(Boolean);
+  const bad = parts.filter((p) => FP_TLS13_CIPHERS.includes(p.toUpperCase()));
+  if (bad.length) {
+    return {
+      ok: false,
+      error: 'TLS 1.3 cipher names break every connection on the session ' +
+        '(BoringSSL rejects the whole cipher command). Offending: ' +
+        bad.join(', ') + '. Use the TLS 1.2 name instead, e.g. ' +
+        'ECDHE-RSA-AES128-GCM-SHA256.',
+      ciphers: parts,
+    };
+  }
+  return { ok: true, error: '', ciphers: parts };
+}
+
+const FP_TLS_GROUPS = [
+  { id: "tls", label: "TLS / HTTP2", desc: "ClientHello shape: ciphers, GREASE, extensions, ALPN, max version" },
+];
+
+/**
+ * Split a flat config object into the two delivery planes.
+ *
+ * Blink keys (FP_KEYS) go to --fingerprint-config via BrowserView's
+ * `fingerprint` webPreference; TLS keys (FP_TLS_KEYS) go to
+ * session.setSSLConfig(). Mixing them is the trap this exists to prevent:
+ * fpNormalizeConfig() drops unknown keys, so a TLS key placed inside the
+ * fingerprint object is silently discarded and the user sees a profile that
+ * claims a TLS fingerprint it does not produce.
+ *
+ * Returns { fingerprint, tls, unknown }. `unknown` is reported rather than
+ * dropped silently, so a typo surfaces at apply time instead of becoming a
+ * fingerprint the browser never had.
+ */
+function fpSplitConfig(input) {
+  const fingerprint = {};
+  const tls = {};
+  const unknown = [];
+  if (input && typeof input === "object") {
+    for (const [k, v] of Object.entries(input)) {
+      if (Object.prototype.hasOwnProperty.call(FP_KEYS, k)) {
+        fingerprint[k] = v;
+      } else if (Object.prototype.hasOwnProperty.call(FP_TLS_KEYS, k)) {
+        tls[k] = v;
+      } else {
+        unknown.push(k);
+      }
+    }
+  }
+  // Normalize the Blink plane (fills defaults, coerces string-read kinds).
+  const norm = fpNormalizeConfig(fingerprint);
+  // Coerce the TLS plane into the types the gin converter demands.
+  const tlsOut = {};
+  for (const k of FP_TLS_KEY_NAMES) {
+    if (Object.prototype.hasOwnProperty.call(tls, k)) {
+      tlsOut[k] = fpTlsCoerce(k, tls[k]);
+    }
+  }
+  return { fingerprint: norm.config, tls: tlsOut, unknown: unknown.concat(norm.unknown) };
+}
+
 module.exports = {
   FP_SCHEMA_VERSION,
   FP_KEYS,
@@ -586,6 +812,15 @@ module.exports = {
   fpKeysInGroup,
   fpCoverage,
   fpIsActive,
+  // TLS (second client-level surface, not a kernel key)
+  FP_TLS_KEYS,
+  FP_TLS_KEY_NAMES,
+  FP_TLS_GROUPS,
+  fpTlsIsActive,
+  fpTlsCoerce,
+  fpSplitConfig,
+  fpTlsValidateCipherList,
+  FP_TLS13_CIPHERS,
   // UA (client-level surface, not a kernel key)
   FP_UA_PRESETS,
   FP_PLATFORM_BY_ID,

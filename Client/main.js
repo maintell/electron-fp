@@ -7,12 +7,18 @@ const http = require('http');
 // Shared probe: the SAME PROBE / compare() that fingerprint/scripts/smoke.js
 // uses. One probe, two callers - see Client/fp-probe.js.
 const { PROBE, compare, verdicts } = require('./fp-probe');
+const { captureClientHello, tlsVerdicts } = require('./tls-probe');
+// TLS plane (session.setSSLConfig, not a kernel key). No comment inside the
+// braces: test-app-copy-sync.js parses this destructure by splitting on commas
+// and a commented line would be read as an export name that does not exist.
 const { fpDefaultConfig, fpNormalizeConfig, fpCoverage, fpKeysInGroup, fpIsActive,
         FP_KEYS, FP_KEY_NAMES, FP_SCHEMA_VERSION, FP_GROUPS, FP_GROUP_IDS,
-FP_UA_PRESETS, fpRandomUserAgent, fpNormalizeUserAgent,
-      fpPlatformForUserAgent,
-      fpVendorForUserAgent, fpPixelRatioForUserAgent,
-      fpLanguagesForUserAgent } = require('./fp-schema');
+        FP_UA_PRESETS, fpRandomUserAgent, fpNormalizeUserAgent,
+        FP_TLS_KEYS, FP_TLS_KEY_NAMES, FP_TLS_GROUPS,
+        fpTlsIsActive, fpTlsCoerce, fpSplitConfig, fpTlsValidateCipherList,
+        fpPlatformForUserAgent,
+        fpVendorForUserAgent, fpPixelRatioForUserAgent,
+        fpLanguagesForUserAgent } = require('./fp-schema');
 
 // --- Profile Store ---
 const PROFILES_PATH = path.join(__dirname, 'profiles.json');
@@ -99,6 +105,50 @@ function applyTabUserAgent(partition, userAgent) {
 }
 
 /**
+ * Apply the TLS/HTTP2 plane of a profile: session.setSSLConfig().
+ *
+ * This is a DIFFERENT delivery path from the 63 Blink keys. Those travel as a
+ * `fingerprint` webPreference and are injected via --fingerprint-config at
+ * renderer startup; these are read by the network service out of
+ * net::SSLContextConfig, which 40-net-tls.patch plumbed from this API. They
+ * never meet, which is why fp-schema keeps them in separate tables and
+ * fpSplitConfig() is the only thing allowed to separate them.
+ *
+ * Ordering matters for the same reason it does for the UA: the config must be
+ * on the session BEFORE the first request that would open a socket, or the
+ * first handshake goes out with the native shape.
+ *
+ * Called with null/empty to reset a tab back to the native TLS shape.
+ */
+function applyTabTLSConfig(partition, tls) {
+  const sess = session.fromPartition(partition);
+  try {
+    if (!tls || typeof tls !== 'object' || !Object.keys(tls).length) {
+      return { ok: true };
+    }
+    // Reject the one measured foot-gun BEFORE it reaches the network service.
+    // setSSLConfig() would accept it, and the session would then fail every
+    // handshake with ERR_UNEXPECTED while the panel showed the profile applied.
+    if (Object.prototype.hasOwnProperty.call(tls, 'fpCipherList')) {
+      const v = fpTlsValidateCipherList(tls.fpCipherList);
+      if (!v.ok) {
+        console.error('[fp] refused TLS config: ' + v.error);
+        return { ok: false, error: v.error };
+      }
+    }
+    sess.setSSLConfig(tls);
+    return { ok: true };
+  } catch (e) {
+    // Not warn-and-continue. A TLS key that fails to apply means the session
+    // keeps the NATIVE ClientHello while the UI reports a configured profile -
+    // the exact "claims a fingerprint it does not produce" failure the
+    // 50-electron-glue patch calls out as the worst possible outcome.
+    console.error('[fp] failed to apply TLS config: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
  * Create a BrowserView for a tab with the given fingerprint profile.
  * Each tab gets a unique partition for full cookie/storage isolation.
  */
@@ -160,7 +210,7 @@ function createTabView(tabId, profileId) {
  * process is respawned so the new --fingerprint-config takes effect.
  * Returns the new view.
  */
-function recreateTabView(tabId, fingerprint, keepUrl, userAgent) {
+function recreateTabView(tabId, fingerprint, keepUrl, userAgent, tls) {
   const tab = tabs.get(tabId);
   if (!tab) return null;
 
@@ -169,8 +219,16 @@ function recreateTabView(tabId, fingerprint, keepUrl, userAgent) {
   try { tab.view.webContents.close(); } catch {}
 
   const partition = `fp-tab-${tabId}`;
-  // UA must be set before the view is constructed — see applyTabUserAgent().
+  // UA must be set before the view is constructed – see applyTabUserAgent().
   applyTabUserAgent(partition, userAgent);
+  // TLS likewise: the network service reads SSLContextConfig when it opens a
+  // socket, so it must be on the session before the view's first request.
+  // Persisted on the tab so the self-test and the UI can report what is live.
+  tab.tls = tls || null;
+  const tlsRes = applyTabTLSConfig(partition, tab.tls);
+  // Recorded on the tab rather than returned, because recreateTabView() already
+  // returns the view and changing that would touch every caller.
+  tab.tlsRefused = tlsRes.ok ? null : (tlsRes.error || 'TLS config was refused');
   const view = new BrowserView({
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -383,15 +441,18 @@ function setupIPC() {
     const tab = tabs.get(tid);
     if (!tab) return false;
     try {
-      // Normalize against the canonical 63-key schema: fill missing keys with
-      // their disabled default and drop anything the kernel does not parse, so
-      // a hand-edited JSON blob can never ship an unknown/no-op field.
+      // Split into the two delivery planes BEFORE normalizing: fpNormalizeConfig
+      // drops every key absent from FP_KEYS, so running it on the whole blob
+      // would silently discard all 9 TLS keys. fpSplitConfig() routes Blink
+      // keys to --fingerprint-config and TLS keys to session.setSSLConfig().
       let apply = null;
+      let tlsApply = null;
       if (config && typeof config === 'object') {
-        const norm = fpNormalizeConfig(config);
-        apply = norm.config;
-        if (norm.unknown.length) {
-          console.warn('[fp] dropped unknown keys: ' + norm.unknown.join(', '));
+        const split = fpSplitConfig(config);
+        apply = split.fingerprint;
+        tlsApply = split.tls;
+        if (split.unknown.length) {
+          console.warn('[fp] dropped unknown keys: ' + split.unknown.join(', '));
         }
       }
 
@@ -405,12 +466,20 @@ function setupIPC() {
       tab.userAgent = ua;
 
       // Recreate the renderer (same partition) so the new fingerprint config
-      // is injected via --fingerprint-config at renderer startup, and the new
-      // UA is picked up by the fresh view.
-      recreateTabView(tid, apply, tab.url || 'about:blank', ua);
+      // is injected via --fingerprint-config at renderer startup, the new
+      // UA is picked up by the fresh view, and the TLS config is on the
+      // session before that view's first socket.
+      recreateTabView(tid, apply, tab.url || 'about:blank', ua, tlsApply);
       tab.profileId = config ? 'custom' : 'default';
       tab.profileName = config ? 'Custom' : 'Default';
       mainWindow?.webContents.send('tab:profile-changed', { tabId: tid, profileId: tab.profileId, profileName: tab.profileName });
+
+      // Report a refused TLS plane instead of claiming success. A bare `true`
+      // here would leave the UI showing an applied profile while the session
+      // still emits the native ClientHello.
+      if (tlsApply && Object.keys(tlsApply).length && tab.tlsRefused) {
+        return { ok: true, tlsError: tab.tlsRefused };
+      }
       return true;
     } catch { return false; }
   });
@@ -434,8 +503,12 @@ function setupIPC() {
       // Same partition as the tab, so cookies/storage survive the respawn.
       const ua = fpNormalizeUserAgent(userAgent);
       tab.userAgent = ua;
+      // Preserve the live TLS config. Omitting it here would silently reset the
+      // tab to the native ClientHello on every UA change, because
+      // recreateTabView() applies whatever it is handed - and "not handed" is
+      // indistinguishable from "deliberately cleared".
       recreateTabView(tid, tab.view.webContents.getFingerprintConfig?.(),
-        tab.url || 'about:blank', ua);
+        tab.url || 'about:blank', ua, tab.tls || null);
       mainWindow?.webContents.send('tab:profile-changed', {
         tabId: tid, profileId: tab.profileId, profileName: tab.profileName
       });
@@ -511,12 +584,22 @@ function setupIPC() {
   // failure mode this whole surface exists to prevent.
   ipcMain.handle('ua:platform-for', (e, ua) => fpPlatformForUserAgent(ua));
 
+  // The TLS plane is delivered as a SEPARATE group list rather than merged into
+  // `keys`/`groups`. Merging would make it indistinguishable from the 63 Blink
+  // keys, and the difference is not cosmetic: those go to --fingerprint-config,
+  // these go to session.setSSLConfig(). The renderer renders both but must not
+  // forget which is which, so the payload keeps them apart.
   ipcMain.handle('fp:schema', () => ({
     version: FP_SCHEMA_VERSION,
     keyCount: FP_KEY_NAMES.length,
     keys: FP_KEYS,
     groups: FP_GROUPS,
-    defaults: fpDefaultConfig()
+    defaults: fpDefaultConfig(),
+    tls: {
+      keyCount: FP_TLS_KEY_NAMES.length,
+      keys: FP_TLS_KEYS,
+      groups: FP_TLS_GROUPS,
+    }
   }));
   ipcMain.handle('fp:coverage', (e, cfg) => fpCoverage(cfg || {}));
 
@@ -614,7 +697,49 @@ function setupIPC() {
       explain: explainMismatch,
     });
 
-    return { rows, summary, url: needsTempOrigin ? '(temporary probe origin)' : priorUrl };
+    // --- TLS plane: measured in the MAIN process, not in the page ----------
+    // The ClientHello never reaches page JS, so the 9 TLS keys are invisible to
+    // PROBE and were absent from the panel entirely. tls-probe.js captures the
+    // real handshake off a loopback socket driven by this tab's own session.
+    const tlsCfg = tab.tls || {};
+    const hasTls = Object.keys(tlsCfg).some((k) => fpTlsIsActive(k, tlsCfg[k]));
+    let tlsRows = [], tlsSummary = null, tlsError = null;
+    if (hasTls) {
+      try {
+        const sess = session.fromPartition(`fp-tab-${tab.id}`);
+        // A baseline capture (native shape) is needed to judge the keys whose
+        // effect is only "the offered set changed" - cipher list, max version,
+        // permute, sigalgs. It runs in a throwaway partition configured with
+        // nothing, so it is the platform's own default ClientHello.
+        const baseSess = session.fromPartition('fp-tls-baseline-' + Date.now());
+        const baseCap = await captureClientHello(baseSess, 3500);
+        const cap = await captureClientHello(sess, 3500);
+        if (!cap.ok) {
+          tlsError = cap.error || 'could not capture a ClientHello';
+        } else {
+          const tv = tlsVerdicts(tlsCfg, cap.hello,
+            baseCap.ok ? baseCap.hello : null, fpTlsIsActive);
+          tlsRows = tv.rows;
+          tlsSummary = tv.summary;
+          if (!baseCap.ok) {
+            // Verdicts that needed a baseline are already 'unknown'; say why.
+            for (const r of tlsRows) {
+              if (r.verdict === 'unknown' && /baseline/.test(r.reason || '')) {
+                r.reason = 'baseline capture failed (' + (baseCap.error || 'unknown') + ')';
+              }
+            }
+          }
+        }
+      } catch (err) {
+        tlsError = String((err && err.message) || err);
+      }
+    }
+
+    return {
+      rows, summary,
+      tlsRows, tlsSummary, tlsError,
+      url: needsTempOrigin ? '(temporary probe origin)' : priorUrl,
+    };
   });
 }
 

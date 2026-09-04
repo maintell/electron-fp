@@ -140,6 +140,32 @@ ck('the README states the real self-test coverage',
       ', probe reads ' + probed + '/' + FP_KEY_NAMES.length
     : 'no coverage claim found in README');
 
+// The combined claim: Blink-probed + TLS keys over the TOTAL configurable
+// surfaces. "67 of the 72" is the number a reader will remember, so it must be
+// derived rather than typed - otherwise adding a TLS key or a probe field lets
+// it rot in the one place users look.
+const { FP_TLS_KEY_NAMES } = require(path.join(CLIENT, 'fp-schema.js'));
+const totalSurfaces = FP_KEY_NAMES.length + FP_TLS_KEY_NAMES.length;
+const verifiable = probed + FP_TLS_KEY_NAMES.length;
+const combined = [...md.matchAll(/(\d+)\s+of\s+the\s+(\d+)\s+configurable surfaces/g)]
+  .map((m) => ({ n: Number(m[1]), total: Number(m[2]) }));
+ck('the README states the real combined coverage (Blink + TLS)',
+  combined.length > 0 && combined.every(
+    (c) => c.n === verifiable && c.total === totalSurfaces),
+  combined.length
+    ? 'README says ' + combined[0].n + '/' + combined[0].total +
+      ', actual is ' + verifiable + '/' + totalSurfaces
+    : 'no combined claim found in README');
+
+// The TLS section must exist and list every TLS key. A key added to
+// fp-schema.js but not documented would be invisible to a user reading the
+// README to find out what is configurable.
+const tlsUndocumented = FP_TLS_KEY_NAMES.filter((k) => !new RegExp('`' + k + '`').test(md));
+ck('every TLS key is named in the README',
+  tlsUndocumented.length === 0,
+  tlsUndocumented.length ? 'undocumented: ' + tlsUndocumented.join(', ')
+    : FP_TLS_KEY_NAMES.length + ' keys documented');
+
 // Every key the README lists as unreadable must ACTUALLY be unreadable. Two
 // of the five are modifiers gated on a companion seed; three are geo keys that
 // need a privileged channel. If any of them becomes probeable, this fails and

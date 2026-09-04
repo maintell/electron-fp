@@ -23,6 +23,7 @@ out/Release/electron.exe Client/
   - Unique `partition` for full cookie/session/storage isolation
   - Independent 63-key fingerprint config
   - Independent User-Agent
+  - Independent 9-key TLS/HTTP2 config (`session.setSSLConfig()`)
 - **User-Agent coverage** (client-level) — per-tab UA applied via
   `session.setUserAgent()`, covering **both** `navigator.userAgent` and the HTTP
   `User-Agent` header. Presets, a preset dropdown, and free-form entry.
@@ -56,8 +57,11 @@ Client/
 ├── main.js          # Main process: tab lifecycle, IPC, fingerprint injection
 ├── preload.js       # Secure bridge (contextIsolation)
 ├── fp-schema.js     # 63-key schema, normalization, coverage, consistency rules
+│                    # + 9-key TLS table and fpSplitConfig() (the plane router)
 ├── fp-probe.js      # SHARED probe: PROBE script + compare(). Used by both the
 │                    # self-test panel and fingerprint/scripts/smoke.js
+├── tls-probe.js     # ClientHello capture + TLS verdicts. Runs in the MAIN
+│                    # process: the handshake is invisible to page JS
 ├── profiles.json    # Persistent profile storage
 ├── package.json
 ├── test-*.js        # Kernel regression tests (run: node run-tests.js)
@@ -74,7 +78,10 @@ The sidebar has two tabs — **Config** and **Self-test**. Self-test probes the
 it answers "did *my* settings apply?" rather than "did some fixed set of values
 apply?".
 
-The probe reads **58 of the 63 keys**. Each surface gets one of five verdicts:
+The probe reads **58 of the 63 keys** from inside the page. The 9 TLS keys are
+measured separately (see below), from a ClientHello captured in the main process,
+so **67 of the 72 configurable surfaces** can be verified. Each surface gets one
+of five verdicts:
 
 | Verdict | Meaning |
 |---|---|
@@ -94,6 +101,21 @@ a lie.
 **`skip` is not a success.** A key you never set was never checked, so painting
 it green would let a default profile read as all-clear. Skipped rows are hidden
 by default; tick *Show skipped surfaces* to see all of them.
+
+### TLS keys are measured differently
+
+The 9 TLS keys cannot be read from page JavaScript: the ClientHello is built and
+sent by the network service, and no page API exposes it. `tls-probe.js` therefore
+opens a loopback TCP server, drives one request through the tab's own session
+with `electron.net.request`, and parses the handshake bytes off the wire. That
+is what JA3/JA4 fingerprint from — the *offered* ClientHello — so it is the
+right thing to measure, and it needs no external site.
+
+Four of the nine keys (`fpCipherList`, `fpAdvertisedVersionMax`,
+`fpPermuteExtensions`, `fpSignatureAlgorithms`) can only be judged as "the
+offered set changed", so the self-test takes a second capture with no TLS config
+as a baseline. If that baseline fails, those keys read `unknown` rather than
+being guessed at.
 
 ### The 5 keys the self-test cannot show
 
@@ -190,9 +212,50 @@ electron Client/test-ui-sync.js
 # webrtc_ip reaches the kernel via --fingerprint-config (4 checks)
 electron Client/test-webrtc-ip.js
 
+# TLS keys: client table vs kernel setSSLConfig, plane splitting, the
+# TLS 1.3 cipher-name trap (49 checks)
+node Client/test-tls-keys.js
+
+# TLS verdict table: can this ClientHello be judged, and is 'unknown'
+# never reported as 'pass'? (29 checks)
+node Client/test-tls-verdicts.js
+
+# TLS end-to-end: a config typed as a user types it reaches the wire and
+# changes the real ClientHello (24 checks)
+electron Client/test-tls-e2e.js
+
+# TLS through the real GUI: open the panel, apply, click Self-test, read the
+# rendered verdicts back (12 checks)
+electron Client/test-tls-gui.js
+
+# The probe must finish on a HIDDEN tab (Chromium throttles timers there, and
+# a setTimeout-based sampling loop blew the 15s budget) (12 checks)
+electron Client/test-probe-hidden-tab.js
+
 # Upstream fingerprint smoke (window-level isolation, 20+ surfaces)
 electron fingerprint/scripts/smoke.js --isolation --verbose
 ```
+
+### The self-test works on a hidden tab too
+
+The probe's `perf_now_precision_ms` sampling loop must yield between samples or
+every reading lands on the same millisecond — but it must **not** yield with
+`setTimeout`. A tab that is not the visible one has
+`document.visibilityState === "hidden"`, and Chromium throttles timers in hidden
+pages to roughly one tick per second. Measured while hidden:
+
+| yield strategy | 24 samples took |
+|---|---|
+| `setTimeout(0)` | 17117ms |
+| `setTimeout(8)` (the old loop) | ~24000ms — blew the 15s budget |
+| `requestAnimationFrame` | never settles |
+| **MessageChannel + 2ms spin** (current) | **51ms** |
+
+With the old loop, running Self-test on any tab except the front one reported
+**"probe timeout after 15s" for every key** — which reads as a broken
+fingerprint rather than a throttled timer. `test-probe-hidden-tab.js` asserts
+both halves: the loop uses no timer, and the probe actually completes while
+hidden.
 
 ### Fingerprint Keys (63 keys / 15 functional groups)
 
@@ -226,6 +289,56 @@ Value encoding (kernel parser rules):
 - `dims` — `"min,max"` (WebGL ALIASED_*_RANGE)
 - `sp` — `"rangeMin,rangeMax,precision"` (highp shader precision)
 - `json` — JSON-encoded object (`webgpu_features` replaces, `webgpu_limits` merges)
+
+### TLS / HTTP2 keys (9 keys, a second delivery plane)
+
+**These are not part of the 63.** They live in a separate table (`FP_TLS_KEYS`)
+and take a different route to the wire, which is why they have their own section
+here rather than a row above:
+
+| | Blink keys (63) | TLS keys (9) |
+|---|---|---|
+| Read by | Blink | the network service |
+| Delivered via | `--fingerprint-config` | `session.setSSLConfig()` |
+| Configured in | `net::SSLContextConfig` | same, but a different field set |
+| Observable from | page JavaScript | a captured ClientHello only |
+
+Putting a TLS key inside the 63-key table would break both planes:
+`fpNormalizeConfig()` drops every key absent from `FP_KEYS`, so the key would be
+silently discarded at apply time while the panel showed it as configured. This
+is exactly how the 9 keys came to be implemented in the kernel and exposed by
+nothing in the client — no test compared the two sides, so nothing failed.
+`test-tls-keys.js` now asserts `fpNormalizeConfig()` would drop all 9 and that
+`fpSplitConfig()` preserves all 9, so the gap cannot reopen silently.
+
+| Key | Type | Measured effect |
+|---|---|---|
+| `fpCipherList` | string | offered cipher set changes (16 → 5 with one TLS 1.2 name) |
+| `fpSignatureAlgorithms` | list | `signature_algorithms` extension changes |
+| `fpGreaseEnabled` | bool | GREASE values appear/disappear (1 → 0) |
+| `fpGreaseSigalgsEnabled` | bool | a GREASE value joins the extensions |
+| `fpPermuteExtensions` | bool | extension order changes |
+| `fpExtensionOrder` | list | the named extensions appear in that order |
+| `fpOmitAlpn` | bool | `application_layer_protocol_negotiation` (0x0010) drops out |
+| `fpOmitSessionTicket` | bool | `session_ticket` (0x0023) drops out |
+| `fpAdvertisedVersionMax` | int | offered cipher set changes entirely |
+
+#### Do not put a TLS 1.3 cipher name in `fpCipherList`
+
+`setSSLConfig()` accepts `TLS_AES_128_GCM_SHA256` and hands it to BoringSSL,
+which rejects the whole cipher command — after which **every request on that
+session fails** with `net::ERR_UNEXPECTED` and not a single byte of ClientHello
+is sent. Measured:
+
+```
+fpCipherList: 'TLS_AES_128_GCM_SHA256'        ->  0 bytes, net::ERR_UNEXPECTED
+fpCipherList: 'ECDHE-RSA-AES128-GCM-SHA256'   ->  1751 bytes, works
+```
+
+`fpTlsValidateCipherList()` rejects the three TLS 1.3 names before they reach
+the network service, with a message naming a working TLS 1.2 equivalent. Unknown
+names are deliberately *not* whitelisted: a list of every OpenSSL cipher would
+go stale and then reject working values. Only the measured foot-gun is caught.
 
 Disabled defaults are deliberate: a profile must never claim a fingerprint surface
 it cannot back. Inconsistent surfaces are themselves a detection signal, so the

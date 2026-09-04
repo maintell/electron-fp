@@ -82,7 +82,8 @@ ck("packaged key count matches source", srcKeys === copyKeys,
 // the packaged app - launching electron.exe would have failed on
 // "Cannot find module './fp-probe'". A required module is exactly the kind of
 // file this check must cover.
-const CODE = ["main.js", "fp-schema.js", "fp-probe.js", "layout.js", "preload.js",
+const CODE = ["main.js", "fp-schema.js", "fp-probe.js", "tls-probe.js", "layout.js",
+  "preload.js",
   "package.json", "renderer/app.js", "renderer/index.html", "renderer/style.css"];
 for (const f of CODE) {
   const a = path.join(APP, f);
