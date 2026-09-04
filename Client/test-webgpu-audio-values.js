@@ -30,6 +30,18 @@
 const { app, BrowserWindow, session } = require('electron');
 const http = require('http');
 
+// webgpu_device / webgpu_description are only EXPOSED when Blink's
+// WebGPUDeveloperFeatures runtime-enabled feature is on; upstream builds
+// GPUAdapterInfo with vendor/architecture only otherwise, so both read as ""
+// no matter what the kernel applied.
+//
+// This switch must be appended BEFORE app ready, and it is the reason this
+// file used to SKIP those two keys permanently: it only flipped the STRICTNESS
+// of the assertion via an env var and never actually enabled the feature, so
+// the "verified: with the flag it applies exactly" comment was an unverified
+// claim. Enabling it here is what turns the two SKIPs into real assertions.
+app.commandLine.appendSwitch('enable-blink-features', 'WebGPUDeveloperFeatures');
+
 let pass = 0, fail = 0, skip = 0;
 function check(name, cond, detail) {
   if (cond === null || cond === undefined) {
@@ -167,11 +179,13 @@ let URL_;
       // builds GPUAdapterInfo with vendor/architecture only otherwise
       // (gpu_adapter.cc CreateAdapterInfoForAdapter). The keys still apply, they
       // are just not readable - so without the flag these two are reported as
-      // SKIP rather than FAIL. Verified: with
-      // --enable-blink-features=WebGPUDeveloperFeatures, webgpu_device applies
-      // exactly; without it, a.info.device is always "".
-      const devFeatures = process.argv.includes('--webgpu-dev-features') ||
-        /^1|true$/i.test(process.env.FP_WEBGPU_DEV_FEATURES || '');
+      // SKIP rather than FAIL when the feature is off, because the keys DO
+      // apply - they are merely unreadable. But the switch is appended at the
+      // top of this file, so on any normal run the feature is ON and these are
+      // real assertions. The env/argv escape hatch only exists for running
+      // this file against a build where the switch is ineffective.
+      const devFeatures = !process.argv.includes('--no-webgpu-dev-features') &&
+        !/^0|false$/i.test(process.env.FP_WEBGPU_DEV_FEATURES || '');
       const meta = await probeWith({
         webgpu_vendor: 'AcmeVendor',
         webgpu_architecture: 'acme-arch',
