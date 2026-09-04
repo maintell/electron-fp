@@ -95,7 +95,16 @@ const PROBE = `(async () => {
     r.screen_color_depth=screen.colorDepth;
     r.do_not_track=navigator.doNotTrack;
     r.tz_id=Intl.DateTimeFormat().resolvedOptions().timeZone;
-    r.fonts_blocklist=document.fonts.check('12px Consolas');
+    // fonts_blocklist hides fonts in FontCache, same mechanism as
+    // fonts_whitelist. document.fonts.check() is the WRONG observable: it
+    // answers "is a face available for this family", which stays true because a
+    // hidden font falls back to another and the family still resolves. Measured:
+    // blocking Consolas left check('12px Consolas') at true while the rendered
+    // width changed 219.92 -> 370.41. Report the WIDTH, like fonts_whitelist.
+    r.fonts_blocklist=Math.round((()=>{ const s=document.createElement('span');
+      s.style.cssText='position:absolute;font-size:40px;font-family:Consolas;white-space:pre';
+      s.textContent='mmmmmmmmmm'; document.body.appendChild(s);
+      const wv=s.getBoundingClientRect().width; s.remove(); return wv*100; })())/100;
     const c=document.createElement('canvas'); c.width=100; c.height=100;
     const x=c.getContext('2d'); if(x){ x.font='20px Arial'; r.measure_text_seed=x.measureText('The quick brown fox').width; r.canvas_noise_seed=c.toDataURL().length; }
     const conn=navigator.connection||{}; r.net_effective_type=conn.effectiveType; r.net_rtt_ms=conn.rtt; r.net_downlink_mbps=conn.downlink;
@@ -340,6 +349,27 @@ function compare(key, expected, got) {
   if (key === 'ua_mobile') {
     return String(got) === (String(expected) === 'true' ? 'true' : 'false');
   }
+  // webgl_extensions APPENDS, it does not replace (20-blink-modules.patch:167 -
+  // it only pushes names not already present). So exact equality is wrong: it
+  // fails a correctly applied config whenever the platform already reports
+  // other extensions. Assert containment of every configured name instead.
+  if (key === 'webgl_extensions') {
+    const have = String(got).split(',').map((s) => s.trim()).filter(Boolean);
+    const want = String(expected).split(',').map((s) => s.trim()).filter(Boolean);
+    if (!want.length) return false;
+    return want.every((w) => have.includes(w));
+  }
+  // speech_voices_count only TRUNCATES: the kernel does
+  // `if (fp_count > 0 && fp_count < voices.size()) resize(fp_count)`
+  // (20-blink-modules.patch:319). It never extends. A host with fewer voices
+  // than the config therefore cannot honour it, and reporting fail would blame
+  // the kernel for the host. Pass when the count was already at or under the
+  // cap; fail only when it exceeds it.
+  if (key === 'speech_voices_count') {
+    const g = Number(got), e = Number(expected);
+    if (!isFinite(g) || !isFinite(e) || e <= 0) return false;
+    return g <= e;
+  }
   // ua_brands: FpConfigString TRUNCATES at the first quote, so a brand list
   // written in the wire form ('"Chromium";v="120"') arrives at the parser as
   // '\\' and produces garbage. Only the quote-free config form (Chromium=120)
@@ -364,7 +394,12 @@ function compare(key, expected, got) {
   }
   if (key === 'canvas_noise_seed') return Number(got) > 0;
   if (key === 'measure_text_seed') return Number(got) !== 0;
-  if (key === 'fonts_blocklist') return got === false; // blocked
+  // fonts_blocklist: the probe now reports a WIDTH (see the comment in PROBE),
+  // not document.fonts.check(). Blocking a font makes it fall back, so the
+  // width moves AWAY from the untouched value. compare() has no baseline here,
+  // so it can only assert the value is not the untouched one - the caller sees
+  // the number and judges. Return null rather than guessing a threshold.
+  if (key === 'fonts_blocklist') return null;
   if (key === 'webgl_max_viewport_dims') {
     return String(got) === `${expected},${expected}` || String(got) === String(expected);
   }

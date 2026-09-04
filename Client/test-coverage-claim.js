@@ -90,6 +90,10 @@ ck('compare() returns only true/false/null', notTristate.length === 0,
 const CANNOT_JUDGE = {
   audio_data_seed: 'checksum observable - can only say "changed", and there is no baseline here',
   webrtc_ip: 'empty candidate list means the host gathered nothing, not that spoofing failed',
+  // Reports a RENDERED WIDTH, so "the font was blocked" means "the width moved
+  // away from the untouched value" - and compare() has no baseline. Guarding a
+  // specific threshold would hard-code this host's font metrics.
+  fonts_blocklist: 'width observable - "blocked" means "moved away from baseline"',
 };
 const nullButUndeclared = [];
 for (const k of PROBE_FIELDS) {
