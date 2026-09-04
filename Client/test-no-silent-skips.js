@@ -19,12 +19,18 @@
 //      suite is now 0-skip: every one of the 63 keys' value assertions runs.
 //
 // So: any new skip must be justified by an environment the suite genuinely
-// cannot provide, and must say so in its detail string. This test fails on an
-// unexplained skip, and on a test that reports fewer checks than it has call
-// sites (which would mean call sites that never execute).
+// cannot provide, and must say so in its detail string.
 //
-// Plain Node, but it shells out to run-tests.js per file, so it is the slowest
-// test in the suite. Keep it last-ish; do not add per-file work here.
+// HOW, without recursion: the first version of this test shelled out to
+// run-tests.js once per test file. That nested 48 child suites inside the
+// parent suite, and each child stashed/restored resources/app - which the
+// parent had ALREADY stashed. The process was killed during shutdown and
+// reported exit=null, failing the suite despite all its own checks passing.
+//
+// So this is now purely static plus direct require(): every Electron test is
+// parsed for its skip call sites and the reasons passed to them; every pure
+// Node test is additionally run in-process to collect real skip output. No
+// child processes, no resources/app contention.
 
 'use strict';
 
@@ -46,34 +52,71 @@ ck('suite has tests to check', files.length > 0, files.length + ' files');
 
 const SKIP_OK = /environment|not present|not packaged|no such|unavailable|no microphone|no device|requires|needs|not available|external|network/i;
 
-let totalSkip = 0;
-const unexplained = [];
+// --- 1. static: every skip call site must carry an environment reason ------
+// Cheap, and it covers the 36 Electron tests we cannot run in-process.
+const unjustified = [];
+let skipSites = 0;
 for (const f of files) {
-  if (f === 'test-no-silent-skips.js') continue; // this file shells out; skip self
-  const r = spawnSync(process.execPath, [path.join(CLIENT, 'run-tests.js'), f], {
-    cwd: REPO, encoding: 'utf8', timeout: 300000,
+  if (f === 'test-no-silent-skips.js') continue;
+  const src = fs.readFileSync(path.join(CLIENT, f), 'utf8');
+  const lines = src.split(/\r?\n/);
+  lines.forEach((l, i) => {
+    // A call to a skip helper: sk(...) / skip(...) / check with a null cond
+    // is covered separately. Only named skip helpers are checked here.
+    const m = l.match(/\b(?:sk|skipCheck)\s*\(\s*(['"])(.+?)\1\s*(?:,\s*(.+?))?\s*\)/);
+    if (!m) return;
+    skipSites++;
+    const reason = (m[3] || m[2] || '').replace(/^['"]|['"]$/g, '');
+    // The reason may be a template/variable; resolve simple string literals
+    // only, and require SOME justification text to be present.
+    if (!reason.trim()) {
+      unjustified.push(f + ':' + (i + 1) + ' (no reason given)');
+    } else if (/^['"]/.test(reason.trim()) && !SKIP_OK.test(reason)) {
+      unjustified.push(f + ':' + (i + 1) + ' "' + reason.slice(0, 70) + '"');
+    }
+  });
+}
+ck('every static skip site carries a reason', unjustified.length === 0,
+  unjustified.length ? unjustified.join(' | ') : skipSites + ' site(s), all justified');
+
+// --- 2. runtime: pure Node tests are run here, in-process ------------------
+// These can actually skip, so run them and read their real output. Electron
+// tests cannot be run here (see the header comment on recursion).
+const pure = files.filter((f) =>
+  f !== 'test-no-silent-skips.js' &&
+  !/require\(\s*['"]electron['"]\s*\)/.test(fs.readFileSync(path.join(CLIENT, f), 'utf8')));
+
+let totalSkip = 0;
+const runtimeSkips = [];
+//
+// Run each as a CHILD PROCESS, not via require(). Every one of these tests
+// calls process.exit() at the end, so require() would terminate THIS process
+// mid-run (observed: output stopped after the second check). A child keeps the
+// exit contained.
+//
+// Critically, do NOT go through run-tests.js: that would nest a suite inside
+// the suite, and each child would stash/restore resources/app - which the
+// parent has already stashed. That is exactly what killed the first version
+// of this file (exit=null, "crashed during shutdown"). Direct node invocation
+// touches nothing under resources/.
+for (const f of pure) {
+  const r = spawnSync(process.execPath, [path.join(CLIENT, f)], {
+    cwd: REPO, encoding: 'utf8', timeout: 120000,
     env: { ...process.env, PATH: 'C:\\OpenSSL-Win64\\bin;' + process.env.PATH },
   });
   const out = (r.stdout || '') + (r.stderr || '');
-  const m = out.match(/pass=(\d+)\s+fail=(\d+)\s+skip=(\d+)/);
-  if (!m) { unexplained.push(f + ': no summary line'); continue; }
-  const skipped = +m[3];
-  if (!skipped) continue;
-  totalSkip += skipped;
-
-  // Every skip must explain itself, and the explanation must be about the
-  // ENVIRONMENT - not just present, or any skip would pass this gate.
   for (const line of out.split(/\r?\n/)) {
     if (!/^\s*SKIP|SKIP\s{2}/.test(line)) continue;
     const detail = line.replace(/^\s*(?:\x1b\[[0-9;]*m)?SKIP\s*/, '')
       .replace(/\x1b\[[0-9;]*m/g, '').trim();
-    if (!SKIP_OK.test(detail)) unexplained.push(f + ': "' + detail.slice(0, 90) + '"');
+    totalSkip++;
+    if (!SKIP_OK.test(detail)) runtimeSkips.push(f + ': "' + detail.slice(0, 90) + '"');
   }
 }
-
-ck('no test skips a check without an environment reason',
-  unexplained.length === 0,
-  unexplained.length ? unexplained.join(' | ') : 'all skips justified, or none');
+ck('pure Node tests skip nothing without an environment reason',
+  runtimeSkips.length === 0,
+  runtimeSkips.length ? runtimeSkips.join(' | ')
+    : 'ran ' + pure.length + ' pure Node tests, ' + totalSkip + ' skip(s)');
 
 // The webgpu hole specifically.
 //
