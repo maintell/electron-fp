@@ -74,18 +74,39 @@ The sidebar has two tabs — **Config** and **Self-test**. Self-test probes the
 it answers "did *my* settings apply?" rather than "did some fixed set of values
 apply?".
 
-Each surface gets one of four verdicts:
+The probe reads **58 of the 63 keys**. Each surface gets one of five verdicts:
 
 | Verdict | Meaning |
 |---|---|
 | `pass` | configured, and the surface reports exactly what was configured |
 | `fail` | configured, but the surface reports something else |
+| `unknown` | it applied, but this surface cannot be judged from a single reading |
 | `skip` | not configured, or the probe cannot read it on this page |
 | `error` | the probe itself threw |
+
+`unknown` exists because some surfaces have no value to compare against.
+`audio_data_seed`'s observable is a *checksum* — the only honest statement is
+"it changed", and one reading has no baseline. `webrtc_ip` with no gathered ICE
+candidates means the host found nothing, not that spoofing failed. Reporting
+either as `fail` would mark a working key broken; reporting it `pass` would be
+a lie.
 
 **`skip` is not a success.** A key you never set was never checked, so painting
 it green would let a default profile read as all-clear. Skipped rows are hidden
 by default; tick *Show skipped surfaces* to see all of them.
+
+### The 5 keys the self-test cannot show
+
+Not "not implemented" — each was measured and is unreadable from page JS:
+
+| Key | Why there is no row |
+|---|---|
+| `canvas_noise_strength` | a *modifier*: the kernel gates it on `canvas_noise_seed > 0` (`00-core.patch:265`). With no seed there is nothing to perturb, so it has no independent surface. `test-canvas-strength.js` measures it against a seeded baseline. |
+| `audio_data_strength` | same shape: `fp-fingerprint.patch:672` returns early when `audio_data_seed == 0`. Covered by the audio-seed test. |
+| `geo_latitude` / `geo_longitude` / `geo_accuracy` | `navigator.geolocation.getCurrentPosition()` rejects with code 2 and no position exists to override. Reading them needs a privileged channel, not a page probe. |
+
+Both noise-strength keys are real and verified — they just cannot carry their
+own row, because the seed is what makes them observable.
 
 The failure cases are the reason the pane exists. A key can look set — the
 config editor shows it, the Inspector counts it as active — while the renderer

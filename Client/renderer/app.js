@@ -624,6 +624,7 @@ function renderSelfTest(result) {
   $fpSelfTestSummary.innerHTML =
     '<span class="fp-badge fp-badge-pass">' + (s.pass || 0) + ' pass</span> ' +
     '<span class="fp-badge fp-badge-fail">' + (s.fail || 0) + ' fail</span> ' +
+    '<span class="fp-badge fp-badge-unknown">' + (s.unknown || 0) + ' unknown</span> ' +
     '<span class="fp-badge fp-badge-skip">' + (s.skip || 0) + ' skip</span> ' +
     '<span class="fp-badge fp-badge-error">' + (s.error || 0) + ' error</span>';
 
@@ -643,7 +644,9 @@ function renderSelfTest(result) {
   // instead of in an undifferentiated alphabetical list.
   //
   // Within a group, failures first: the pane exists to surface what is wrong.
-  const order = { fail: 0, error: 1, pass: 2, skip: 3 };
+  // unknown sorts between error and pass: it is not a failure, but it is not
+  // confirmed either, so it must not sink below surfaces that genuinely passed.
+  const order = { fail: 0, error: 1, unknown: 2, pass: 3, skip: 4 };
   // Same shape the Config pane uses: schema.keys[k].group === group.id.
   const groupsById = new Map();
   for (const g of ((fpSchema && fpSchema.groups) || [])) {
@@ -673,12 +676,13 @@ function renderSelfTest(result) {
   const renderRow = (r) => {
     const badge = '<span class="fp-badge fp-badge-' + r.verdict + '">' +
       r.verdict + '</span>';
-    const detail = r.verdict === 'skip'
+    const detail = (r.verdict === 'skip' || r.verdict === 'unknown')
       ? '<span class="fp-st-reason">' + escapeHtml(r.reason || '') + '</span>'
       : '<span class="fp-st-expected">' + escapeHtml(r.expected) + '</span>' +
         '<span class="fp-st-arrow">&rarr;</span>' +
         '<span class="fp-st-got">' + escapeHtml(r.got) + '</span>';
-    const hint = (r.verdict === 'fail' || r.verdict === 'error') && r.reason
+    const hint = (r.verdict === 'fail' || r.verdict === 'error' ||
+                  r.verdict === 'unknown') && r.reason
       ? '<div class="fp-st-hint">' + escapeHtml(r.reason) + '</div>'
       : '';
     return '<div class="fp-st-row fp-st-' + r.verdict + '">' +

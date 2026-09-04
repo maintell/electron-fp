@@ -60,20 +60,50 @@ ck('every schema key is named in the test suite', unnamed.length === 0,
   unnamed.length ? 'never named: ' + unnamed.join(', ')
     : FP_KEY_NAMES.length + ' keys, all named');
 
-// --- 2. compare() is total and boolean over everything the probe reads -----
-const notBoolean = [];
+// --- 2. compare() is total and three-valued over everything probe reads ----
+// compare() returns true / false / null. null means "applied, but this surface
+// cannot be judged from one reading" (audio_data_seed's observable is a
+// checksum; webrtc_ip with no gathered candidates). verdicts() turns that into
+// an 'unknown' verdict. Forcing a boolean would mean lying in one of the two
+// directions: calling a working key failed, or calling an unjudgeable one
+// confirmed. The guard asserts the THREE-VALUED contract, not a boolean one.
+const notTristate = [];
 const threw = [];
 for (const k of PROBE_FIELDS) {
   for (const [want, got] of [['1', '1'], ['1', '2'], ['0', '0'], ['abc', 'abc']]) {
     let r;
     try { r = compare(k, want, got); } catch (e) { threw.push(k + ' (' + e.message + ')'); continue; }
-    if (typeof r !== 'boolean') notBoolean.push(k + ' -> ' + typeof r);
+    if (r !== true && r !== false && r !== null) {
+      notTristate.push(k + ' -> ' + typeof r + ':' + String(r));
+    }
   }
 }
 ck('compare() never throws for a key the probe reads', threw.length === 0,
   threw.length ? threw.slice(0, 5).join(' | ') : PROBE_FIELDS.length + ' keys x 4 cases');
-ck('compare() always returns a boolean', notBoolean.length === 0,
-  notBoolean.length ? [...new Set(notBoolean)].slice(0, 5).join(' | ') : 'all boolean');
+ck('compare() returns only true/false/null', notTristate.length === 0,
+  notTristate.length ? [...new Set(notTristate)].slice(0, 5).join(' | ')
+    : 'all three-valued (true/false/null)');
+
+// A null return must be DECLARED, never incidental: an unlisted key silently
+// returning null would turn a real pass/fail into an "unknown" the user cannot
+// act on. Every null-returning key is named here with its reason.
+const CANNOT_JUDGE = {
+  audio_data_seed: 'checksum observable - can only say "changed", and there is no baseline here',
+  webrtc_ip: 'empty candidate list means the host gathered nothing, not that spoofing failed',
+};
+const nullButUndeclared = [];
+for (const k of PROBE_FIELDS) {
+  let sawNull = false;
+  for (const [want, got] of [['1', '1'], ['1', '2'], ['0', ''], ['abc', '']]) {
+    let r;
+    try { r = compare(k, want, got); } catch (e) { continue; }
+    if (r === null) sawNull = true;
+  }
+  if (sawNull && !CANNOT_JUDGE[k]) nullButUndeclared.push(k);
+}
+ck('every null-returning key is declared as unjudgeable', nullButUndeclared.length === 0,
+  nullButUndeclared.length ? 'undeclared: ' + nullButUndeclared.join(', ')
+    : Object.keys(CANNOT_JUDGE).length + ' declared');
 
 // A key that returns true for BOTH a matching and a mismatching value cannot
 // detect a failure. That is legitimate when the semantics are "nonzero" or
@@ -84,6 +114,18 @@ const NON_EQUALITY = {
   measure_text_seed: 'nonzero - any perturbation means the key applied',
   fonts_blocklist: 'absent - the probe reports a boolean, not a value',
   webgpu_limits: 'merge - only configured sub-keys are compared',
+  // Widths, not a value: a whitelist hides every unlisted family, so the
+  // assertion is "the fonts did NOT all collapse to one width".
+  fonts_whitelist: 'widths - asserts the metrics differ, not that they equal a target',
+  // The probe reports ms computed from the API's seconds; the config is an int
+  // in ms. Compared with tolerance, so a neighbouring value is still a pass.
+  audio_output_latency_ms: 'tolerance - rounded float vs integer config',
+  // Quantised clock: granularity must be a positive MULTIPLE of the configured
+  // precision, so several values are legitimately correct.
+  perf_now_precision_ms: 'multiple - quantised clock lands on a grid, not one value',
+  // Only meaningful when the denylist names avc1; otherwise there is nothing
+  // to contradict, so any reading is accepted.
+  media_codecs_denylist: 'conditional - only asserted when the denylist names avc1',
 };
 const cannotDiscriminate = [];
 for (const k of PROBE_FIELDS) {
@@ -102,16 +144,18 @@ const cmpBody = fs.readFileSync(path.join(CLIENT, 'fp-probe.js'), 'utf8');
 const cmpSrc = cmpBody.slice(cmpBody.indexOf('function compare'), cmpBody.indexOf('function SAFE'));
 const special = [...new Set([...cmpSrc.matchAll(/key === '([a-z0-9_]+)'/g)].map((m) => m[1]))];
 const read = new Set(PROBE_FIELDS);
-// perf_now_precision_ms is a deliberate exception. compare() handles it, but
-// the shared probe cannot read it (performance.now() quantisation is not a
-// value a page reads back as a field), so the self-test panel will never
-// assert it. It is genuinely proven by test-covered-surfaces.js:167.
+// A compare() special case for a key the probe never reads is dead code, and
+// worse, it makes the probe LOOK more capable than it is: the self-test pane
+// would show a row that can never be asserted. The two keys below are
+// genuinely unreadable from JS, so their absence from PROBE_FIELDS is honest -
+// but they are still real keys that must be proven SOMEWHERE (see the paired
+// check below).
 //
-// The exception exists because the RISK here is not the dead branch - it is
-// that a compare() special case makes the probe look more capable than it is.
-// So the exception is declared by name (a new one still fails) and paired with
-// a check that the key really is proven somewhere else.
-const DEAD_SPECIAL_OK = ['perf_now_precision_ms'];
+// There is no exception list any more: perf_now_precision_ms used to need one
+// because the probe could not read a quantised clock. That was a probe
+// limitation, not a key limitation - sampling the granularity grid works, so
+// the key is now live and the exception is gone.
+const DEAD_SPECIAL_OK = [];
 const deadSpecial = special.filter((k) => !read.has(k));
 const unexpectedDead = deadSpecial.filter((k) => !DEAD_SPECIAL_OK.includes(k));
 ck('every compare() special case serves a key the probe reads',
@@ -129,14 +173,33 @@ ck('every declared-dead special case is proven by another test',
     : (deadSpecial.length ? deadSpecial.join(', ') + ' proven elsewhere' : 'n/a'));
 
 // --- 4. the audit's own false-positive is pinned --------------------------
-// `probe.includes(key)` matched perf_now_precision_ms, which the probe does
-// NOT read. It is genuinely proven elsewhere (test-covered-surfaces.js), but
-// the substring rule credited the probe for it. Pin the distinction.
-ck('perf_now_precision_ms is proven by a test, not by the shared probe',
-  !read.has('perf_now_precision_ms') &&
+// `probe.includes(key)` credited the probe with perf_now_precision_ms, which
+// the probe did NOT read at the time - a substring match over the probe source
+// hit the KEY NAME mentioned in a comment, not a real read. That false positive
+// is why this file exists.
+//
+// The premise has since been fixed rather than documented around: the probe
+// DOES read the key now (it samples performance.now() granularity), so the
+// honest assertion is the conjunction - read by the probe AND asserted by a
+// test - instead of "read by neither, proven by a test". Asserting the old
+// negative would freeze the fix out of the gate.
+ck('perf_now_precision_ms is read by the probe AND asserted by a test',
+  read.has('perf_now_precision_ms') &&
   /perf_now_precision_ms/.test(testSrc),
   'probe reads it: ' + read.has('perf_now_precision_ms') +
   '; asserted in a test: ' + /perf_now_precision_ms/.test(testSrc));
+
+// The general form of that bug: a key the probe claims but cannot really read.
+// PROBE_FIELDS is hand-maintained, so a key can be listed and never assigned.
+// Check the ASSIGNMENT, not just the listing.
+const unassigned = PROBE_FIELDS.filter((k) => {
+  const re = new RegExp('r\\.' + k + '\\s*=');
+  return !re.test(probeSrc);
+});
+ck('every PROBE_FIELDS entry is actually assigned by the probe',
+  unassigned.length === 0,
+  unassigned.length ? 'listed but never assigned: ' + unassigned.join(', ')
+    : PROBE_FIELDS.length + ' entries, all assigned');
 
 // --- 5. EXPECTED is a subset of what the probe reads ----------------------
 // EXPECTED is smoke.js's fixed table. Anything in it that the probe does not

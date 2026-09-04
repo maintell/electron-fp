@@ -482,6 +482,9 @@ body {
 .fp-badge-fail  { background: #3a1e1e; color: #f48771; }
 .fp-badge-skip  { background: #2a2a2a; color: #9aa0a6; }
 .fp-badge-error { background: #3a2e1e; color: #f4a742; }
+/* Unknown: applied but not judgeable from one reading. Deliberately distinct
+   from skip (never looked) and from pass (confirmed). */
+.fp-badge-unknown { background: #1e2a3a; color: #4fc3f7; }
 
 /* Group headings, mirroring the Config pane's fp-group sections. */
 .fp-st-group { border-bottom: 1px solid #333; }
@@ -511,6 +514,7 @@ body {
 .fp-st-row:hover { background: #232323; }
 .fp-st-fail  { background: #241616; }
 .fp-st-error { background: #241f14; }
+.fp-st-unknown { background: #16222c; }
 
 .fp-st-line {
   display: flex;
