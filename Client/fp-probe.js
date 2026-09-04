@@ -128,6 +128,23 @@ const PROBE = `(async () => {
     try{ if(navigator.getBattery){ const b=await navigator.getBattery(); r.battery_charging=String(b.charging); r.battery_level=String(b.level); } }catch(e){}
     try{ const el=document.createElement('div'); el.style.cssText='position:absolute;left:10px;top:20px;width:100px;height:10px'; document.body.appendChild(el); const rect=el.getBoundingClientRect(); r.client_rects_seed=rect.x+','+rect.y; el.remove(); }catch(e){}
     try{ const vs=speechSynthesis.getVoices(); r.speech_voices_count=vs.length; r.speech_voices_lang=vs[0]?vs[0].lang:''; }catch(e){}
+    // --- navigator / UA surfaces (keys 58-63 and the locale leaks) ---------
+    // These are the surfaces an external detection site reads FIRST, and they
+    // were absent from the probe entirely: a human using the self-test panel
+    // had no row for them, so "is my UA coherent?" was unverifiable in the one
+    // tool meant to answer it. All confirmed to change when configured.
+    try{ r.navigator_platform=navigator.platform; }catch(e){}
+    try{ r.navigator_vendor=navigator.vendor; }catch(e){}
+    try{ r.navigator_languages=(navigator.languages||[]).join(','); }catch(e){}
+    try{ r.device_pixel_ratio=String(window.devicePixelRatio); }catch(e){}
+    try{
+      const uad=navigator.userAgentData;
+      if(uad){
+        r.ua_platform=uad.platform;
+        r.ua_mobile=String(uad.mobile);
+        r.ua_brands=(uad.brands||[]).map(b=>b.brand+'='+b.version).join(', ');
+      }
+    }catch(e){}
   }catch(e){ r._probe_error=String(e&&e.message||e); }
   return r;
 })()`;
@@ -151,6 +168,9 @@ const PROBE_FIELDS = [
   'webgpu_description', 'webgpu_features', 'webgpu_limits',
   'audio_sample_rate', 'battery_charging', 'battery_level',
   'client_rects_seed', 'speech_voices_count', 'speech_voices_lang',
+  // navigator / UA surfaces - see the comment in PROBE.
+  'navigator_platform', 'navigator_vendor', 'navigator_languages',
+  'device_pixel_ratio', 'ua_platform', 'ua_mobile', 'ua_brands',
 ];
 
 // ---------------------------------------------------------------------------
@@ -164,6 +184,36 @@ const PROBE_FIELDS = [
 // ---------------------------------------------------------------------------
 function compare(key, expected, got) {
   // special semantics mirroring smoke_fp.ps1
+  // ua_mobile: the kernel does `mobile = (cfg_mobile == "true")` - the LITERAL
+  // string. Measured: "1" leaves mobile at false, and so does "0"/"false"; only
+  // "true" turns it on. So "configured as 1, reported false" is the kernel
+  // working as written, not a failure - compare against the kernel's own rule
+  // rather than against the user's intent, or every 1/mobile profile reads FAIL.
+  if (key === 'ua_mobile') {
+    return String(got) === (String(expected) === 'true' ? 'true' : 'false');
+  }
+  // ua_brands: FpConfigString TRUNCATES at the first quote, so a brand list
+  // written in the wire form ('"Chromium";v="120"') arrives at the parser as
+  // '\\' and produces garbage. Only the quote-free config form (Chromium=120)
+  // survives. Compare as sets of name=version pairs, order-insensitively, and
+  // treat a configured value containing '"' as unappliable rather than passing
+  // or failing it - it cannot reach the kernel at all.
+  if (key === 'ua_brands') {
+    const parse = (s) => String(s).split(',').map((x) => x.trim())
+      .filter(Boolean).sort().join(',');
+    const want = parse(expected);
+    // A quoted expected value can never be honoured: say so via false, and let
+    // the explain() hint carry the reason.
+    if (String(expected).includes('"')) return false;
+    return parse(got) === want;
+  }
+  // navigator_languages: language() is languages().front(), so this vector
+  // covers both surfaces. Order is meaningful (preference order), so compare
+  // exactly - not as a set.
+  if (key === 'navigator_languages') {
+    return String(got).split(',').map((s) => s.trim()).join(',') ===
+      String(expected).split(',').map((s) => s.trim()).join(',');
+  }
   if (key === 'canvas_noise_seed') return Number(got) > 0;
   if (key === 'measure_text_seed') return Number(got) !== 0;
   if (key === 'fonts_blocklist') return got === false; // blocked

@@ -156,15 +156,23 @@ const FP_KEYS = {
   // explicitly only to override that derivation.
   ua_brands: {
     group: "navigator", kind: "str", def: "",
-    hint: 'Brand list, e.g. {"0":"Not A(Brand";v="99"}. Empty = derive from UA.'
+    // The old hint showed the WIRE form ('"Brand";v="99"'), which cannot work:
+    // FpConfigString truncates at the first quote, so a quoted brand list
+    // arrives at FpParseBrands as '\\' and produces a single garbage brand
+    // (measured). Only the quote-free config form survives. The parser handles
+    // both, but the config never reaches it intact - so document what works.
+    hint: 'Brand list WITHOUT quotes, e.g. Not A(Brand=99, Chromium=120. Quotes are truncated by the kernel. Empty = derive from UA.'
   },
   ua_platform: {
     group: "navigator", kind: "str", def: "",
-    hint: 'Sec-CH-UA-Platform value, e.g. "macOS" / "Windows" / "Linux" / "Android". Empty = derive from UA.'
+    hint: 'Sec-CH-UA-Platform value, e.g. macOS / Windows / Linux / Android. Empty = derive from UA.'
   },
     ua_mobile: {
       group: "navigator", kind: "str", def: "",
-      hint: '"true" or "false" for Sec-CH-UA-Mobile. Empty = derive from UA.'
+      // Literal "true" only. The kernel does `mobile = (cfg_mobile == "true")`,
+      // so "1" and 0 are silently false - measured. Say so, or a user sets 1,
+      // sees mobile=false, and concludes the key is broken.
+      hint: 'Sec-CH-UA-Mobile. Only the literal "true" turns it on - "1" and 0 are silently false. Empty = derive from UA.'
     },
 
     // --- Keys 61-63: surfaces that leaked the host in an external audit ---
@@ -296,6 +304,17 @@ function fpCoerce(key, value) {
     // Kernel compares to "true"/"1". Accept real booleans too.
     if (value === true) return "true";
     if (value === false) return "false";
+    return String(value);
+  }
+  // csv / json / sp are ALSO read with FpConfigString, so a number is silently
+  // inert for them exactly as it is for kind="str" - FpConfigString returns ""
+  // for a JSON number and the key quietly does nothing.
+  //
+  // These kinds describe the STRING's internal shape (comma-separated list,
+  // JSON object, "rangeMin,rangeMax,precision"), not a different wire type.
+  // Coercing every string-read kind closes the trap uniformly instead of per
+  // kind. A number is never meaningful content for any of them.
+  if (spec.kind === "csv" || spec.kind === "json" || spec.kind === "sp") {
     return String(value);
   }
   return value;

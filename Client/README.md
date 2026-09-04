@@ -160,7 +160,7 @@ node Client/test-schema.js
 # Random profile coherence over 300 samples (7 checks)
 node Client/test-random.js
 
-# Grouped panel UI renders 15 sections / 60 fields
+# Grouped panel UI renders 15 sections / 63 fields
 electron Client/test-ui-groups.js
 
 # Two-way JSON <-> group field sync (11 checks)
@@ -176,12 +176,15 @@ electron fingerprint/scripts/smoke.js --isolation --verbose
 ### Fingerprint Keys (63 keys / 15 functional groups)
 
 Generated from `fp-schema.js`, the single source of truth. Every key is implemented
-in the kernel patch and verified by `test-schema.js` (60/60 exact match).
+in the kernel patch and verified by `test-schema.js` (63/63 exact match).
+
+Counts in this file are checked by `test-readme-counts.js`, so they cannot
+silently go stale again — it found this table listing 56 of 63 keys.
 
 | Group | Description | Keys |
 |-------|-------------|------|
 | Hardware | CPU cores, memory, touch points | `hardware_concurrency`, `device_memory`, `max_touch_points` |
-| Screen | Resolution, avail area, color depth | `screen_width`, `screen_height`, `screen_avail_width`, `screen_avail_height`, `screen_color_depth` |
+| Screen | Resolution, avail area, color depth, DPR | `screen_width`, `screen_height`, `screen_avail_width`, `screen_avail_height`, `screen_color_depth`, `device_pixel_ratio` |
 | Audio | Sample rate, channels, latency, noise seed | `audio_sample_rate`, `audio_max_channels`, `audio_output_latency_ms`, `audio_data_seed`, `audio_data_strength` |
 | WebGL | Vendor/renderer, limits, extensions, precision | `webgl_max_texture_size`, `webgl_max_renderbuffer_size`, `webgl_max_viewport_dims`, `webgl_aliased_point_size_range`, `webgl_aliased_line_width_range`, `webgl_vendor`, `webgl_renderer`, `webgl_extensions`, `webgl_shader_precision_highp` |
 | WebGPU | Adapter metadata, features and limits | `webgpu_vendor`, `webgpu_architecture`, `webgpu_device`, `webgpu_description`, `webgpu_features`, `webgpu_limits` |
@@ -194,6 +197,7 @@ in the kernel patch and verified by `test-schema.js` (60/60 exact match).
 | Storage & Perf | Quota, usage, timestamp precision | `permissions_status`, `storage_usage_bytes`, `storage_quota_bytes`, `perf_now_precision_ms` |
 | Fonts | Font family blocklist / whitelist | `fonts_blocklist`, `fonts_whitelist` |
 | Battery | Charging state and level | `battery_charging`, `battery_level` |
+| Navigator | Platform, vendor, languages, client hints | `navigator_platform`, `navigator_vendor`, `navigator_languages`, `ua_platform`, `ua_mobile`, `ua_brands` |
 
 Value encoding (kernel parser rules):
 - `int` / `int64` — JSON number; must be `> 0` to take effect (0 = disabled)
@@ -220,6 +224,42 @@ explicitly so a deployment does not assume more protection than it has.
 | `Sec-CH-UA` client hints | yes | keys 58–60 (`ua_platform`/`ua_mobile`/`ua_brands`); unset derives from the UA, so they cannot drift apart |
 | TLS / JA3 / JA4 | **yes** | `40-net-tls.patch`; per-URLRequestContext, so per-tab. Only `fpExtensionOrder` is unimplemented (it errors rather than lying). See `fingerprint/README.md` |
 | `webgpu_device` / `webgpu_description` | **partly** | the keys apply, but upstream Blink only exposes `adapter.info.device/description` when `WebGPUDeveloperFeatures` is on (`--enable-blink-features=WebGPUDeveloperFeatures`). Without it they read `''` |
+
+### 32 keys are inert if you pass them as a number
+
+`Session::SetFingerprintConfig()` serialises the raw JS object with
+`base::WriteJson` and does **not** run `fpNormalizeConfig()`. So:
+
+```js
+sess.setFingerprintConfig({ device_pixel_ratio: 3 });    // JSON number  -> INERT
+sess.setFingerprintConfig({ device_pixel_ratio: "3" });  // JSON string  -> applies
+```
+
+The kernel reads these keys with `FpConfigString()`, which returns `""` for a
+JSON number. There is no error and no log — the key silently does nothing and
+the real value is reported. Measured on 11 keys with an observable surface:
+
+| key | as number | as string |
+|---|---|---|
+| `device_pixel_ratio` | dpr 1 (unchanged) | dpr 3 |
+| `navigator_platform` | `Win32` | `12345` |
+| `tz_id` | `Asia/Shanghai` | `America/New_York` |
+| `net_effective_type` | `3g` | `4g` |
+| `prefers_color_scheme` | `light` | `dark` |
+| `do_not_track` | `null` | `1` |
+| `ua_platform` | `Windows` | `Plan9` |
+| `battery_level` | `1` | `0.5` |
+| `navigator_vendor` | `Google Inc.` | `12345` |
+| `navigator_languages` | `zh-CN,...` | `en-US` |
+
+**The Client UI is safe**: `main.js` runs `fpNormalizeConfig()` before applying,
+so typing `3` into the JSON editor works. The trap is for direct API callers —
+scripts and tests. `test-string-key-inertness.js` enumerates all 32 keys from
+the delivered patches and asserts `fpNormalizeConfig` coerces a number to a
+string for every one, so a new string-read key added later is caught.
+
+This was first found on `audio_data_strength` and believed to affect only that
+key. It does not.
 
 For consistency, `navigator_platform` should agree with any UA override: a Mac
 UA wants `MacIntel`, Android wants `Linux armv8l`. The two are **separate
@@ -254,7 +294,7 @@ inputs → 1), and asking for 99 on a host with 0 leaves it at 0.
 ## Testing
 
 ```bash
-npm test                       # every Client test (178 checks, 16 files)
+npm test                       # every Client test (766 checks, 51 files)
 npm test -- test-ua.js         # just one file
 ```
 
