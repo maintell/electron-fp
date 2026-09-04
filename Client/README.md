@@ -80,8 +80,11 @@ apply?".
 
 The probe reads **58 of the 63 keys** from inside the page. The 9 TLS keys are
 measured separately (see below), from a ClientHello captured in the main process,
-so **67 of the 72 configurable surfaces** can be verified. Each surface gets one
-of five verdicts:
+so **67 of the 72 configurable surfaces** produce a row. "Produces a row" is not
+"can be judged" — with every surface configured at once, a measured run returned
+45 pass / 7 fail / 3 unknown / 3 skip, so **52 of 72** could actually be called
+pass or fail. The gap is the honest part: `unknown` and `skip` are reported as
+such rather than painted green. Each surface gets one of five verdicts:
 
 | Verdict | Meaning |
 |---|---|
@@ -235,6 +238,9 @@ electron Client/test-probe-hidden-tab.js
 # A preset profile's claimed browser must match its real ClientHello (18 checks)
 electron Client/test-profile-tls.js
 
+# A TLS value of the wrong type must be refused, not silently ignored (43 checks)
+node Client/test-tls-types.js
+
 # Opening a tab FROM a preset must apply that preset's TLS plane (9 checks)
 # This one caught a real bug: createTabView() passed the raw profile to
 # `fingerprint` and never called setSSLConfig(), so a Safari-preset tab
@@ -371,6 +377,44 @@ fpCipherList: 'ECDHE-RSA-AES128-GCM-SHA256'   ->  1751 bytes, works
 the network service, with a message naming a working TLS 1.2 equivalent. Unknown
 names are deliberately *not* whitelisted: a list of every OpenSSL cipher would
 go stale and then reject working values. Only the measured foot-gun is caught.
+
+#### A wrong value type is silently ignored
+
+The kernel reads every TLS key with `options.Get(key, &out)`, which returns
+`false` on a type mismatch and then **skips the key**. No throw, no warning, no
+log — the value is dropped and the session keeps its native shape, so the UI
+shows the profile as applied while nothing changed. Measured:
+
+```js
+// all of these "succeed" and do nothing:
+setSSLConfig({ fpGreaseEnabled: 1 });        // GREASE still 3 (native)
+setSSLConfig({ fpAdvertisedVersionMax: "771" });  // still offers TLS 1.3
+
+// the correct types do apply:
+setSSLConfig({ fpGreaseEnabled: false });    // GREASE -> 0
+setSSLConfig({ fpAdvertisedVersionMax: 771 });    // ciphers 16 -> 13
+```
+
+The two `u16list` keys are the loud case — they *throw*, but with `Error
+processing argument at index 0, conversion failure from `, naming neither the
+key nor the type it wanted. So a wrong type is either silent or undiagnosable.
+
+`fpTlsValidateTypes()` rejects all of them before `setSSLConfig()`, naming the
+key, the type it wanted, and the value it got:
+
+```
+fpGreaseEnabled wants a boolean, got number (1)
+fpExtensionOrder wants an array of numbers, got string ("0,23,65281")
+```
+
+This is the same failure class as `FpConfigString`'s silent truncation: a config
+that looks applied and is not. `fpSplitConfig()` already coerces every value to
+the type the kernel wants, so configurations arriving through the app are safe;
+this guard exists for the direct `setSSLConfig()` caller.
+
+Note that `u16list` keys take a real JS **array** (`[23, 65281]`), not a
+comma-separated string. `fpTlsCoerce()` converts `"0,23,65281"` — and hex like
+`"0x0403"` — into one.
 
 Disabled defaults are deliberate: a profile must never claim a fingerprint surface
 it cannot back. Inconsistent surfaces are themselves a detection signal, so the

@@ -16,6 +16,7 @@ const { fpDefaultConfig, fpNormalizeConfig, fpCoverage, fpKeysInGroup, fpIsActiv
         FP_UA_PRESETS, fpRandomUserAgent, fpNormalizeUserAgent,
         FP_TLS_KEYS, FP_TLS_KEY_NAMES, FP_TLS_GROUPS,
         fpTlsIsActive, fpTlsCoerce, fpSplitConfig, fpTlsValidateCipherList,
+        fpTlsValidateTypes,
         fpPlatformForUserAgent,
         fpVendorForUserAgent, fpPixelRatioForUserAgent,
         fpLanguagesForUserAgent } = require('./fp-schema');
@@ -126,6 +127,17 @@ function applyTabTLSConfig(partition, tls) {
     if (!tls || typeof tls !== 'object' || !Object.keys(tls).length) {
       return { ok: true };
     }
+    // Type-check first. The kernel reads each key with options.Get(), which
+    // returns false on a type mismatch and then SKIPS the key - no throw, no
+    // log, native shape retained. Measured: fpGreaseEnabled:1 and
+    // fpAdvertisedVersionMax:"771" both apply silently as no-ops. The u16list
+    // keys do throw, but with a message naming neither key nor type.
+    const types = fpTlsValidateTypes(tls);
+    if (!types.ok) {
+      console.error('[fp] refused TLS config: ' + types.error);
+      return { ok: false, error: types.error };
+    }
+
     // Reject the one measured foot-gun BEFORE it reaches the network service.
     // setSSLConfig() would accept it, and the session would then fail every
     // handshake with ERR_UNEXPECTED while the panel showed the profile applied.
@@ -143,6 +155,12 @@ function applyTabTLSConfig(partition, tls) {
     // keeps the NATIVE ClientHello while the UI reports a configured profile -
     // the exact "claims a fingerprint it does not produce" failure the
     // 50-electron-glue patch calls out as the worst possible outcome.
+    //
+    // Pre-flight validation above should catch every type problem, so reaching
+    // here means something else went wrong. Keep the message honest rather than
+    // guessing at a cause: the native text is truncated at "conversion failure
+    // from " and names neither the key nor the type, so anything we appended
+    // would be a guess.
     console.error('[fp] failed to apply TLS config: ' + e.message);
     return { ok: false, error: e.message };
   }

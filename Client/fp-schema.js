@@ -755,6 +755,61 @@ function fpTlsValidateCipherList(value) {
   return { ok: true, error: '', ciphers: parts };
 }
 
+/**
+ * Check that every TLS value has the JS type the gin converter demands.
+ *
+ * Why this exists: the kernel reads these with `options.Get(key, &out)`, which
+ * returns FALSE on a type mismatch and then just SKIPS THE KEY. No throw, no
+ * warning, no log - the value is silently discarded and the session keeps its
+ * native shape. Measured:
+ *
+ *   fpGreaseEnabled: 1          -> no error, GREASE still 3 (native)
+ *   fpAdvertisedVersionMax:"771"-> no error, still offers the TLS 1.3 suites
+ *   ...while the correct types do apply (grease=0, ciphers 16 -> 13).
+ *
+ * That is the "silently inert config" failure mode, the same one FpConfigString
+ * has for Blink keys. The two u16list keys are the loud case - they THROW, but
+ * with "Error processing argument at index 0, conversion failure from ", naming
+ * neither the key nor the wanted type.
+ *
+ * fpSplitConfig() already coerces, so configs arriving through the app are
+ * safe. This guards the direct setSSLConfig() caller and makes a wrong type
+ * loud either way.
+ *
+ * Returns { ok, error, bad: [{key, want, got, value}] }.
+ */
+function fpTlsValidateTypes(tls) {
+  const bad = [];
+  for (const [k, v] of Object.entries(tls || {})) {
+    const meta = FP_TLS_KEYS[k];
+    if (!meta) {
+      bad.push({ key: k, want: 'a TLS key name', got: typeof v, value: v });
+      continue;
+    }
+    const want = {
+      u16list: 'an array of numbers',
+      int: 'a number',
+      bool: 'a boolean',
+      cipherlist: 'a cipher-name string',
+    }[meta.kind] || 'type ' + meta.kind;
+    let wrong = false;
+    if (meta.kind === 'u16list') wrong = !Array.isArray(v);
+    else if (meta.kind === 'int') wrong = typeof v !== 'number' || !isFinite(v);
+    else if (meta.kind === 'bool') wrong = typeof v !== 'boolean';
+    else if (meta.kind === 'cipherlist') wrong = typeof v !== 'string';
+    if (wrong) bad.push({ key: k, want, got: Array.isArray(v) ? 'array' : typeof v, value: v });
+  }
+  if (!bad.length) return { ok: true, error: '', bad: [] };
+  return {
+    ok: false,
+    bad,
+    error: 'wrong value type - the kernel would silently ignore these (it only ' +
+      'reads the type it wants): ' +
+      bad.map((b) => b.key + ' wants ' + b.want + ', got ' + b.got +
+        ' (' + JSON.stringify(b.value) + ')').join('; '),
+  };
+}
+
 const FP_TLS_GROUPS = [
   { id: "tls", label: "TLS / HTTP2", desc: "ClientHello shape: ciphers, GREASE, extensions, ALPN, max version" },
 ];
@@ -820,6 +875,7 @@ module.exports = {
   fpTlsCoerce,
   fpSplitConfig,
   fpTlsValidateCipherList,
+  fpTlsValidateTypes,
   FP_TLS13_CIPHERS,
   // UA (client-level surface, not a kernel key)
   FP_UA_PRESETS,
