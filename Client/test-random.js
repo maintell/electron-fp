@@ -106,10 +106,14 @@ for (let i = 0; i < N; i++) {
   const prof = mod();
   const fp = prof.fingerprint;
 
-  // every key present, none unknown
-  for (const k of schema.FP_KEY_NAMES) if (!(k in fp)) bad.push(k + " missing");
-  const unknown = Object.keys(fp).filter(k => !schema.FP_KEY_NAMES.includes(k));
-  if (unknown.length) bad.push("unknown: " + unknown);
+// every Blink key present, none unknown. The TLS plane is checked separately
+// below: it is a different delivery mechanism (setSSLConfig, not
+// --fingerprint-config) and only some keys are set, so holding it to "every key
+// present" would be wrong.
+for (const k of schema.FP_KEY_NAMES) if (!(k in fp)) bad.push(k + " missing");
+const ALL_KEYS = schema.FP_KEY_NAMES.concat(schema.FP_TLS_KEY_NAMES);
+const unknown = Object.keys(fp).filter(k => !ALL_KEYS.includes(k));
+if (unknown.length) bad.push("unknown: " + unknown);
 
   // cross-API consistency (C17): WebGL vendor must equal WebGPU vendor
   if (fp.webgl_vendor !== fp.webgpu_vendor) gpuMismatch++;
@@ -290,9 +294,52 @@ check("fpNormalizeConfig keeps an explicit ua_mobile",
 check("fpNormalizeConfig keeps an explicit ua_brands",
   uaOverride.ua_brands === "AcmeBrowser=42", JSON.stringify(uaOverride.ua_brands));
 
+// --- TLS plane coherence ---------------------------------------------------
+// The randomizer picks a UA, so it must pick the TLS shape that goes with it.
+// A Safari UA speaking a GREASEd Chromium ClientHello is the contradiction
+// detection sites flag first, and it is invisible to every page-side check.
+const isWebKitUA = (ua) => /AppleWebKit\/6|Version\/\d+.*Safari/.test(ua) &&
+  !/Chrome|Chromium|Edg|OPR/.test(ua);
+const isFirefoxUA = (ua) => /Firefox\//.test(ua) && !/Seamonkey|Iceweasel/.test(ua);
+
+let tlsMissing = 0, greaseMismatch = 0, ffNoVersion = 0, tlsUnknown = 0;
+let seenWebKit = 0, seenFirefox = 0, seenChromium = 0;
+const TLS_BAD = [];
+for (let i = 0; i < 400; i++) {
+  const r = mod();
+  const fp = r.fingerprint, ua = String(r.userAgent || "");
+  const tlsKeys = Object.keys(fp).filter(k => schema.FP_TLS_KEY_NAMES.includes(k));
+  if (!tlsKeys.length) { tlsMissing++; if (TLS_BAD.length < 3) TLS_BAD.push("no TLS keys"); }
+  for (const k of Object.keys(fp)) {
+    if (/^fp[A-Z]/.test(k) && !schema.FP_TLS_KEY_NAMES.includes(k)) tlsUnknown++;
+  }
+  // Chromium GREASEs (RFC 8701); WebKit and NSS do not.
+  const wantGrease = !(isWebKitUA(ua) || isFirefoxUA(ua));
+  if (fp.fpGreaseEnabled !== wantGrease) {
+    greaseMismatch++;
+    if (TLS_BAD.length < 3) TLS_BAD.push(ua.slice(0, 40) + " grease=" + fp.fpGreaseEnabled);
+  }
+  if (isFirefoxUA(ua)) { seenFirefox++; if (fp.fpAdvertisedVersionMax !== 771) ffNoVersion++; }
+  else if (isWebKitUA(ua)) seenWebKit++;
+  else seenChromium++;
+}
+check("randomizer emits a TLS plane on every profile", tlsMissing === 0,
+  tlsMissing + " of 400 with none" + (TLS_BAD.length ? " e.g. " + TLS_BAD[0] : ""));
+check("randomizer emits only real TLS keys", tlsUnknown === 0, tlsUnknown + " unknown");
+check("GREASE matches the UA's browser family (Chromium yes, WebKit/NSS no)",
+  greaseMismatch === 0, greaseMismatch + " of 400 incoherent");
+check("Firefox UAs advertise TLS 1.2 max (the only way to drop the 1.3 suites)",
+  ffNoVersion === 0, ffNoVersion + " of " + seenFirefox + " Firefox profiles wrong");
+// The randomizer must actually reach all three families, or the checks above
+// are vacuous - they would pass on a generator that only ever emits Chromium.
+check("randomizer exercises Chromium, WebKit and Firefox UAs",
+  seenChromium > 0 && seenWebKit > 0 && seenFirefox > 0,
+  "chromium=" + seenChromium + " webkit=" + seenWebKit + " firefox=" + seenFirefox);
+
 const sample = mod();
 console.log("\nsample: " + sample.name);
 console.log("  active keys: " + schema.FP_KEY_NAMES.filter(k => schema.fpIsActive(k, sample.fingerprint[k])).length + "/" + schema.FP_KEY_NAMES.length);
+console.log("  active TLS:  " + schema.FP_TLS_KEY_NAMES.filter(k => k in sample.fingerprint).length + "/" + schema.FP_TLS_KEY_NAMES.length);
 console.log("  ua: " + String(sample.userAgent).slice(0, 70));
 console.log("  platform: " + sample.fingerprint.navigator_platform);
 console.log("  gpu: " + sample.fingerprint.webgl_vendor + " | " + sample.fingerprint.webgl_renderer);

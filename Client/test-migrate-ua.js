@@ -6,20 +6,33 @@ const schema = require("./fp-schema.js");
 let pass = 0, fail = 0;
 const ck = (n, ok, d) => { console.log((ok ? "PASS  " : "FAIL  ") + n + (d ? "  (" + d + ")" : "")); ok ? pass++ : fail++; };
 
-// An old-style profile: 56 keys, no ua_*, with a userAgent sibling.
-  // (historical: this INPUT is a legacy 56-key profile on purpose - the
-  //  migration under test is what upgrades it. Do NOT update the count.)
+// An old-style profile: no ua_*, with a userAgent sibling.
+// (historical: this INPUT is a legacy profile on purpose - the migration under
+//  test is what upgrades it. Do NOT update the key count.)
 const OLD_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15";
 const old = JSON.parse(require("fs").readFileSync(__dirname + "/profiles.json", "utf8"))
   .profiles.find(p => p.id === "win10-chrome");
 const oldFp = Object.assign({}, old.fingerprint);
 delete oldFp.ua_platform; delete oldFp.ua_mobile; delete oldFp.ua_brands;
 
+// Migration runs through fpSplitConfig(), not fpNormalizeConfig() directly:
+// presets now carry TLS keys, and fpNormalizeConfig() drops every key absent
+// from FP_KEYS, so calling it on a whole profile reports those 9 keys as
+// "unknown" and would discard them. fpSplitConfig() routes each key to its own
+// plane first, then normalizes only the Blink side. The Blink plane it returns
+// is exactly what fpNormalizeConfig() would produce, so the migration
+// properties below are still being tested as written.
+const split = schema.fpSplitConfig(oldFp);
+const norm = { config: split.fingerprint, unknown: split.unknown };
+
 console.log("  old profile keys: " + Object.keys(oldFp).length +
   "  (no ua_*), userAgent present: " + (typeof old.userAgent === "string") + "\n");
 
 // 1. userAgent is NOT part of fingerprint, so normalization cannot touch it.
-const norm = schema.fpNormalizeConfig(oldFp);
+ck("TLS keys survive migration (routed, not reported unknown)",
+  split.tls && Object.keys(split.tls).length > 0 &&
+    split.unknown.filter(k => /^fp[A-Z]/.test(k)).length === 0,
+  "tls=" + Object.keys(split.tls).join(",") + " unknown=" + split.unknown.join(","));
 ck("old fingerprint normalizes without dropping keys",
   // Derived, not hardcoded: the kernel key count changes whenever a leak is
 // fixed, and a hardcoded number turns every such change into a false failure

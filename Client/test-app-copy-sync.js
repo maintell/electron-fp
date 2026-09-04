@@ -7,10 +7,10 @@
 // load, the app throws before creating a window. Result: a white screen, while
 // the test suite stays green - because the tests run Client/ directly.
 //
-// Root cause of the 2026-08-31 white screen: the copy was the 56-key version,
-  // (historical: 56 was correct when this was written - the copy predated
-  //  the ua_* keys. Do NOT update it to the current schema count.)
-// missing FP_UA_PRESETS / fpRandomUserAgent / fpNormalizeUserAgent /
+// Root cause of the 2026-08-31 white screen: the copy was the 56-key version (historical:
+// 56 was correct when this was written - the copy predated the
+// ua_* keys, so do NOT update it to the current schema count), missing
+// FP_UA_PRESETS / fpRandomUserAgent / fpNormalizeUserAgent /
 // fpPlatformForUserAgent. main.js destructures all four at the top level.
 //
 // This checks the two properties that actually matter:

@@ -27,7 +27,7 @@ out/Release/electron.exe Client/
 - **User-Agent coverage** (client-level) — per-tab UA applied via
   `session.setUserAgent()`, covering **both** `navigator.userAgent` and the HTTP
   `User-Agent` header. Presets, a preset dropdown, and free-form entry.
-- **5 preset profiles**: Default, Windows 10/Chrome, macOS/Safari, Linux/Firefox, Mobile/Android
+- **5 preset profiles**: Default, Windows 10/Chrome, macOS/Safari, Linux/Firefox, Mobile/Android — each now configures the TLS plane too, so a profile named "macOS/Safari" does not speak Chromium's GREASEd ClientHello (see below)
 - **Random profile generator** — one-click randomize all fingerprint parameters
 - **JSON editor** — edit fingerprint config directly
 - **Import/Export** profiles as JSON files
@@ -232,6 +232,15 @@ electron Client/test-tls-gui.js
 # a setTimeout-based sampling loop blew the 15s budget) (12 checks)
 electron Client/test-probe-hidden-tab.js
 
+# A preset profile's claimed browser must match its real ClientHello (18 checks)
+electron Client/test-profile-tls.js
+
+# Opening a tab FROM a preset must apply that preset's TLS plane (9 checks)
+# This one caught a real bug: createTabView() passed the raw profile to
+# `fingerprint` and never called setSSLConfig(), so a Safari-preset tab
+# spoke Chromium's native GREASEd hello.
+electron Client/test-profile-tab-tls.js
+
 # Upstream fingerprint smoke (window-level isolation, 20+ surfaces)
 electron fingerprint/scripts/smoke.js --isolation --verbose
 ```
@@ -256,6 +265,29 @@ With the old loop, running Self-test on any tab except the front one reported
 fingerprint rather than a throttled timer. `test-probe-hidden-tab.js` asserts
 both halves: the loop uses no timer, and the probe actually completes while
 hidden.
+
+### Preset profiles carry a TLS plane
+
+Each named preset now sets the TLS keys consistent with the browser it claims.
+Before this, all four set 29–31 Blink keys and **zero** TLS keys, so the most
+browser-distinguishing layer of all still said "Chromium" under a Safari UA.
+
+| preset | TLS shape | why |
+|---|---|---|
+| `win10-chrome`, `mobile-android` | GREASE on | Chromium GREASEs (RFC 8701) |
+| `macos-safari` | GREASE off | WebKit does not implement GREASE |
+| `linux-firefox` | GREASE off, `fpAdvertisedVersionMax=771` | NSS does not GREASE; 771 is the only way to drop the TLS 1.3 suites |
+| `default` | none | native passthrough — the baseline the self-test compares against |
+
+Only keys with a measured, stable effect are set. `fpGreaseEnabled` was verified
+6/6 either way before it was baked into a preset. The remaining keys
+(`fpCipherList`, `fpExtensionOrder`, `fpSignatureAlgorithms`,
+`fpPermuteExtensions`) are left unset: they change the hello but do not
+correspond to a named browser shape, so setting them would be decoration
+pretending to be fidelity.
+
+The randomizer derives the same plane from the UA it picked, so a generated
+profile cannot pair a Safari UA with a GREASEd hello.
 
 ### Fingerprint Keys (63 keys / 15 functional groups)
 

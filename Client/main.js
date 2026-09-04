@@ -163,6 +163,19 @@ function createTabView(tabId, profileId) {
   // UA must be set before the view is constructed — see applyTabUserAgent().
   applyTabUserAgent(partition, profile.userAgent);
 
+  // Split the profile into its two delivery planes. This is the tab-CREATION
+  // path and it must route exactly like the panel path: the Blink keys go to
+  // --fingerprint-config, the 9 TLS keys go to session.setSSLConfig().
+  // Passing the RAW profile as `fingerprint` silently loses the TLS plane -
+  // the kernel ignores keys it does not know, so the tab kept Chromium's native
+  // GREASE while the profile claimed Safari. Caught by driving the real UI: a
+  // Safari-preset tab measured grease=3, identical to native, while applying
+  // the same config through the panel correctly measured grease=0.
+  const split = fp ? fpSplitConfig(fp) : null;
+  const blinkFp = split ? split.fingerprint : null;
+  const tls = split ? split.tls : null;
+  if (tls && Object.keys(tls).length) applyTabTLSConfig(partition, tls);
+
   const view = new BrowserView({
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -171,7 +184,7 @@ function createTabView(tabId, profileId) {
       sandbox: false,
       partition,
       // ponytail: fingerprint injection — null config = native (no spoof)
-      ...(fp ? { fingerprint: fp } : {})
+      ...(blinkFp ? { fingerprint: blinkFp } : {})
     }
   });
 
@@ -1181,6 +1194,40 @@ function generateRandomProfile() {
   fp.navigator_vendor = fpVendorForUserAgent(ua) || p.vendor;
   fp.navigator_languages = fpLanguagesForUserAgent(ua) || pick(p.langs);
   fp.device_pixel_ratio = fpPixelRatioForUserAgent(ua) || String(pick(p.dpr));
+
+  // --- TLS plane ---------------------------------------------------------
+  // Derived from the UA, not picked at random, for the same reason the block
+  // above is: an incoherent pair is itself a detection signal. A Safari UA
+  // speaking a GREASEd Chromium ClientHello announces the lie on the one layer
+  // the page cannot see but the server always can.
+  //
+  // Only keys with a measured, stable effect are set:
+  //   * fpGreaseEnabled - the clean browser-family signal. Chromium GREASEs
+  //     (RFC 8701), WebKit and NSS do not. Verified stable 6/6 either way.
+  //   * fpAdvertisedVersionMax - 771 is the ONLY way to drop the TLS 1.3
+  //     suites; fpCipherList cannot remove 1301/1302/1303 (measured).
+  //   * fpOmitAlpn / fpOmitSessionTicket - real extension removals, varied so
+  //     a random profile is not a fixed JA3.
+  // The remaining 4 keys (fpCipherList, fpExtensionOrder,
+  // fpSignatureAlgorithms, fpPermuteExtensions) are left unset: they change the
+  // hello but do not correspond to a named browser shape, so setting them
+  // would be randomisation pretending to be fidelity.
+  const isWebKit = /AppleWebKit\/6|Version\/\d+.*Safari/.test(ua) &&
+    !/Chrome|Chromium|Edg|OPR/.test(ua);
+  const isFirefox = /Firefox\//.test(ua) && !/Seamonkey|Iceweasel/.test(ua);
+  if (isWebKit || isFirefox) {
+    fp.fpGreaseEnabled = false;
+    fp.fpGreaseSigalgsEnabled = false;
+  } else {
+    // Chromium family (including the many Chromium-derived UAs).
+    fp.fpGreaseEnabled = true;
+    fp.fpGreaseSigalgsEnabled = true;
+  }
+  if (isFirefox) {
+    fp.fpAdvertisedVersionMax = 771;   // drops the TLS 1.3 suites
+  }
+  fp.fpOmitAlpn = maybe(0.25, true) || false;
+  fp.fpOmitSessionTicket = maybe(0.25, true) || false;
 
   return {
     id: `random-${Date.now()}`,
