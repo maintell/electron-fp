@@ -56,11 +56,26 @@ app.whenReady().then(async () => {
   console.log('  fingerprint hw:', result.hw, '(expected 12)');
   console.log('  fingerprint tz:', result.tz, '(expected Australia/Sydney)');
 
-  const ok = result.h1 === 'FP Render Test' && result.hw === 12 && result.tz === 'Australia/Sydney';
-  console.log(ok ? '\nPASS: BrowserView renders + fingerprint applied' : '\nFAIL: rendering or fingerprint issue');
+  // Reported separately, not ANDed into one boolean. The old single `ok`
+  // printed "FAIL: rendering or fingerprint issue", which does not say which
+  // of three distinct things broke: the view did not render, the page did not
+  // evaluate, or the fingerprint did not apply. Each is a different defect
+  // with a different owner, and only the third is about fingerprints.
+  let pass = 0, fail = 0;
+  const check = (name, cond, detail) => {
+    if (cond) { pass++; console.log('PASS  ' + name + (detail ? ': ' + detail : '')); }
+    else { fail++; console.log('FAIL  ' + name + (detail ? ': ' + detail : '')); }
+  };
+  check('BrowserView renders the page', result.h1 === 'FP Render Test',
+    String(result.h1));
+  check('hardware_concurrency applied', result.hw === 12,
+    'got ' + result.hw + ', want 12');
+  check('tz_id applied', result.tz === 'Australia/Sydney',
+    'got ' + result.tz + ', want Australia/Sydney');
 
+  console.log(fail === 0 ? '\nPASS: ' + pass + ' checks' : '\nFAIL: ' + fail + ' of ' + (pass + fail));
   win.close();
-  app.exit(ok ? 0 : 1);
+  app.exit(fail === 0 ? 0 : 1);
 });
 
 setTimeout(() => { console.error('timeout'); app.exit(2); }, 20000);
