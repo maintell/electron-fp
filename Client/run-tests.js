@@ -99,21 +99,52 @@ for (const f of files) {
   const skip = lines.filter(l => /^SKIP/.test(l)).length;
 
   totalPass += pass; totalFail += fail; totalSkip += skip;
+
+  // 'ok' must mean "this file checked something and it all passed". A file that
+  // passed nothing has not passed - so decide the tag on the same condition the
+  // verdict uses, rather than on `fail` alone, which lets pass=0 look fine.
+  const assertedSomething = pass > 0 || fail > 0;
   if (fail > 0) failed.push(f);
 
-  const tag = fail > 0 ? 'FAIL' : 'ok  ';
+  const tag = !assertedSomething || fail > 0 ? 'FAIL' : 'ok  ';
   console.log(`${tag}  ${f.padEnd(26)} pass=${String(pass).padEnd(3)} fail=${String(fail).padEnd(3)} skip=${skip}`);
 
   if (fail > 0) {
     lines.filter(l => /^(FAIL|THREW)/.test(l))
       .forEach(l => console.log('        ' + l.trim()));
   }
-  // Surface a process that died without printing anything: that is the
-  // resources/app failure mode and it must never look like a clean pass.
+  // A test that asserted NOTHING is not a pass - it is a hole.
+  //
+  // Two distinct shapes, both previously reported as clean:
+  //
+  //   pass=0 fail=0 skip=0  the process died before printing (the
+  //                         resources/app failure mode)
+  //   pass=0 fail=0 skip=N  the test skipped everything
+  //
+  // The second is the more dangerous of the two: a skip is legitimate when the
+  // environment genuinely lacks something, but a test whose EVERY check skips
+  // contributes nothing on this machine while making the suite look larger.
+  //
+  // This used to `return` instead of `continue`, which ABORTED the whole run at
+  // the first offending file: every test after it silently never ran, and the
+  // TOTAL line was never printed. That is how test-no-silent-skips.js failed
+  // earlier - it exited null, and the runner then skipped the remaining files.
   if (pass === 0 && fail === 0) {
-    console.log(`        (no output - exit=${r.status}${r.error ? ' ' + r.error.code : ''})`);
+    if (skip === 0) {
+      console.log(`        (no output - exit=${r.status}${r.error ? ' ' + r.error.code : ''})`);
+    } else {
+      console.log(`        (CHECKED NOTHING: ${skip} skipped, 0 passed, 0 failed)`);
+    }
     failed.push(f);
-    return;
+    continue;
+  }
+
+  // A test that skips MORE than it checks is worth surfacing even when some
+  // checks did run - it usually means an environment precondition quietly
+  // stopped being satisfied on this machine.
+  if (skip > 0 && skip > pass) {
+    console.log(`        (mostly skipped: ${skip} skipped vs ${pass} passed)`);
+    failed.push(f);
   }
 
   // Also gate on the exit code, not just the printed lines.
