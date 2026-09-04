@@ -10,7 +10,7 @@ const { app, BrowserWindow, BrowserView } = require('electron');
 // it renamed TOP_HEIGHT and dropped the STATUS_HEIGHT subtraction. Asserting
 // against a re-implementation can only be accidentally right, and stays right
 // only while nobody touches either side.
-const { PANEL_WIDTH, viewBounds } = require('./layout');
+const { PANEL_WIDTH, MIN_VIEW_WIDTH, viewBounds } = require('./layout');
 
 const WIN_W = 1400, WIN_H = 900;
 
@@ -52,11 +52,32 @@ app.whenReady().then(async () => {
   console.log(`  => panel area covered when closed: ${coversWhenClosed ? 'YES (bad)' : 'no'}`);
   console.log(`  => panel area covered when open:   ${notCoveredWhenOpen ? 'NO (good, clickable)' : 'YES (bad)'}`);
 
-  const ok = coversWhenClosed && notCoveredWhenOpen;
-  console.log(ok ? '\nPASS: panel is revealed & clickable when open' : '\nFAIL: panel still covered');
+  // Reported separately rather than ANDed. These are two INDEPENDENT geometry
+  // facts and either can break alone:
+  //   - closed: the view must span the full width (regression = a stray gap)
+  //   - open:   the view must stop before the panel (regression = the panel is
+  //             drawn but unclickable, which is the bug this file exists for)
+  // A single "panel still covered" message does not say which direction broke.
+  let pass = 0, fail = 0;
+  const ck = (name, cond, detail) => {
+    if (cond) { pass++; console.log('PASS  ' + name + (detail ? ': ' + detail : '')); }
+    else { fail++; console.log('FAIL  ' + name + (detail ? ': ' + detail : '')); }
+  };
+
+  ck('BrowserView spans the full width when the panel is closed',
+    coversWhenClosed, 'right edge ' + (boundsClosed.x + boundsClosed.width) + ' vs contentW ' + contentW);
+  ck('BrowserView stops before the panel when the panel is open',
+    notCoveredWhenOpen, 'right edge ' + rightEdge + ' vs panel start ' + panelStartX);
+  // The view must not be squeezed to nothing by a wide panel on a small window.
+  ck('BrowserView keeps a usable width when the panel is open',
+    boundsOpen.width >= MIN_VIEW_WIDTH, boundsOpen.width + ' >= ' + MIN_VIEW_WIDTH);
+
+  console.log(fail === 0
+    ? '\nPASS: ' + pass + ' checks (panel revealed & clickable when open)'
+    : '\nFAIL: ' + fail + ' of ' + (pass + fail));
 
   win.close();
-  app.exit(ok ? 0 : 1);
+  app.exit(fail === 0 ? 0 : 1);
 });
 
 setTimeout(() => { console.error('timeout'); app.exit(2); }, 10000);

@@ -79,15 +79,37 @@ app.whenReady().then(async () => {
 
   // Counts come from the schema rather than being hardcoded: they went 56/14 ->
   // 57/15 when navigator_platform was added, which silently broke this check.
+  //
+  // Reported separately rather than ANDed into one boolean. Six distinct things
+  // can go wrong here - the schema IPC returns wrong counts, the renderer fails
+  // to render sections, it renders the wrong number of fields, it throws, or it
+  // logs a console error - and a single "want 15/63, got 15/62" message does not
+  // distinguish them. Each now names itself.
   const wantKeys = schema.FP_KEY_NAMES.length;
   const wantGroups = schema.FP_GROUP_IDS.length;
-  const ok = out.keyCount === wantKeys && out.groupCount === wantGroups &&
-             out.sections === wantGroups && out.fields === wantKeys &&
-             !out.err && errs.length === 0;
-  console.log(ok ? "\nPASS: grouped UI renders " + wantGroups + " sections / " + wantKeys + " fields"
-                 : "\nFAIL (want " + wantGroups + " groups / " + wantKeys + " fields, got " +
-                   out.groupCount + " / " + out.fields + ")");
+
+  let pass = 0, fail = 0;
+  const ck = (name, cond, detail) => {
+    if (cond) { pass++; console.log("PASS  " + name + (detail ? ": " + detail : "")); }
+    else { fail++; console.log("FAIL  " + name + (detail ? ": " + detail : "")); }
+  };
+
+  ck("schema reports the right key count", out.keyCount === wantKeys,
+    out.keyCount + " / " + wantKeys);
+  ck("schema reports the right group count", out.groupCount === wantGroups,
+    out.groupCount + " / " + wantGroups);
+  ck("renderer renders one section per group", out.sections === wantGroups,
+    out.sections + " / " + wantGroups);
+  ck("renderer renders one field per key", out.fields === wantKeys,
+    out.fields + " / " + wantKeys);
+  ck("render did not throw", !out.err, String(out.err));
+  ck("no console errors", errs.length === 0, errs.length ? errs.join(" ;; ") : "none");
+
+  console.log(fail === 0
+    ? "\nPASS: " + pass + " checks (grouped UI renders " + wantGroups +
+      " sections / " + wantKeys + " fields)"
+    : "\nFAIL: " + fail + " of " + (pass + fail));
   win.close();
-  app.exit(ok ? 0 : 1);
+  app.exit(fail === 0 ? 0 : 1);
 });
 setTimeout(() => { console.error("timeout"); app.exit(2); }, 25000);
