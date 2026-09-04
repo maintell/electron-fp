@@ -93,7 +93,40 @@ for (const f of CODE) {
   ck("packaged " + f + " matches source", same, same ? "" : "STALE - rerun the copy step");
 }
 
-// 4. The packaged profiles must still normalize cleanly under the new schema.
+// 4. No surprises in the packaged directory.
+//
+// The check above only asks whether each listed file is present and matching;
+// it never asked what ELSE is in there. Two stale copies sat in the packaged
+// tree unnoticed as a result - test-new-surfaces.js and README.md, both older
+// than their source and loaded by nothing. A stale file that nothing loads is
+// dead weight; one that differs from its source is worse, because it reads as
+// current to anyone looking at the packaged tree.
+//
+// Files that belong in the packaged copy but are NOT synced from source:
+//   profiles.json - user-created profiles. The packaged copy is the DATA
+//                   DESTINATION, so it legitimately holds more than the
+//                   source and must never be overwritten from it.
+const EXPECTED_EXTRA = ["profiles.json"];
+try {
+  const present = [];
+  (function walk(d, p) {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const f = path.join(d, e.name);
+      if (e.isDirectory()) walk(f, p + e.name + "/");
+      else present.push(p + e.name);
+    }
+  })(APP, "");
+  const extra = present.filter((f) => !CODE.includes(f));
+  const unexpected = extra.filter((f) => !EXPECTED_EXTRA.includes(f));
+  ck("packaged dir holds no unexpected extra files", unexpected.length === 0,
+    unexpected.length
+      ? unexpected.join(", ") + " - stale or unintended, remove them"
+      : "only allowed: " + extra.join(", ") || "none");
+} catch (e) {
+  ck("packaged dir holds no unexpected extra files", false, e.message);
+}
+
+// 5. The packaged profiles must still normalize cleanly under the new schema.
 try {
   const pj = JSON.parse(fs.readFileSync(path.join(APP, "profiles.json"), "utf8"));
   let bad = [];
