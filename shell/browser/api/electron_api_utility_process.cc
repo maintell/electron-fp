@@ -4,6 +4,7 @@
 
 #include "shell/browser/api/electron_api_utility_process.h"
 
+#include <array>
 #include <map>
 #include <unordered_map>
 #include <utility>
@@ -270,7 +271,7 @@ void UtilityProcessWrapper::OnServiceProcessLaunch(
     EmitWithoutEvent("stdout", stdout_read_fd_);
   if (stderr_read_fd_ != -1)
     EmitWithoutEvent("stderr", stderr_read_fd_);
-  if (url_loader_network_observer_.has_value()) {
+  if (url_loader_network_observer_) {
     url_loader_network_observer_->set_process_id(pid_);
   }
   EmitWithoutEvent("spawn");
@@ -351,7 +352,7 @@ void UtilityProcessWrapper::Shutdown(uint32_t exit_code) {
 }
 
 void UtilityProcessWrapper::PostMessage(gin::Arguments* const args) {
-  if (!node_service_remote_.is_connected())
+  if (!connector_ || connector_closed_)
     return;
 
   blink::TransferableMessage transferable_message;
@@ -368,26 +369,10 @@ void UtilityProcessWrapper::PostMessage(gin::Arguments* const args) {
   }
 
   v8::Local<v8::Value> transferables;
-  std::vector<gin_helper::Handle<MessagePort>> wrapped_ports;
+  v8::LocalVector<v8::Value> wrapped_ports(isolate);
   if (args->GetNext(&transferables)) {
-    std::vector<v8::Local<v8::Value>> wrapped_port_values;
-    if (!gin::ConvertFromV8(isolate, transferables, &wrapped_port_values)) {
-      args->ThrowTypeError("transferables must be an array of MessagePorts");
-      return;
-    }
-
-    for (size_t i = 0; i < wrapped_port_values.size(); ++i) {
-      if (!gin_helper::IsValidWrappable(wrapped_port_values[i],
-                                        &MessagePort::kWrapperInfo)) {
-        args->ThrowTypeError(
-            base::StrCat({"Port at index ", base::NumberToString(i),
-                          " is not a valid port"}));
-        return;
-      }
-    }
-
     if (!gin::ConvertFromV8(isolate, transferables, &wrapped_ports)) {
-      args->ThrowTypeError("Passed an invalid MessagePort");
+      args->ThrowTypeError("transferables must be an array of MessagePorts");
       return;
     }
   }
@@ -448,7 +433,7 @@ void UtilityProcessWrapper::OnV8FatalError(const std::string& location,
 }
 
 void UtilityProcessWrapper::CreateAndSendURLLoaderFactory(bool /* crashed */) {
-  if (!node_service_remote_.is_connected())
+  if (!node_service_remote_.is_bound() || !node_service_remote_.is_connected())
     return;
 
   node_service_remote_->UpdateURLLoaderFactory(CreateURLLoaderFactoryParams());
@@ -466,7 +451,8 @@ UtilityProcessWrapper::CreateURLLoaderFactoryParams() {
   loader_params->is_orb_enabled = false;
   loader_params->is_trusted = true;
   if (create_network_observer_) {
-    url_loader_network_observer_.emplace();
+    url_loader_network_observer_ =
+        std::make_unique<electron::URLLoaderNetworkObserver>();
     loader_params->url_loader_network_observer =
         url_loader_network_observer_->Bind();
   }
@@ -573,17 +559,23 @@ UtilityProcessWrapper* UtilityProcessWrapper::Create(
     opts.Get("cwd", &current_working_directory);
     opts.Get("respondToAuthRequestsFromMainProcess", &create_network_observer);
 
-    std::vector<std::string> stdio_arr{"ignore", "inherit", "inherit"};
+    constexpr std::array default_stdio{
+        IOType::IO_IGNORE,
+        IOType::IO_INHERIT,
+        IOType::IO_INHERIT,
+    };
+    std::vector<std::string> stdio_arr;
     opts.Get("stdio", &stdio_arr);
-    for (size_t i = 0; i < 3; i++) {
-      IOType type;
-      if (stdio_arr[i] == "ignore")
-        type = IOType::IO_IGNORE;
-      else if (stdio_arr[i] == "inherit")
-        type = IOType::IO_INHERIT;
-      else if (stdio_arr[i] == "pipe")
-        type = IOType::IO_PIPE;
-
+    for (size_t i = 0; i < default_stdio.size(); ++i) {
+      IOType type = default_stdio[i];
+      if (i < stdio_arr.size()) {
+        if (stdio_arr[i] == "ignore")
+          type = IOType::IO_IGNORE;
+        else if (stdio_arr[i] == "inherit")
+          type = IOType::IO_INHERIT;
+        else if (stdio_arr[i] == "pipe")
+          type = IOType::IO_PIPE;
+      }
       stdio.emplace(static_cast<IOHandle>(i), type);
     }
 

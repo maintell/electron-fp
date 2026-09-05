@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -27,8 +28,8 @@ class SingleThreadTaskRunner;
 
 namespace node {
 class Environment;
-class IsolateData;
 class MultiIsolatePlatform;
+struct node_module;
 }  // namespace node
 
 namespace electron {
@@ -122,6 +123,9 @@ class NodeBindings {
   static std::unique_ptr<NodeBindings> Create(BrowserEnvironment browser_env,
                                               uv_loop_t* loop);
   static void RegisterBuiltinBindings();
+  // Finds one of the bindings RegisterBuiltinBindings() registers for this
+  // process type, for callers without a node::Environment.
+  static node::node_module* GetLinkedBinding(std::string_view name);
   static bool IsInitialized();
 
   // Undo node::InitializeOncePerProcess() for this process. Must run before

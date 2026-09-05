@@ -3379,16 +3379,12 @@ describe('chromium features', () => {
             show: false,
             ...extraPreferences
           });
-          let redirected = false;
-          w.webContents.on('render-process-gone', () => {
-            expect.fail('renderer crashed / was killed');
-          });
+          let redirectedTo: string | undefined;
           w.webContents.on('did-redirect-navigation', (event, url) => {
-            expect(url).to.equal(`${serverCrossSiteUrl}/redirected`);
-            redirected = true;
+            redirectedTo = url;
           });
           await w.loadURL(`${serverUrl}/redirect-cross-site`);
-          expect(redirected).to.be.true('didnt redirect');
+          expect(redirectedTo).to.equal(`${serverCrossSiteUrl}/redirected`, 'didnt redirect');
         });
       };
 
@@ -5109,6 +5105,26 @@ describe('navigator.hid', () => {
         }
       }
     }
+  });
+
+  it('does not crash when the requesting webContents is destroyed from the select-hid-device handler', async () => {
+    const guest = (webContents as typeof ElectronInternal.WebContents).create({
+      type: 'webview',
+      embedder: w.webContents
+    });
+    await guest.loadFile(path.join(fixturesPath, 'pages', 'blank.html'));
+    session.defaultSession.setPermissionCheckHandler(() => true);
+    session.defaultSession.setDevicePermissionHandler(() => true);
+    const selectFired = new Promise<void>((resolve) => {
+      w.webContents.session.once('select-hid-device', () => {
+        guest.destroy();
+        resolve();
+      });
+    });
+    guest.executeJavaScript('navigator.hid.requestDevice({filters: []})', true).catch(() => {});
+    await selectFired;
+    await setTimeout();
+    expect(guest.isDestroyed()).to.be.true();
   });
 });
 

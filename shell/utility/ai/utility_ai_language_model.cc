@@ -275,8 +275,8 @@ class PromptResponder {
       responder_->OnStreaming(response);
       uint64_t token_count =
           GetContextUsage(isolate, language_model_.Get(isolate));
-      responder_->OnCompletion(
-          blink::mojom::ModelExecutionContextInfo::New(token_count));
+      responder_->OnCompletion(blink::mojom::ModelExecutionContextInfo::New(
+          token_count, /*response_tokens=*/0));
       completed_ = true;
       DeleteThis();
     } else if (IsReadableStream(isolate, val)) {
@@ -323,7 +323,8 @@ class PromptResponder {
               uint64_t token_count = GetContextUsage(
                   isolate, weak_ptr->language_model_.Get(isolate));
               weak_ptr->responder_->OnCompletion(
-                  blink::mojom::ModelExecutionContextInfo::New(token_count));
+                  blink::mojom::ModelExecutionContextInfo::New(
+                      token_count, /*response_tokens=*/0));
               weak_ptr->completed_ = true;
               weak_ptr->DeleteThis();
             } else {
@@ -433,8 +434,13 @@ void UtilityAILanguageModel::OnResponderDisconnect(
   if (it != abort_controllers_.end()) {
     v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
     v8::HandleScope scope{isolate};
-    gin_helper::CallMethod(isolate, it->second.Get(isolate), "abort");
+    // abort() runs the signal's listeners and then a microtask checkpoint,
+    // which may settle the pending append() promise and erase this entry
+    // from |abort_controllers_|. Take the controller out of the map first so
+    // we are not holding an iterator across the call.
+    v8::Local<v8::Object> abort_controller = it->second.Get(isolate);
     abort_controllers_.erase(it);
+    gin_helper::CallMethod(isolate, abort_controller, "abort");
   }
 }
 
@@ -572,8 +578,8 @@ void UtilityAILanguageModel::Append(
 
         uint64_t token_count =
             GetContextUsage(isolate, weak_ptr->language_model_.Get(isolate));
-        responder->OnCompletion(
-            blink::mojom::ModelExecutionContextInfo::New(token_count));
+        responder->OnCompletion(blink::mojom::ModelExecutionContextInfo::New(
+            token_count, /*response_tokens=*/0));
       };
 
   if (val->IsPromise()) {

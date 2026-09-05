@@ -2,9 +2,9 @@ gclient_gn_args_from = 'src'
 
 vars = {
   'chromium_version':
-    '154.0.8023.0',
+    '155.0.8038.2',
   'node_version':
-    'v24.18.1',
+    'v24.20.0',
   'nan_version':
     '675cefebca42410733da8a454c8d9391fcebfbc2',
   'squirrel.mac_version':
@@ -164,6 +164,17 @@ hooks = [
       'python3',
       '-c',
       'import os, subprocess; os.chdir(os.path.join("src", "electron")); subprocess.check_call(["node", ".yarn/releases/yarn-4.12.0.cjs", "install", "--immutable"]);',
+    ],
+  },
+  {
+    # Keep src/electron/build/siso_revision in step with the siso commit this
+    # Chromium pins; CI builds siso from that file (see the script header).
+    'name': 'gen_siso_revision',
+    'condition': 'checkout_chromium and process_deps',
+    'pattern': 'src/electron',
+    'action': [
+      'node',
+      'src/electron/script/gen-siso-revision.js',
     ],
   },
   {
