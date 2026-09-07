@@ -326,7 +326,7 @@ app.on('certificate-error', (event, webContents, url, error, certificate, callba
 Returns:
 
 * `event` Event
-* `webContents` [WebContents](web-contents.md) (optional)
+* `webContents` [WebContents](web-contents.md) | null
 * `url` URL
 * `certificateList` [Certificate[]](structures/certificate.md)
 * `callback` Function
@@ -361,7 +361,7 @@ app.on('select-client-certificate', (event, webContents, url, list, callback) =>
 Returns:
 
 * `event` Event
-* `webContents` [WebContents](web-contents.md) (optional)
+* `webContents` [WebContents](web-contents.md) | null
 * `authenticationResponseDetails` Object
   * `url` URL
   * `pid` number
@@ -1453,6 +1453,12 @@ This method can only be called before app is ready.
 ### `app.getAppMetrics()`
 
 Returns [`ProcessMetric[]`](structures/process-metric.md): Array of `ProcessMetric` objects that correspond to memory and CPU usage statistics of all the processes associated with the app.
+
+> [!NOTE]
+> `cpu.percentCPUUsage` and `cpu.idleWakeupsPerSecond` are averages over the time since
+> the last call to `app.getAppMetrics()`, and each call starts a new measurement interval
+> for every process at once. Other code in the main process, including dependencies, shares those
+> intervals. See [`CPUUsage`](structures/cpu-usage.md) for more details.
 
 ### `app.getGPUFeatureStatus()`
 

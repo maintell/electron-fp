@@ -53,6 +53,9 @@ struct ElectronRendererClient::FrameEnvironment {
   raw_ptr<NodeBindings> node_bindings;
   raw_ptr<ElectronBindings> electron_bindings;
   std::shared_ptr<node::Environment> environment;
+  // The world of |environment|'s context, recorded while Blink can still map
+  // the context to its frame.
+  int world_id = 0;
   base::WeakPtrFactory<FrameEnvironment> weak_factory{this};
 };
 
@@ -141,13 +144,9 @@ void ElectronRendererClient::DidCreateScriptContext(
   auto frame_env = std::make_unique<FrameEnvironment>(
       render_frame->IsMainFrame(), node_bindings_.get(),
       electron_bindings_.get());
+  frame_env->world_id =
+      render_frame->GetWebFrame()->GetScriptContextWorldId(renderer_context);
   NodeBindings* node_bindings = frame_env->node_bindings;
-
-  // Setup node tracing controller.
-  if (!node::tracing::TraceEventHelper::GetAgent()) {
-    auto* tracing_agent = new node::tracing::Agent();
-    node::tracing::TraceEventHelper::SetAgent(tracing_agent);
-  }
 
   // Setup node environment for each window.
   v8::Maybe<bool> initialized = node::InitializeContext(renderer_context);
@@ -292,6 +291,20 @@ void ElectronRendererClient::SetUpWebAssemblyTrapHandler() {
     electron::SetUpWebAssemblyTrapHandler();
   }
 #endif
+}
+
+v8::Local<v8::Context> ElectronRendererClient::GetEnvironmentContext(
+    content::RenderFrame* render_frame) const {
+  node::Environment* env = GetEnvironment(render_frame);
+  return env ? env->context() : v8::Local<v8::Context>();
+}
+
+std::optional<int> ElectronRendererClient::GetEnvironmentWorldId(
+    content::RenderFrame* render_frame) const {
+  auto iter = environments_.find(render_frame);
+  if (iter == environments_.end())
+    return std::nullopt;
+  return iter->second->world_id;
 }
 
 node::Environment* ElectronRendererClient::GetEnvironment(

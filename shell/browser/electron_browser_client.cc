@@ -27,6 +27,7 @@
 #include "base/strings/escape.h"
 #include "base/strings/string_util.h"
 #include "chrome/browser/browser_process.h"
+#include "chrome/browser/picture_in_picture/video_overlay_window.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/common/chrome_version.h"
@@ -239,6 +240,7 @@
 #include "components/pdf/browser/pdf_navigation_throttle.h"
 #include "components/pdf/browser/pdf_url_loader_request_interceptor.h"
 #include "components/pdf/common/constants.h"  // nogncheck
+#include "components/pdf/common/pdf_util.h"   // nogncheck
 #include "pdf/pdf_features.h"
 #include "shell/browser/electron_pdf_document_helper_client.h"
 #include "ui/webui/resources/cr_components/help_bubble/help_bubble.mojom.h"  // nogncheck
@@ -424,10 +426,14 @@ ElectronBrowserClient::~ElectronBrowserClient() {
 content::WebContents* ElectronBrowserClient::GetWebContentsFromProcessID(
     content::ChildProcessId process_id) {
   // If the process is a pending process, we should use the web contents
-  // for the frame host passed into RegisterPendingProcess.
+  // for the frame host passed into RegisterPendingProcess. The entry can
+  // outlive that WebContents when the process is shared, so it is held weakly.
   const auto iter = pending_processes_.find(process_id);
-  if (iter != std::end(pending_processes_))
-    return iter->second;
+  if (iter != std::end(pending_processes_)) {
+    if (content::WebContents* web_contents = iter->second.get())
+      return web_contents;
+    pending_processes_.erase(iter);
+  }
 
   // Certain render process will be created with no associated render view,
   // for example: ServiceWorker.
@@ -555,7 +561,7 @@ void ElectronBrowserClient::RegisterPendingSiteInstance(
     compatible = false;
   base::AutoReset<bool> reset(&spare_renderer_compatible_, compatible);
   const auto pending_process_id = pending_site_instance->GetProcess()->GetID();
-  pending_processes_[pending_process_id] = web_contents;
+  pending_processes_[pending_process_id] = web_contents->GetWeakPtr();
 
   if (rfh->GetParent())
     renderer_is_subframe_.insert(pending_process_id);
@@ -882,7 +888,7 @@ ElectronBrowserClient::GetServiceWorkerStartupData(
 std::unique_ptr<content::VideoOverlayWindow>
 ElectronBrowserClient::CreateWindowForVideoPictureInPicture(
     content::VideoPictureInPictureWindowController* controller) {
-  auto overlay_window = content::VideoOverlayWindow::Create(controller);
+  auto overlay_window = CreateVideoOverlayWindow(controller);
 #if BUILDFLAG(IS_WIN)
   std::wstring app_user_model_id = Browser::Get()->GetAppUserModelID();
   if (!app_user_model_id.empty()) {
@@ -1586,7 +1592,11 @@ void ElectronBrowserClient::WillCreateURLLoaderFactory(
   DCHECK(web_request);
 
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
-  if (!web_request->HasListener()) {
+  // Factories for requests made from the main process (e.g. net.fetch) have
+  // no frame and are not routed through extensions.
+  const bool is_browser_process_request =
+      type == URLLoaderFactoryType::kNavigation && !frame_host;
+  if (!web_request->HasListener() && !is_browser_process_request) {
     auto* web_request_api = extensions::BrowserContextKeyedAPIFactory<
         extensions::WebRequestAPI>::Get(browser_context);
 
@@ -1617,8 +1627,8 @@ void ElectronBrowserClient::WillCreateURLLoaderFactory(
     mojo::PendingReceiver<network::mojom::URLLoaderFactory> proxy_receiver =
         gate_to_proxy.InitWithNewPipeAndPassReceiver();
     CreateURLLoaderFactoryGate(
-        static_cast<ElectronBrowserContext*>(browser_context)
-            ->intercept_state(),
+        static_cast<ElectronBrowserContext*>(browser_context),
+        render_process_id, frame_host->GetRoutingID(),
         std::move(proxied_receiver), std::move(gate_to_network),
         std::move(gate_to_proxy));
     proxied_receiver = std::move(proxy_receiver);
@@ -1909,6 +1919,13 @@ ElectronBrowserClient::MaybeOverrideLocalURLCrossOriginEmbedderPolicy(
   content::RenderFrameHost* pdf_embedder = pdf_extension->GetParent();
   CHECK(pdf_embedder);
   return pdf_embedder->GetCrossOriginEmbedderPolicy();
+}
+
+bool ElectronBrowserClient::IsCrossOriginSubframeAllowedToShowFilePicker(
+    content::RenderFrameHost* render_frame_host,
+    const url::Origin& requesting_origin) {
+  // Let the PDF viewer save edited PDFs via window.showSaveFilePicker().
+  return IsPdfExtensionOrigin(requesting_origin);
 }
 #endif  // BUILDFLAG(ENABLE_PDF_VIEWER)
 

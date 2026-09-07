@@ -508,6 +508,12 @@ describe('webContents module', () => {
       expect(isolatedResult).to.equal(123);
       expect(mainWorldResult).to.equal(undefined);
     });
+
+    it('rejects when worldId is not an integer', async () => {
+      await expect(
+        w.webContents.executeJavaScriptInIsolatedWorld('1234' as any, [{ code: '1+1' }])
+      ).to.eventually.be.rejectedWith(TypeError, 'worldId must be an integer');
+    });
   });
 
   describe('loadURL() promise API', () => {
@@ -874,6 +880,28 @@ describe('webContents module', () => {
         w.webContents.navigationHistory.goBack();
         await back2;
         expect(w.getTitle()).to.equal('My own Title');
+      });
+
+      it('should not update page title if there was no title update and window was created with title on back nav', async () => {
+        // page has no <title> tag to preserve the one from BrowserWindow options
+        const page = `<html><head></head><body>Test</body></html>`;
+        w = new BrowserWindow({ show: false, title: 'Our custom title' });
+
+        const pushed = once(w.webContents, 'did-navigate-in-page');
+        await w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(page)}`);
+        await w.webContents.executeJavaScript("history.pushState({}, '', '#test')", true);
+        await pushed;
+
+        // we need to wait for both events to make sure all the relevant
+        // code runs for the BaseWindow and title logic
+        const back = once(w.webContents, 'did-navigate-in-page');
+        const titleUpdated = once(w.webContents, 'page-title-updated');
+
+        w.webContents.navigationHistory.goBack();
+
+        await Promise.all([back, titleUpdated]);
+
+        expect(w.getTitle()).to.equal('Our custom title');
       });
     });
 
@@ -1305,6 +1333,20 @@ describe('webContents module', () => {
       const result = await devtools.webContents.executeJavaScript('InspectorFrontendHost.constructor.name');
       expect(result).to.equal('InspectorFrontendHostImpl');
       devtools.destroy();
+    });
+
+    it('falls back to the built-in devtools when the assigned webContents has been destroyed', async () => {
+      const w = new BrowserWindow({ show: false });
+      const devtools = new BrowserWindow({ show: false });
+      w.webContents.setDevToolsWebContents(devtools.webContents);
+      devtools.webContents.destroy();
+      await once(devtools.webContents, 'destroyed');
+      await setTimeout(50);
+      const opened = once(w.webContents, 'devtools-opened');
+      w.webContents.openDevTools({ mode: 'detach' });
+      await opened;
+      expect(w.webContents.isDevToolsOpened()).to.be.true();
+      expect(w.webContents.devToolsWebContents).to.not.be.null();
     });
   });
 
@@ -3995,6 +4037,40 @@ describe('webContents module', () => {
       });
       w.loadFile(path.join(fixturesPath, 'pages', 'a.html'));
     });
+
+    describe('on a destroyed WebContents', () => {
+      const destroyedWebContents = async (handler?: (...args: any[]) => void) => {
+        const w = new BrowserWindow({ show: false });
+        const wc = w.webContents;
+        if (handler) wc.on('console-message', handler);
+        const destroyed = once(wc, 'destroyed');
+        w.destroy();
+        await destroyed;
+        expect(wc.isDestroyed()).to.be.true();
+        return wc;
+      };
+
+      it('does not throw when adding a listener', async () => {
+        const wc = await destroyedWebContents();
+        expect(() => wc.on('console-message', () => {})).to.not.throw();
+        expect(wc.listenerCount('console-message')).to.equal(1);
+      });
+
+      it('does not throw when removing a listener', async () => {
+        const handler = () => {};
+        const wc = await destroyedWebContents(handler);
+        expect(() => wc.removeListener('console-message', handler)).to.not.throw();
+        expect(wc.listenerCount('console-message')).to.equal(0);
+      });
+
+      it('does not throw when removing all listeners', async () => {
+        const wc = await destroyedWebContents(() => {});
+        expect(() => wc.removeAllListeners('console-message')).to.not.throw();
+        expect(wc.listenerCount('console-message')).to.equal(0);
+        wc.on('console-message', () => {});
+        expect(() => wc.removeAllListeners()).to.not.throw();
+      });
+    });
   });
 
   describe('ipc-message event', () => {
@@ -4777,6 +4853,36 @@ describe('webContents module', () => {
       await w.loadURL(serverUrl);
       const body = await w.webContents.executeJavaScript('document.documentElement.textContent');
       expect(body).to.equal('401');
+    });
+
+    it('does not crash when the webContents is destroyed while an auth request is in flight', async () => {
+      const w = new BrowserWindow({ show: false });
+      const wc = w.webContents;
+      const dbg = wc.debugger;
+      dbg.attach('1.3');
+      const destroyed = once(wc, 'destroyed');
+      dbg.on('message', (_e, method, params) => {
+        if (method === 'Fetch.requestPaused') {
+          dbg.sendCommand('Fetch.continueRequest', { requestId: params.requestId }).catch(() => {});
+        } else if (method === 'Fetch.authRequired') {
+          // Destroying here queues the WebContents deletion right before the
+          // task that emits 'login' for the resumed auth challenge.
+          wc.destroy();
+          dbg
+            .sendCommand('Fetch.continueWithAuth', {
+              requestId: params.requestId,
+              authChallengeResponse: { response: 'Default' }
+            })
+            .catch(() => {});
+        }
+      });
+      await dbg.sendCommand('Fetch.enable', {
+        patterns: [{ urlPattern: '*', requestStage: 'Request' }],
+        handleAuthRequests: true
+      });
+      wc.loadURL(serverUrl).catch(() => {});
+      await destroyed;
+      await setTimeout(100);
     });
   });
 
