@@ -53,6 +53,20 @@
 # Converter<Http2ProfilePtr>, Session::SetHttp2Profile, method registration.
 # PURPOSE: make both profiles reachable from JS. The SSLConfig converter is
 # the whitelist that previously dropped every fp_* key.
+# MERGE: HIGH - for a reason that is not about conflicts. The gin converter
+#   reads an explicit whitelist and DROPS UNKNOWN KEYS WITHOUT ANY DIAGNOSTIC
+#   (upstream even shipped the comment "TODO(nornagon): also support other
+#   SSLConfig properties?"). So if upstream adds a field to SSLConfig and we do
+#   not, or if a key is renamed on our side only, the build compiles, the
+#   profile applies, and the value is silently absent. That was a real bug: it
+#   was caught only by a test asserting that applying a profile CHANGES the
+#   observed ClientHello - all profiles initially produced an IDENTICAL JA4.
+#   After any change here, verify per key (Client/test-tls-keys.js), never by
+#   aggregate. Also: fp_* reads are appended after disabledCipherSuites, so if
+#   upstream adds SSLConfig fields, append after OURS.
+#   The JS camelCase -> mojom snake_case mapping (fpCipherList ->
+#   fp_cipher_list, settingsGrease -> settings_grease) lives here and must match
+#   Client/fp-schema.js; a mismatch is not a compile error.
 diff --git a/shell/browser/api/electron_api_session.cc b/shell/browser/api/electron_api_session.cc
 index 2e26b2b0b8..5bddf18db8 100644
 --- a/shell/browser/api/electron_api_session.cc
@@ -244,6 +258,11 @@ index 2e26b2b0b8..5bddf18db8 100644
 # RANGE: includes + SetHttp2Profile declaration.
 # PURPOSE: the full network_context.mojom.h (not -forward) is required
 # because Http2ProfilePtr is a by-value member.
+# MERGE: MEDIUM - a small additive change, but the include is load-bearing and
+#   the failure is confusing: with the -forward header the compiler reports an
+#   incomplete type at the member declaration, which looks like a missing
+#   include elsewhere. Electron has been trimming includes, so an upstream
+#   change may remove or reorder this one without touching our declaration.
 diff --git a/shell/browser/api/electron_api_session.h b/shell/browser/api/electron_api_session.h
 index f738f56594..bfa1ca09c7 100644
 --- a/shell/browser/api/electron_api_session.h
@@ -272,6 +291,16 @@ index f738f56594..bfa1ca09c7 100644
 # RANGE: constructor options block; SetHttp2Profile.
 # PURPOSE: read the "http2Profile" option at construction time - the only
 # point at which HttpNetworkSessionParams can still be influenced.
+# MERGE: HIGH - the constructor is the ONE place this can be read, and nothing
+#   in the type system enforces that. Moving this read into a setter (which
+#   looks tidier) makes it compile, run, and do nothing - the profile arrives
+#   after NetworkContext construction and is ignored. That was measured, not
+#   assumed: instrumenting ConfigureNetworkContextParams showed the profile
+#   unset for every post-hoc call. Client/test-h2-plane.js covers the ordering
+#   by parsing SETTINGS frames off the wire.
+#   Uses the same options.Find* pattern as the neighbouring "cache" option, so
+#   if upstream changes that pattern, follow it - but keep the read in the
+#   constructor.
 diff --git a/shell/browser/electron_browser_context.cc b/shell/browser/electron_browser_context.cc
 index 11e4489a3f..d3cefe9fbe 100644
 --- a/shell/browser/electron_browser_context.cc
@@ -335,6 +364,10 @@ index 11e4489a3f..d3cefe9fbe 100644
 # RANGE: SetHttp2Profile/GetHttp2Profile + http2_profile_ member.
 # PURPOSE: per-BrowserContext storage for the profile, mirroring
 # ssl_config_ but with no live-update channel.
+# MERGE: LOW - additive member + accessors. The "no live-update channel" part is
+#   a deliberate asymmetry from ssl_config_, not an oversight: HTTP/2 params are
+#   read once at NetworkContext construction, so a setter would have nothing to
+#   update. Do not "fix" this by adding one.
 diff --git a/shell/browser/electron_browser_context.h b/shell/browser/electron_browser_context.h
 index 3b2a1b3ae9..503c72b4a4 100644
 --- a/shell/browser/electron_browser_context.h
@@ -370,6 +403,14 @@ index 3b2a1b3ae9..503c72b4a4 100644
 # PURPOSE: hand the profile to NetworkContextParams at construction. This
 # is the exact function that instrumentation proved runs BEFORE any
 # post-hoc setter, which is why the constructor-time API is mandatory.
+# MERGE: HIGH - smallest hunk in the patch (+9) and the single most load-bearing
+#   one. It is placed right after initial_ssl_config, which is also where the
+#   profile must be handed over before the NetworkContext is built. If an
+#   upgrade moves where NetworkContextParams are assembled, this one line moving
+#   with it is what keeps per-profile HTTP/2 working; losing it reverts every
+#   session to the stock params with no error anywhere.
+#   Verify by wire, not by build: Client/test-h2-plane.js asserts GREASE is
+#   present on the SETTINGS frame, which is only true if this line runs.
 diff --git a/shell/browser/net/network_context_service.cc b/shell/browser/net/network_context_service.cc
 index acd8739b0d..fae5d30682 100644
 --- a/shell/browser/net/network_context_service.cc

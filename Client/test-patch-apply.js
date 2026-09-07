@@ -95,6 +95,73 @@ for (const name of all) {
   ck(name + ' states apply ordering', s.includes('Apply in filename order'), '');
 }
 
+// Per-file documentation coverage.
+//
+// Last round only checked that each patch HAD an upgrade guide, not that its
+// per-file blocks were usable. 40-net-tls and 50-electron-glue - the two
+// network-layer patches, i.e. the ones that most need it - had zero MERGE risk
+// ratings across all 13 blocks, and the gate was green. RANGE and PURPOSE say
+// what a block does; MERGE says how likely it is to break on a Chromium bump
+// and what the trap is. Without it the upgrade guide exists but does not help.
+console.log('');
+console.log('=== per-file doc coverage: every touched file carries RANGE/PURPOSE/MERGE ===');
+for (const name of all) {
+  const p = path.join(PATCH_DIR, name + '.patch');
+  const s = fs.readFileSync(p, 'utf8');
+  const L = s.split('\n');
+
+  // Two kinds of file need two kinds of documentation, and the first version
+  // of this check wrongly demanded a per-file doc block for both:
+  //   MODIFIED files -> a "# --- path" doc block with RANGE/PURPOSE/MERGE,
+  //     because a re-anchoring porter needs to know what the hunk touches.
+  //   NEW files ("--- /dev/null") -> listed in the patch header's "NEW FILES"
+  //     section instead. They have no upstream anchor to describe, so a doc
+  //     block would be filler; requiring one just forces boilerplate.
+  const touched = new Set();
+  const created = new Set();
+  for (let i = 0; i < L.length; i++) {
+    const m = /^\+\+\+ b\/(\S+)/.exec(L[i]);
+    if (!m || m[1] === '/dev/null') continue;
+    // A file is "new" when its own diff says so, immediately above +++ b/.
+    const near = L.slice(Math.max(0, i - 4), i).join('\n');
+    if (/new file mode/.test(near) || /^--- \/dev\/null$/m.test(near)) created.add(m[1]);
+    else touched.add(m[1]);
+  }
+  // Doc blocks and which fields each declares.
+  const blocks = [];
+  let cur = null;
+  for (const l of L) {
+    const m = /^# --- (\S+)/.exec(l);
+    if (m) { cur = { path: m[1], fields: [] }; blocks.push(cur); }
+    const fl = /^# (RANGE|PURPOSE|MERGE):/.exec(l);
+    if (fl && cur) cur.fields.push(fl[1]);
+  }
+  const docPaths = new Set(blocks.map((b) => b.path));
+  const undocumented = [...touched].filter((x) => !docPaths.has(x));
+  const orphan = [...docPaths].filter((x) => !touched.has(x) && !created.has(x));
+  // New files must at least be named in the header block.
+  const header = s.split(/^diff --git /m)[0];
+  const unnamedNew = [...created].filter((x) => !header.includes(x.split('/').pop()));
+  const noRP = blocks.filter((b) => !b.fields.includes('RANGE') ||
+                                    !b.fields.includes('PURPOSE'));
+  const noMerge = blocks.filter((b) => !b.fields.includes('MERGE'));
+
+  ck(name + ': every modified file has a doc block',
+    undocumented.length === 0 && orphan.length === 0,
+    undocumented.length ? 'undocumented: ' + undocumented.join(', ')
+      : (orphan.length ? 'orphan blocks: ' + orphan.join(', ')
+        : blocks.length + ' blocks / ' + touched.size + ' modified'));
+  ck(name + ': every new file is named in the header',
+    unnamedNew.length === 0,
+    unnamedNew.length ? 'unnamed: ' + unnamedNew.join(', ')
+      : (created.size ? created.size + ' new, all named' : 'no new files'));
+  ck(name + ': every block has RANGE and PURPOSE', noRP.length === 0,
+    noRP.length ? noRP.map((b) => b.path.split('/').pop()).join(', ') : 'all present');
+  ck(name + ': every block has a MERGE risk rating', noMerge.length === 0,
+    noMerge.length ? 'missing: ' + noMerge.map((b) => b.path.split('/').pop()).join(', ')
+      : 'all ' + blocks.length + ' rated');
+}
+
 console.log('');
 console.log('=== the retired monolith stays retired ===');
 const mono = path.join(PATCH_DIR, 'fp-fingerprint.patch');

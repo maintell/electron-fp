@@ -35,6 +35,16 @@
 # (FpConfigInt/String/Int64, FpFontFamilyBlocked, canvas noise fn).
 # PURPOSE: single source of truth for FP_CONFIG; never conflicts on
 # upstream upgrade (new file). Keep all new helpers here.
+# MERGE: LOW as a hunk - it is a new file with no upstream anchor, so it cannot
+#   conflict. HIGH as a BLAST RADIUS: 32+ files include it, so a bad edit breaks
+#   every other patch at once.
+#   The real upgrade risk is not the hunk, it is the READ SEMANTICS. A key's
+#   type must agree between here and every caller: FpConfigInt vs FpConfigString
+#   mismatches produce no compiler error, only a wrong value at runtime (see the
+#   README sections on audio_data_strength as a string and on numeric keys that
+#   must not be quoted). Also, FP_CONFIG_DATA / FP_CONFIG / FP_* env precedence
+#   is defined here and is asserted by tests - reordering it silently changes
+#   which source wins for a user who has more than one set.
 diff --git a/third_party/blink/renderer/core/frame/fp_config_helpers.h b/third_party/blink/renderer/core/frame/fp_config_helpers.h
 new file mode 100644
 --- /dev/null

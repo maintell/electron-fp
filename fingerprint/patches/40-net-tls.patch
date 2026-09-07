@@ -59,6 +59,14 @@
 # PURPOSE: apply the HTTP/2 profile overrides. Each uses value_or() so an
 # unset profile falls back to the stock param: an unprofiled context is
 # byte-identical to upstream.
+# MERGE: HIGH - the HttpNetworkSession constructor is on Chromium's active
+#   path for HTTP/2 work (and SpdySessionPool's arg list has been reshaped more
+#   than once). The failure is silent: a dropped hunk leaves the profile unset,
+#   every value_or() falls back to stock, and the build still succeeds - the
+#   session just stops being distinguishable from upstream Chrome, which no
+#   compile error announces. Re-anchor on the SpdySessionPool construction args
+#   and re-run Client/test-h2-plane.js, which reads the SETTINGS frame off the
+#   wire and fails if GREASE disappears.
 diff --git a/net/http/http_network_session.cc b/net/http/http_network_session.cc
 index 0ccbec3fcc226..a5f7862f4b562 100644
 --- a/net/http/http_network_session.cc
@@ -90,6 +98,11 @@ index 0ccbec3fcc226..a5f7862f4b562 100644
 # configurator, so the stock switch --http2-grease-settings also works
 # (verified); these fp_* fields exist for PER-PROFILE control, which a
 # process-wide switch cannot express.
+# MERGE: MEDIUM - a pure header addition (+32/-0), so it rarely conflicts; the
+#   risk is SEMANTIC. If upstream flips the enable_http2_settings_grease
+#   default, or changes what network_session_configurator sets, the divergence
+#   this comment documents silently stops being true. Re-read the upstream
+#   default on every bump - the comment is a claim about upstream, not about us.
 diff --git a/net/http/http_network_session.h b/net/http/http_network_session.h
 index 0097a398b6d68..0e4d55215c355 100644
 --- a/net/http/http_network_session.h
@@ -140,6 +153,20 @@ index 0097a398b6d68..0e4d55215c355 100644
 # BoringSSL, so 4 pre-built SSL_CTX variants cover every combination.
 # Also applies cipher list, sigalgs, ALPN/session_ticket omission, and the
 # advertised-version cap.
+# MERGE: HIGH - the highest-risk file in the whole set, by construction.
+#   10 hunks, 7 of them inside a single function (SSLClientSocketImpl::Init),
+#   which is the TLS handshake main path and is refactored constantly. Adjacent
+#   hunks mean one context shift can cascade into all of them.
+#   Two specific traps:
+#   * The 4 SSL_CTX variants exist because BoringSSL exposes GREASE only at
+#     SSL_CTX level (SSL_CTX_set_grease_enabled), never per-SSL. If upstream
+#     changes that API, revisit GetSSLContextForGrease() - a wrong variant
+#     selection produces a valid handshake with the WRONG fingerprint, which no
+#     test on the page can see.
+#   * Every fp_* read sits between upstream statements in Init(); a dropped
+#     hunk silently reverts that one surface to stock while the rest still
+#     spoof. Verify with Client/test-tls-keys.js (per-key ClientHello), which
+#     fails per key rather than passing on the aggregate.
 diff --git a/net/socket/ssl_client_socket_impl.cc b/net/socket/ssl_client_socket_impl.cc
 index 67c6c41f6e0db..4a2eee87348a2 100644
 --- a/net/socket/ssl_client_socket_impl.cc
@@ -420,6 +447,9 @@ index 67c6c41f6e0db..4a2eee87348a2 100644
 # PURPOSE: kernel-side config surface for the TLS profile. Every field is
 # std::optional so "unset" means "stock Chromium behavior", which is what
 # keeps an unprofiled build byte-identical to upstream.
+# MERGE: LOW - fields are appended at the END of the struct and operator== is
+#   `= default`, so new fields are covered automatically. A conflict here is
+#   almost always upstream also appending; put theirs first, ours last.
 diff --git a/net/ssl/ssl_config_service.h b/net/ssl/ssl_config_service.h
 index 8329b02b8551e..e15f81f9fb40f 100644
 --- a/net/ssl/ssl_config_service.h
@@ -509,6 +539,13 @@ index 8329b02b8551e..e15f81f9fb40f 100644
 # PURPOSE: apply the HTTP/2 profile onto HttpNetworkSessionParams. Applied
 # AFTER the command-line parse so a profile overrides a process-wide switch,
 # and only when set, so an unprofiled context keeps stock behavior.
+# MERGE: HIGH - the insertion point is ORDER-DEPENDENT, and that ordering is
+#   what makes a per-profile setting beat a process-wide switch. If an upgrade
+#   reorders ParseCommandLineAndFieldTrials relative to NetworkContextParams
+#   construction, moving this hunk to make it apply would invert the precedence
+#   and the profile would silently lose to the switch. Re-check which runs first
+#   before re-anchoring. Also the construction-time constraint in this patch's
+#   header applies here specifically: see the HTTP/2 ORDERING CONSTRAINT note.
 diff --git a/services/network/network_context.cc b/services/network/network_context.cc
 index 2065c41667a2f..5065063b547b2 100644
 --- a/services/network/network_context.cc
@@ -553,6 +590,12 @@ index 2065c41667a2f..5065063b547b2 100644
 # than three loose optional fields) so an omitted key is unambiguous at the
 # gin boundary: a bare optional<bool> cannot distinguish JS `false` from
 # "key absent", which would silently misread a profile.
+# MERGE: MEDIUM - mojom structs are additive and bindings regenerate at build,
+#   so this rarely conflicts. The risk is the CAMEL-CASE MAPPING, not the hunk:
+#   JS `settingsGrease` maps to mojom `settings_grease`, and Client/fp-schema.js
+#   spells the JS side. If one side is renamed the build still succeeds and the
+#   key simply never arrives. Renaming a key means changing three places:
+#   this mojom, fp-schema.js, and the gin converter in 50-electron-glue.
 diff --git a/services/network/public/mojom/network_context.mojom b/services/network/public/mojom/network_context.mojom
 index e266c2974e658..80b2d2ff3323a 100644
 --- a/services/network/public/mojom/network_context.mojom
@@ -628,6 +671,10 @@ index e266c2974e658..80b2d2ff3323a 100644
 # RANGE: SSLConfig struct, fp_* fields appended.
 # PURPOSE: cross-process transport for the profile. Bindings regenerate
 # at build time; no manual steps on upgrade.
+# MERGE: LOW - appended fields, auto-generated bindings. The one thing to
+#   check is that every fp_* field here has a counterpart in
+#   ssl_config_type_converter.cc; adding a field to the mojom and forgetting the
+#   converter compiles cleanly and drops the value at the process boundary.
 diff --git a/services/network/public/mojom/ssl_config.mojom b/services/network/public/mojom/ssl_config.mojom
 index 8c748ceed155c..4f1dd2c944a08 100644
 --- a/services/network/public/mojom/ssl_config.mojom
@@ -686,6 +733,12 @@ index 8c748ceed155c..4f1dd2c944a08 100644
 # RANGE: MojoSSLConfigToSSLContextConfig.
 # PURPOSE: map mojom -> net config. Empty string/array/0 means unset, so
 # an unprofiled SSLConfig produces a default-constructed net config.
+# MERGE: MEDIUM - a hand-written converter, so it is the mirror image of
+#   ssl_config.mojom and drifts silently if one side grows. "Empty means unset"
+#   is a convention, not a type: a new field copied here without that convention
+#   makes an unprofiled build behave differently from upstream, which is exactly
+#   the property the rest of this patch works to preserve. When adding a field,
+#   add it here AND to the mojom in the same change.
 diff --git a/services/network/ssl_config_type_converter.cc b/services/network/ssl_config_type_converter.cc
 index d0669a19e6f17..a8372d3bcc8f7 100644
 --- a/services/network/ssl_config_type_converter.cc
