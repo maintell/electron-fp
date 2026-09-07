@@ -16,8 +16,9 @@ const { fpDefaultConfig, fpNormalizeConfig, fpCoverage, fpKeysInGroup, fpIsActiv
         FP_UA_PRESETS, fpRandomUserAgent, fpNormalizeUserAgent,
         FP_TLS_KEYS, FP_TLS_KEY_NAMES, FP_TLS_GROUPS,
         fpTlsIsActive, fpTlsCoerce, fpSplitConfig, fpTlsValidateCipherList,
-        fpTlsValidateTypes,
-        fpPlatformForUserAgent,
+         fpTlsValidateTypes,
+         FP_H2_KEYS, FP_H2_KEY_NAMES, FP_H2_GROUPS, fpH2IsActive, fpH2Validate,
+         fpPlatformForUserAgent,
         fpVendorForUserAgent, fpPixelRatioForUserAgent,
         fpLanguagesForUserAgent } = require('./fp-schema');
 
@@ -96,10 +97,21 @@ function resizeActiveView() {
  * UA is per-partition, and every tab already owns a unique partition, so
  * per-tab UA isolation comes for free.
  */
-function applyTabUserAgent(partition, userAgent) {
+function applyTabUserAgent(partition, userAgent, h2) {
   try {
-    session.fromPartition(partition).setUserAgent(
-      typeof userAgent === 'string' ? userAgent.trim() : '');
+    // THIS is the first fromPartition() call for a tab's partition name, and it
+    // is the ONLY place the HTTP/2 profile can be supplied. HttpNetworkSession
+    // -Params are read once when the NetworkContext is constructed, inside
+    // fromPartition(), before any Session method runs. Measured:
+    //   fromPartition(p, {http2Profile:{settingsGrease:true}})  -> GREASE=1
+    //   fromPartition(p) then .setHttp2Profile({...})           -> GREASE=0
+    //   fromPartition(p) then fromPartition(p, {http2Profile})  -> GREASE=0
+    // So an H2 profile passed anywhere later is silently discarded. It rides
+    // along here because this function already has to be first.
+    const sess = Object.keys(h2 || {}).length
+      ? session.fromPartition(partition, { http2Profile: h2 })
+      : session.fromPartition(partition);
+    sess.setUserAgent(typeof userAgent === 'string' ? userAgent.trim() : '');
   } catch (e) {
     console.warn('[fp] failed to set user agent: ' + e.message);
   }
@@ -178,12 +190,10 @@ function createTabView(tabId, profileId) {
   // Unique partition per tab for full cookie/session/storage isolation
   const partition = `fp-tab-${tabId}`;
 
-  // UA must be set before the view is constructed — see applyTabUserAgent().
-  applyTabUserAgent(partition, profile.userAgent);
-
-  // Split the profile into its two delivery planes. This is the tab-CREATION
+  // Split the profile into its THREE delivery planes. This is the tab-CREATION
   // path and it must route exactly like the panel path: the Blink keys go to
-  // --fingerprint-config, the 9 TLS keys go to session.setSSLConfig().
+  // --fingerprint-config, the 9 TLS keys to session.setSSLConfig(), and the 3
+  // HTTP/2 keys to the fromPartition() option.
   // Passing the RAW profile as `fingerprint` silently loses the TLS plane -
   // the kernel ignores keys it does not know, so the tab kept Chromium's native
   // GREASE while the profile claimed Safari. Caught by driving the real UI: a
@@ -192,6 +202,16 @@ function createTabView(tabId, profileId) {
   const split = fp ? fpSplitConfig(fp) : null;
   const blinkFp = split ? split.fingerprint : null;
   const tls = split ? split.tls : null;
+  const h2 = split && split.h2 ? split.h2 : null;
+  if (split && split.h2Error) {
+    console.error('[fp] refused HTTP/2 config: ' + split.h2Error);
+  }
+
+  // UA must be set before the view is constructed - see applyTabUserAgent().
+  // The HTTP/2 plane rides along on this call because it is the first
+  // fromPartition() for this name, and the only one that can carry it.
+  applyTabUserAgent(partition, profile.userAgent, h2);
+
   if (tls && Object.keys(tls).length) applyTabTLSConfig(partition, tls);
 
   const view = new BrowserView({
@@ -232,7 +252,12 @@ function createTabView(tabId, profileId) {
   });
 
   return { view, profileId, profileName: profile.name, url: 'about:blank',
-           title: 'New Tab', userAgent: profile.userAgent || '' };
+           title: 'New Tab', userAgent: profile.userAgent || '',
+           // What the partition was CONSTRUCTED with. The HTTP/2 plane is
+           // frozen here and cannot change for the life of the partition, so
+           // this is recorded to let the UI report drift instead of implying
+           // a change took effect.
+           h2: h2 || null };
 }
 
 /**
@@ -241,7 +266,7 @@ function createTabView(tabId, profileId) {
  * process is respawned so the new --fingerprint-config takes effect.
  * Returns the new view.
  */
-function recreateTabView(tabId, fingerprint, keepUrl, userAgent, tls) {
+function recreateTabView(tabId, fingerprint, keepUrl, userAgent, tls, h2) {
   const tab = tabs.get(tabId);
   if (!tab) return null;
 
@@ -250,7 +275,26 @@ function recreateTabView(tabId, fingerprint, keepUrl, userAgent, tls) {
   try { tab.view.webContents.close(); } catch {}
 
   const partition = `fp-tab-${tabId}`;
+
+  // The HTTP/2 plane is FROZEN at the first fromPartition() call for this name,
+  // which already happened in createTabView(). Passing a profile here would be
+  // silently discarded (measured), so instead of pretending, compare and report:
+  // if the caller asked for something different from what the partition was
+  // built with, say so. A control that looks applied but is not is worse than
+  // a documented limitation - it is the "claims a fingerprint it does not
+  // produce" failure the 50-electron-glue patch calls out.
+  const wantH2 = h2 && Object.keys(h2).length ? h2 : null;
+  const haveH2 = tab.h2 && Object.keys(tab.h2).length ? tab.h2 : null;
+  tab.h2Refused = null;
+  if (wantH2 && JSON.stringify(wantH2) !== JSON.stringify(haveH2)) {
+    tab.h2Refused = 'HTTP/2 settings are fixed when the tab is created; ' +
+      'close and reopen the tab to change them.';
+    console.warn('[fp] ' + tab.h2Refused);
+  }
+
   // UA must be set before the view is constructed – see applyTabUserAgent().
+  // No H2 argument here: the partition already exists, so passing one is a
+  // no-op. It is set once, at creation.
   applyTabUserAgent(partition, userAgent);
   // TLS likewise: the network service reads SSLContextConfig when it opens a
   // socket, so it must be on the session before the view's first request.
@@ -317,8 +361,14 @@ function recreateTabView(tabId, fingerprint, keepUrl, userAgent, tls) {
 
 function addTab(profileId = 'default') {
   const tabId = createTabId();
-  const { view, profileId: pid, profileName, url, title, userAgent } = createTabView(tabId, profileId);
-  tabs.set(tabId, { id: tabId, view, profileId: pid, profileName, url, title, userAgent });
+  const { view, profileId: pid, profileName, url, title, userAgent, h2 } =
+    createTabView(tabId, profileId);
+  // h2 is stored because it is the only record of what the partition was BUILT
+  // with. It cannot be read back from the session (there is no getter), so
+  // without this the drift check in recreateTabView() has nothing to compare
+  // against and a change could only ever be silently ignored.
+  tabs.set(tabId, { id: tabId, view, profileId: pid, profileName, url, title,
+                    userAgent, h2: h2 || null });
 
   mainWindow?.webContents.send('tab:created', { tabId, profileId: pid, profileName, url, title });
   activateTab(tabId);
@@ -472,16 +522,22 @@ function setupIPC() {
     const tab = tabs.get(tid);
     if (!tab) return false;
     try {
-      // Split into the two delivery planes BEFORE normalizing: fpNormalizeConfig
+      // Split into the three delivery planes BEFORE normalizing: fpNormalizeConfig
       // drops every key absent from FP_KEYS, so running it on the whole blob
       // would silently discard all 9 TLS keys. fpSplitConfig() routes Blink
-      // keys to --fingerprint-config and TLS keys to session.setSSLConfig().
+      // keys to --fingerprint-config, TLS keys to session.setSSLConfig(), and
+      // HTTP/2 keys to the fromPartition() option.
       let apply = null;
       let tlsApply = null;
+      let h2Apply = null;
       if (config && typeof config === 'object') {
         const split = fpSplitConfig(config);
         apply = split.fingerprint;
         tlsApply = split.tls;
+        h2Apply = split.h2Error ? null : split.h2;
+        if (split.h2Error) {
+          console.error('[fp] refused HTTP/2 config: ' + split.h2Error);
+        }
         if (split.unknown.length) {
           console.warn('[fp] dropped unknown keys: ' + split.unknown.join(', '));
         }
@@ -500,7 +556,9 @@ function setupIPC() {
       // is injected via --fingerprint-config at renderer startup, the new
       // UA is picked up by the fresh view, and the TLS config is on the
       // session before that view's first socket.
-      recreateTabView(tid, apply, tab.url || 'about:blank', ua, tlsApply);
+      // HTTP/2 is handed over only so recreateTabView can detect and report a
+      // change it cannot apply - the plane itself is frozen at creation.
+      recreateTabView(tid, apply, tab.url || 'about:blank', ua, tlsApply, h2Apply);
       tab.profileId = config ? 'custom' : 'default';
       tab.profileName = config ? 'Custom' : 'Default';
       mainWindow?.webContents.send('tab:profile-changed', { tabId: tid, profileId: tab.profileId, profileName: tab.profileName });
@@ -510,6 +568,11 @@ function setupIPC() {
       // still emits the native ClientHello.
       if (tlsApply && Object.keys(tlsApply).length && tab.tlsRefused) {
         return { ok: true, tlsError: tab.tlsRefused };
+      }
+      // Same honesty for HTTP/2: the plane cannot be changed on a live tab, so
+      // say so rather than returning success for a setting that did not move.
+      if (tab.h2Refused) {
+        return { ok: true, h2Error: tab.h2Refused };
       }
       return true;
     } catch { return false; }
@@ -538,8 +601,11 @@ function setupIPC() {
       // tab to the native ClientHello on every UA change, because
       // recreateTabView() applies whatever it is handed - and "not handed" is
       // indistinguishable from "deliberately cleared".
+      // tab.h2 is passed so a mismatch is reported; it cannot actually change
+      // here (the partition was built at creation), and passing it is what
+      // makes that visible instead of silent.
       recreateTabView(tid, tab.view.webContents.getFingerprintConfig?.(),
-        tab.url || 'about:blank', ua, tab.tls || null);
+        tab.url || 'about:blank', ua, tab.tls || null, tab.h2 || null);
       mainWindow?.webContents.send('tab:profile-changed', {
         tabId: tid, profileId: tab.profileId, profileName: tab.profileName
       });
@@ -630,6 +696,11 @@ function setupIPC() {
       keyCount: FP_TLS_KEY_NAMES.length,
       keys: FP_TLS_KEYS,
       groups: FP_TLS_GROUPS,
+    },
+    h2: {
+      keyCount: FP_H2_KEY_NAMES.length,
+      keys: FP_H2_KEYS,
+      groups: FP_H2_GROUPS,
     }
   }));
   ipcMain.handle('fp:coverage', (e, cfg) => fpCoverage(cfg || {}));

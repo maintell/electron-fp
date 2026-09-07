@@ -141,11 +141,15 @@ ck('the README states the real self-test coverage',
     : 'no coverage claim found in README');
 
 // The combined claim: Blink-probed + TLS keys over the TOTAL configurable
-// surfaces. "67 of the 72" is the number a reader will remember, so it must be
-// derived rather than typed - otherwise adding a TLS key or a probe field lets
-// it rot in the one place users look.
-const { FP_TLS_KEY_NAMES } = require(path.join(CLIENT, 'fp-schema.js'));
-const totalSurfaces = FP_KEY_NAMES.length + FP_TLS_KEY_NAMES.length;
+// surfaces. This is the number a reader will remember, so it must be derived
+// rather than typed - otherwise adding a TLS key or a probe field lets it rot
+// in the one place users look.
+//
+// The HTTP/2 keys count toward the TOTAL because they are configurable, but NOT
+// toward `verifiable`: the self-test does not probe them yet, so claiming they
+// are covered would be the exact overclaim this guard exists to prevent.
+const { FP_TLS_KEY_NAMES, FP_H2_KEY_NAMES } = require(path.join(CLIENT, 'fp-schema.js'));
+const totalSurfaces = FP_KEY_NAMES.length + FP_TLS_KEY_NAMES.length + FP_H2_KEY_NAMES.length;
 const verifiable = probed + FP_TLS_KEY_NAMES.length;
 const combined = [...md.matchAll(/(\d+)\s+of\s+the\s+(\d+)\s+configurable surfaces/g)]
   .map((m) => ({ n: Number(m[1]), total: Number(m[2]) }));
@@ -165,6 +169,15 @@ ck('every TLS key is named in the README',
   tlsUndocumented.length === 0,
   tlsUndocumented.length ? 'undocumented: ' + tlsUndocumented.join(', ')
     : FP_TLS_KEY_NAMES.length + ' keys documented');
+
+// Same discipline for the HTTP/2 plane. These are the easiest keys in the
+// product to ship undocumented, because they are not kernel keys and do not
+// appear in the self-test - so nothing else would notice they were missing.
+const h2Undocumented = FP_H2_KEY_NAMES.filter((k) => !new RegExp('`' + k + '`').test(md));
+ck('every HTTP/2 key is named in the README',
+  h2Undocumented.length === 0,
+  h2Undocumented.length ? 'undocumented: ' + h2Undocumented.join(', ')
+    : FP_H2_KEY_NAMES.length + ' keys documented');
 
 // Every key the README lists as unreadable must ACTUALLY be unreadable. Two
 // of the five are modifiers gated on a companion seed; three are geo keys that

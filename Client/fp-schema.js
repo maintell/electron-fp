@@ -656,6 +656,147 @@ const FP_TLS_KEYS = {
 
 const FP_TLS_KEY_NAMES = Object.keys(FP_TLS_KEYS);
 
+// ---------------------------------------------------------------------------
+// HTTP/2 - the THIRD delivery plane.
+//
+// Not a fourth and fifth key in FP_TLS_KEYS, because they do not travel the
+// same way. The 9 TLS keys go through session.setSSLConfig() and are read by
+// the network service out of net::SSLContextConfig per socket. These three are
+// read out of HttpNetworkSessionParams when the NetworkContext is CONSTRUCTED,
+// by session.fromPartition(name, { http2Profile }) - which is why they belong
+// in their own table: the two planes have different lifetimes.
+//
+// MEASURED (F:/Temp/opencode/h2_order2.js, parsed off the wire):
+//   fromPartition(p, {http2Profile:{settingsGrease:true}})  -> GREASE=1, 5 entries
+//   fromPartition(p) then .setHttp2Profile({...})           -> GREASE=0, 4 entries
+//   fromPartition(p) [no opts] then fromPartition(p,{...})  -> GREASE=0, 4 entries
+//   control, no profile                                     -> GREASE=0, 4 entries
+//
+// So the FIRST fromPartition() call on a partition name freezes the profile.
+// Any later attempt - setter or a second call with options - is silently
+// ignored. That is the whole reason this is a separate plane with its own
+// ordering rule rather than three more keys next to the TLS ones.
+//
+// Why it matters: net/'s default is enable_http2_settings_grease = false, while
+// real Chrome turns it ON via components/network_session_configurator. Electron
+// builds HttpNetworkSessionParams directly and never runs that configurator, so
+// an unprofiled session emits a SETTINGS frame with no GREASE entry - differing
+// from Chrome on EVERY HTTP/2 connection (40-net-tls.patch, measured).
+// ---------------------------------------------------------------------------
+const FP_H2_KEYS = {
+  settingsGrease: { group: "h2",
+    kind: "bool", def: "",
+    label: "GREASE SETTINGS",
+    hint: "Send a reserved GREASE entry in the HTTP/2 SETTINGS frame. Real " +
+      "Chrome does this; Electron's net/ default is OFF, so an unprofiled " +
+      "session differs from Chrome on every HTTP/2 connection. Measured: 4 " +
+      "SETTINGS entries -> 5 with a 0x?a?a id present.",
+  },
+  endStreamWithDataFrame: { group: "h2",
+    kind: "bool", def: "",
+    label: "END_STREAM on DATA frame",
+    hint: "Move END_STREAM off the HEADERS frame onto an empty trailing DATA " +
+      "frame. Measured: HEADERS flags 0x25 -> 0x24. Pairs with the grease " +
+      "frame so one can be sent even on bodyless requests.",
+  },
+  greaseFrame: { group: "h2",
+    kind: "greaseframe", def: null,
+    label: "Grease frame",
+    hint: 'Reserved-type frame sent after each SETTINGS frame, as ' +
+      '{type, flags, payload}. Real Chrome leaves this UNSET (it is opt-in via ' +
+      '--http2-grease-frame-type), so leaving it empty matches Chrome.',
+  },
+};
+
+const FP_H2_KEY_NAMES = Object.keys(FP_H2_KEYS);
+
+/** True when an HTTP/2 key holds a value that differs from its disabled default. */
+function fpH2IsActive(key, value) {
+  const spec = FP_H2_KEYS[key];
+  if (!spec) return false;
+  if (value === undefined || value === null || value === "") return false;
+  if (key === "greaseFrame") {
+    return !!(value && typeof value === "object" &&
+      Object.prototype.hasOwnProperty.call(value, "type"));
+  }
+  return true;
+}
+
+/**
+ * Validate + coerce an HTTP/2 profile into the shape the Http2ProfilePtr gin
+ * converter (50-electron-glue.patch L164) demands.
+ *
+ * The converter reads settingsGrease/endStreamWithDataFrame as bool and
+ * greaseFrame as a DICTIONARY with integer type (0-255) and flags (0-255) plus
+ * an optional byte payload. A type mismatch returns false from options.Get(),
+ * which makes the converter bail out - and a failed conversion means the whole
+ * profile is dropped, not just the bad key. So validate here, at the funnel,
+ * with a message naming the key.
+ */
+function fpH2Validate(profile) {
+  if (!profile || typeof profile !== "object") return { ok: true, profile: {} };
+  const out = {};
+  for (const [k, v] of Object.entries(profile)) {
+    if (!Object.prototype.hasOwnProperty.call(FP_H2_KEYS, k)) {
+      return { ok: false, error: "unknown HTTP/2 key: " + k };
+    }
+    const spec = FP_H2_KEYS[k];
+    if (k === "greaseFrame") {
+      if (v === null || v === undefined || v === "") continue;
+      if (typeof v !== "object" || Array.isArray(v)) {
+        return { ok: false, error: "greaseFrame must be an object {type, flags, payload}, got " + typeof v };
+      }
+      if (!Object.prototype.hasOwnProperty.call(v, "type")) {
+        return { ok: false, error: "greaseFrame requires a 'type' field" };
+      }
+      const type = Number(v.type);
+      if (!Number.isInteger(type) || type < 0 || type > 0xff) {
+        return { ok: false, error: "greaseFrame.type must be an integer 0-255, got " + String(v.type) };
+      }
+      const flags = Object.prototype.hasOwnProperty.call(v, "flags") ? Number(v.flags) : 0;
+      if (!Number.isInteger(flags) || flags < 0 || flags > 0xff) {
+        return { ok: false, error: "greaseFrame.flags must be an integer 0-255, got " + String(v.flags) };
+      }
+      const frame = { type, flags };
+      if (Object.prototype.hasOwnProperty.call(v, "payload") && v.payload !== null) {
+        let bytes;
+        if (Array.isArray(v.payload)) {
+          bytes = v.payload.map(Number);
+        } else if (typeof v.payload === "string") {
+          // Accept "deadbeef" as hex, since that is how the wire shows it.
+          const hex = v.payload.replace(/^0x/i, "").replace(/[\s:]/g, "");
+          if (/^[0-9a-fA-F]*$/.test(hex) && hex.length % 2 === 0) {
+            bytes = [];
+            for (let i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.substr(i, 2), 16));
+          } else {
+            bytes = Array.from(Buffer.from(v.payload, "utf8"));
+          }
+        } else {
+          return { ok: false, error: "greaseFrame.payload must be a hex string or byte array" };
+        }
+        const bad = bytes.filter((b) => !Number.isInteger(b) || b < 0 || b > 0xff);
+        if (bad.length) {
+          return { ok: false, error: "greaseFrame.payload bytes must be integers 0-255" };
+        }
+        frame.payload = bytes;
+      }
+      out[k] = frame;
+      continue;
+    }
+    if (spec.kind === "bool") {
+      if (typeof v !== "boolean") {
+        return { ok: false, error: k + " must be a boolean, got " + typeof v +
+          " (" + JSON.stringify(v) + "). A wrong type makes the converter drop " +
+          "the WHOLE profile, not just this key." };
+      }
+      out[k] = v;
+      continue;
+    }
+    out[k] = v;
+  }
+  return { ok: true, profile: out };
+}
+
 /** True when a TLS key holds a value that differs from its disabled default. */
 function fpTlsIsActive(key, value) {
   const spec = FP_TLS_KEYS[key];
@@ -814,6 +955,13 @@ const FP_TLS_GROUPS = [
   { id: "tls", label: "TLS / HTTP2", desc: "ClientHello shape: ciphers, GREASE, extensions, ALPN, max version" },
 ];
 
+// Separate group because the plane is separate: these keys travel as a
+// fromPartition() option and are frozen at partition creation, unlike the TLS
+// keys which setSSLConfig() can change on a live session.
+const FP_H2_GROUPS = [
+  { id: "h2", label: "HTTP/2", desc: "SETTINGS frame shape. Applied when the tab is created - it cannot change afterwards." },
+];
+
 /**
  * Split a flat config object into the two delivery planes.
  *
@@ -831,6 +979,7 @@ const FP_TLS_GROUPS = [
 function fpSplitConfig(input) {
   const fingerprint = {};
   const tls = {};
+  const h2 = {};
   const unknown = [];
   if (input && typeof input === "object") {
     for (const [k, v] of Object.entries(input)) {
@@ -838,6 +987,8 @@ function fpSplitConfig(input) {
         fingerprint[k] = v;
       } else if (Object.prototype.hasOwnProperty.call(FP_TLS_KEYS, k)) {
         tls[k] = v;
+      } else if (Object.prototype.hasOwnProperty.call(FP_H2_KEYS, k)) {
+        h2[k] = v;
       } else {
         unknown.push(k);
       }
@@ -852,7 +1003,18 @@ function fpSplitConfig(input) {
       tlsOut[k] = fpTlsCoerce(k, tls[k]);
     }
   }
-  return { fingerprint: norm.config, tls: tlsOut, unknown: unknown.concat(norm.unknown) };
+  // The HTTP/2 plane is validated, not just copied: a bad type makes the
+  // Http2ProfilePtr converter bail and drop the entire profile.
+  const hv = fpH2Validate(h2);
+  const h2Out = hv.ok ? hv.profile : {};
+  const h2Error = hv.ok ? null : hv.error;
+  return {
+    fingerprint: norm.config,
+    tls: tlsOut,
+    h2: h2Out,
+    h2Error,
+    unknown: unknown.concat(norm.unknown),
+  };
 }
 
 module.exports = {
@@ -877,6 +1039,12 @@ module.exports = {
   fpTlsValidateCipherList,
   fpTlsValidateTypes,
   FP_TLS13_CIPHERS,
+  // HTTP/2 (THIRD delivery plane: fromPartition option, frozen at construction)
+  FP_H2_KEYS,
+  FP_H2_KEY_NAMES,
+  FP_H2_GROUPS,
+  fpH2IsActive,
+  fpH2Validate,
   // UA (client-level surface, not a kernel key)
   FP_UA_PRESETS,
   FP_PLATFORM_BY_ID,

@@ -388,19 +388,26 @@ async function ensureFpSchema() {
 function allEditableKeys(schema) {
   const keys = Object.keys(schema.keys || {});
   const tls = schema.tls && schema.tls.keys ? Object.keys(schema.tls.keys) : [];
-  return keys.concat(tls);
+  const h2 = schema.h2 && schema.h2.keys ? Object.keys(schema.h2.keys) : [];
+  return keys.concat(tls).concat(h2);
 }
 
 /** Key metadata from whichever plane owns it. */
 function keyMeta(schema, k) {
   if (schema.keys && schema.keys[k]) return schema.keys[k];
   if (schema.tls && schema.tls.keys && schema.tls.keys[k]) return schema.tls.keys[k];
+  if (schema.h2 && schema.h2.keys && schema.h2.keys[k]) return schema.h2.keys[k];
   return null;
 }
 
 /** Is a key from the TLS plane? */
 function isTlsKey(schema, k) {
   return !!(schema.tls && schema.tls.keys && schema.tls.keys[k]);
+}
+
+/** Is a key from the HTTP/2 plane? */
+function isH2Key(schema, k) {
+  return !!(schema.h2 && schema.h2.keys && schema.h2.keys[k]);
 }
 
 /** Render all group sections from the current JSON editor content. */
@@ -414,17 +421,24 @@ async function renderFpGroups() {
   const unknown = Object.keys(cfg).filter(function (k) { return !editableSet.has(k); });
 
   $fpGroups.innerHTML = '';
-  // TLS FIRST, then the Blink groups. These were appended last, which put them
-  // at roughly 3013px inside a 2808px pane - permanently below the fold, with
-  // 15 sections of page-level keys to scroll past. A user reported the TLS
-  // settings as simply absent. Putting the second delivery plane at the top
-  // also matches how it behaves: it is a different layer, not the 16th group.
-  const allGroups = ((schema.tls && schema.tls.groups) || []).concat(
-    schema.groups || []);
+  // The two non-Blink planes come FIRST, then the Blink groups. These were
+  // appended last, which put them at roughly 3013px inside a 2808px pane -
+  // permanently below the fold, with 15 sections of page-level keys to scroll
+  // past. A user reported the TLS settings as simply absent. Putting the other
+  // delivery planes at the top also matches how they behave: they are different
+  // layers, not the 16th and 17th groups.
+  // HTTP/2 leads because it is the most constrained: it can only be set when
+  // the tab is created, so burying it would hide that fact from anyone who
+  // needs it.
+  const tlsGroups = (schema.tls && schema.tls.groups) || [];
+  const h2Groups = (schema.h2 && schema.h2.groups) || [];
+  const allGroups = h2Groups.concat(tlsGroups).concat(schema.groups || []);
   for (const g of allGroups) {
-    const tlsGroup = (schema.tls && schema.tls.groups || []).indexOf(g) >= 0;
+    const tlsGroup = tlsGroups.indexOf(g) >= 0;
+    const h2Group = h2Groups.indexOf(g) >= 0;
     const keys = editable.filter(function (k) {
       if (tlsGroup) return isTlsKey(schema, k);
+      if (h2Group) return isH2Key(schema, k);
       const meta = schema.keys[k];
       return !!meta && meta.group === g.id;
     });
@@ -436,22 +450,30 @@ async function renderFpGroups() {
     activeTotal += active;
 
     const section = document.createElement('div');
-    // Tag the TLS plane so style.css can mark it: these keys travel by
-    // setSSLConfig() and are invisible to page JS, so they must read as a
-    // different layer, not as just another group at the bottom of the list.
-    section.className = 'fp-group' + (tlsGroup ? ' fp-group-tls' : '');
+    // Tag the non-Blink planes so style.css can mark them: these keys travel by
+    // setSSLConfig() / a fromPartition() option and are invisible to page JS, so
+    // they must read as a different layer, not as just another group at the
+    // bottom of the list.
+    section.className = 'fp-group' +
+      (tlsGroup ? ' fp-group-tls' : '') +
+      (h2Group ? ' fp-group-h2' : '');
 
     const head = document.createElement('button');
     head.className = 'fp-group-head';
     head.type = 'button';
     const caret = fpGroupCollapsed[g.id] ? '\u25B6' : '\u25BC';
-    // The TLS group names its delivery mechanism in the header. Without it the
-    // section is just one more heading, and the one thing a user must know about
-    // these keys - that they are applied to the network layer, not the page -
-    // is nowhere on screen.
+    // Each non-Blink plane names its delivery mechanism in the header. Without
+    // it the section is just one more heading, and the one thing a user must
+    // know about these keys - that they are applied to the network layer, not
+    // the page - is nowhere on screen.
     head.textContent = caret + ' ' + g.label + '  (' + active + '/' + keys.length + ')' +
-      (tlsGroup ? '  \u00b7 setSSLConfig' : '');
-    head.title = g.desc + (tlsGroup
+      (tlsGroup ? '  \u00b7 setSSLConfig' : '') +
+      (h2Group ? '  \u00b7 fromPartition' : '');
+    head.title = g.desc + (h2Group
+      ? ' \u2014 applied to the network layer, invisible to page JavaScript. ' +
+        'FIXED WHEN THE TAB IS CREATED: changing these on an open tab has no ' +
+        'effect, so close and reopen the tab to apply them.'
+      : tlsGroup
       ? ' \u2014 applied to the session, invisible to page JavaScript'
       : '');
     if (active > 0) head.classList.add('has-active');
@@ -469,19 +491,32 @@ async function renderFpGroups() {
       const meta = keyMeta(schema, k);
       if (!meta) continue;
       const row = document.createElement('div');
-      row.className = 'fp-field' + (isTlsKey(schema, k) ? ' fp-field-tls' : '');
+      row.className = 'fp-field' +
+        (isTlsKey(schema, k) ? ' fp-field-tls' : '') +
+        (isH2Key(schema, k) ? ' fp-field-h2' : '');
 
       const label = document.createElement('label');
       label.textContent = (meta.label ? meta.label + ' \u00b7 ' : '') + k;
       label.title = g.label + ' \u00b7 ' + meta.kind;
 
       const input = document.createElement('input');
-      // TLS bools render as a checkbox so the user cannot type "yes" and get a
-      // coercion surprise; the int/u16list kinds stay numeric text.
+      // TLS/H2 bools render as a checkbox so the user cannot type "yes" and get a
+      // coercion surprise; the int/u16list kinds stay numeric text. greaseFrame
+      // is an object in the kernel, so it is edited as JSON text and validated
+      // by fpH2Validate() at the funnel - a bad shape is refused with a message
+      // instead of dropping the whole profile.
       if (meta.kind === 'bool') {
         input.type = 'checkbox';
         input.dataset.key = k;
         input.checked = (k in cfg) ? isKeyActive(meta.def, cfg[k]) : false;
+        if (isKeyActive(meta.def, cfg[k])) input.classList.add('active');
+      } else if (meta.kind === 'greaseframe') {
+        input.type = 'text';
+        input.dataset.key = k;
+        input.placeholder = '{"type":42,"flags":0,"payload":"deadbeef"}';
+        input.value = (k in cfg)
+          ? (typeof cfg[k] === 'string' ? cfg[k] : JSON.stringify(cfg[k]))
+          : '';
         if (isKeyActive(meta.def, cfg[k])) input.classList.add('active');
       } else {
         input.type = (meta.kind === 'int' || meta.kind === 'int64') ? 'number' : 'text';
@@ -502,6 +537,23 @@ async function renderFpGroups() {
         if (meta.kind === 'bool') {
           if (input.checked) next[k] = true;
           else delete next[k];
+        } else if (meta.kind === 'greaseframe') {
+          const raw = input.value.trim();
+          if (raw === '') { delete next[k]; }
+          else {
+            let parsed = null;
+            try { parsed = JSON.parse(raw); } catch (e) { parsed = null; }
+            if (parsed === null) {
+              // Refuse rather than store a string the validator would reject
+              // later with no visible cause.
+              input.classList.add('fp-field-bad');
+              input.title = 'must be JSON, e.g. {"type":42,"flags":0}';
+              $fpJsonEditor.value = JSON.stringify(next, null, 2);
+              return;
+            }
+            input.classList.remove('fp-field-bad');
+            next[k] = parsed;
+          }
         } else {
           const raw = input.value;
           if (meta.kind === 'int' || meta.kind === 'int64') {

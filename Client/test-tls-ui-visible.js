@@ -57,19 +57,45 @@ app.whenReady().then(async () => {
        const first = secs[0];
        const head = first ? first.querySelector('.fp-group-head') : null;
        const r = first ? first.getBoundingClientRect() : null;
-       const cs = head ? getComputedStyle(head) : null;
-       return JSON.stringify({
-         sectionCount: secs.length,
-         firstIsTls: first ? first.classList.contains('fp-group-tls') : false,
-         firstHead: head ? head.textContent.trim() : null,
-         top: r ? Math.round(r.top) : null,
-         paneHeight: el.clientHeight,
-         visible: r ? (r.top >= 0 && r.top < el.clientHeight) : false,
-         headColor: cs ? cs.color : null,
-         headBg: cs ? cs.backgroundColor : null,
-         tlsFields: first ? first.querySelectorAll('.fp-field-tls').length : 0,
-         tlsGroupsRendered: secs.filter(s => s.classList.contains('fp-group-tls')).length,
-       });
+        const cs = head ? getComputedStyle(head) : null;
+        // Locate the TLS section by its class rather than assuming it is first.
+        // HTTP/2 now leads the pane (it is the more constrained plane: it can
+        // only be set at tab creation), so "first" is no longer the right
+        // assertion for TLS - "not buried" is.
+        const tlsSec = secs.find(s => s.classList.contains('fp-group-tls'));
+        const h2Sec = secs.find(s => s.classList.contains('fp-group-h2'));
+        const tr = tlsSec ? tlsSec.getBoundingClientRect() : null;
+        const tHead = tlsSec ? tlsSec.querySelector('.fp-group-head') : null;
+        const tcs = tHead ? getComputedStyle(tHead) : null;
+        const hr = h2Sec ? h2Sec.getBoundingClientRect() : null;
+        const hHead = h2Sec ? h2Sec.querySelector('.fp-group-head') : null;
+        const hcs = hHead ? getComputedStyle(hHead) : null;
+        return JSON.stringify({
+          sectionCount: secs.length,
+          firstIsTls: first ? first.classList.contains('fp-group-tls') : false,
+          firstIsH2: first ? first.classList.contains('fp-group-h2') : false,
+          firstHead: head ? head.textContent.trim() : null,
+          top: r ? Math.round(r.top) : null,
+          paneHeight: el.clientHeight,
+          visible: r ? (r.top >= 0 && r.top < el.clientHeight) : false,
+          headColor: cs ? cs.color : null,
+          headBg: cs ? cs.backgroundColor : null,
+          tlsFields: tlsSec ? tlsSec.querySelectorAll('.fp-field-tls').length : 0,
+          tlsGroupsRendered: secs.filter(s => s.classList.contains('fp-group-tls')).length,
+          tlsIndex: tlsSec ? secs.indexOf(tlsSec) : -1,
+          tlsTop: tr ? Math.round(tr.top) : null,
+          tlsVisible: tr ? (tr.top >= 0 && tr.top < el.clientHeight) : false,
+          tlsHead: tHead ? tHead.textContent.trim() : null,
+          tlsColor: tcs ? tcs.color : null,
+          tlsBg: tcs ? tcs.backgroundColor : null,
+          h2GroupsRendered: secs.filter(s => s.classList.contains('fp-group-h2')).length,
+          h2Index: h2Sec ? secs.indexOf(h2Sec) : -1,
+          h2Fields: h2Sec ? h2Sec.querySelectorAll('.fp-field-h2').length : 0,
+          h2Top: hr ? Math.round(hr.top) : null,
+          h2Visible: hr ? (hr.top >= 0 && hr.top < el.clientHeight) : false,
+          h2Head: hHead ? hHead.textContent.trim() : null,
+          h2Color: hcs ? hcs.color : null,
+        });
      })()`, true).catch((e) => 'ERR ' + e.message);
   let o = null;
   try { o = JSON.parse(rawInfo); } catch (e) { /* left null */ }
@@ -82,20 +108,36 @@ app.whenReady().then(async () => {
 
   ck('the TLS group is rendered', o.tlsGroupsRendered === 1,
     o.tlsGroupsRendered + ' tls groups of ' + o.sectionCount + ' sections');
-  // The whole point: it must not be buried.
-  ck('the TLS group is the FIRST section (was 16th, below the fold)',
-    o.firstIsTls === true, 'firstIsTls=' + o.firstIsTls);
-  ck('it is inside the visible area', o.visible === true,
-    'top=' + o.top + ' paneHeight=' + o.paneHeight);
+  // The whole point: it must not be buried. It was the 16th and last section at
+  // roughly 3013px in a 2808px pane. HTTP/2 now leads, so the assertion is
+  // "in the leading planes and on screen", not "literally first".
+  ck('the TLS group is in the leading planes, not buried at the bottom',
+    o.tlsIndex >= 0 && o.tlsIndex <= 1,
+    'index=' + o.tlsIndex + ' of ' + o.sectionCount);
+  ck('it is inside the visible area', o.tlsVisible === true,
+    'top=' + o.tlsTop + ' paneHeight=' + o.paneHeight);
   ck('all 9 TLS fields render inside it', o.tlsFields === 9,
     o.tlsFields + ' fields');
   ck('the header names the delivery mechanism (setSSLConfig)',
-    /setSSLConfig/.test(o.firstHead || ''), o.firstHead);
+    /setSSLConfig/.test(o.tlsHead || ''), o.tlsHead);
   // fp-field-tls had no CSS rule at all, so assert it now looks different.
   ck('the header is styled distinctly, not the default grey',
-    !!o.headColor && o.headColor !== 'rgb(200, 200, 200)' &&
-    !!o.headBg && o.headBg !== 'rgb(42, 42, 43)',
-    'color=' + o.headColor + ' bg=' + o.headBg);
+    !!o.tlsColor && o.tlsColor !== 'rgb(200, 200, 200)' &&
+    !!o.tlsBg && o.tlsBg !== 'rgb(42, 42, 43)',
+    'color=' + o.tlsColor + ' bg=' + o.tlsBg);
+
+  // --- the HTTP/2 plane, which leads because it is the most constrained ----
+  ck('the HTTP/2 group is rendered', o.h2GroupsRendered === 1,
+    o.h2GroupsRendered + ' h2 groups');
+  ck('HTTP/2 leads the pane (it can only be set at tab creation)',
+    o.h2Index === 0, 'index=' + o.h2Index);
+  ck('all 3 HTTP/2 fields render inside it', o.h2Fields === 3,
+    o.h2Fields + ' fields');
+  ck('the HTTP/2 header names its delivery mechanism (fromPartition)',
+    /fromPartition/.test(o.h2Head || ''), o.h2Head);
+  ck('HTTP/2 is styled distinctly from TLS (a different plane)',
+    !!o.h2Color && o.h2Color !== 'rgb(200, 200, 200)' && o.h2Color !== o.tlsColor,
+    'h2=' + o.h2Color + ' tls=' + o.tlsColor);
 
   // Toggling a TLS control must survive a round trip through the store.
   const applied = await wc.executeJavaScript(

@@ -128,14 +128,22 @@ try {
 }
 
 // 5. The packaged profiles must still normalize cleanly under the new schema.
+// Route through fpSplitConfig(), NOT fpNormalizeConfig() on the whole blob:
+// the profile now carries TLS and HTTP/2 keys, and fpNormalizeConfig() only
+// knows the 63 Blink keys, so it reports every other-plane key as unknown.
+// Splitting first means "unknown" keeps meaning "genuinely unknown" instead of
+// "belongs to a different delivery plane".
 try {
   const pj = JSON.parse(fs.readFileSync(path.join(APP, "profiles.json"), "utf8"));
   let bad = [];
   for (const p of (pj.profiles || [])) {
     if (!p.fingerprint) continue;
-    const r = schema.fpNormalizeConfig(p.fingerprint);
-    if (Object.keys(r.config).length !== srcKeys || r.unknown.length) {
-      bad.push(p.id + "(" + Object.keys(r.config).length + " keys, unknown=" + r.unknown.length + ")");
+    const split = schema.fpSplitConfig(p.fingerprint);
+    const norm = schema.fpNormalizeConfig(split.fingerprint);
+    if (Object.keys(norm.config).length !== srcKeys ||
+        split.unknown.length || norm.unknown.length) {
+      bad.push(p.id + "(" + Object.keys(norm.config).length + " keys, unknown=" +
+        (split.unknown.length + norm.unknown.length) + ")");
     }
   }
   ck("packaged profiles normalize cleanly", bad.length === 0, bad.join("; ") || "all OK");

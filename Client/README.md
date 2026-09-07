@@ -80,10 +80,12 @@ apply?".
 
 The probe reads **58 of the 63 keys** from inside the page. The 9 TLS keys are
 measured separately (see below), from a ClientHello captured in the main process,
-so **67 of the 72 configurable surfaces** produce a row. "Produces a row" is not
-"can be judged" — with every surface configured at once, a measured run returned
-45 pass / 7 fail / 3 unknown / 3 skip, so **52 of 72** could actually be called
-pass or fail. The gap is the honest part: `unknown` and `skip` are reported as
+so **67 of the 75 configurable surfaces** produce a row (63 Blink + 9 TLS + 3
+HTTP/2; the HTTP/2 keys are not yet in the self-test, so they add to the total
+but not to the row count). "Produces a row" is not "can be judged" — with every
+surface configured at once, a measured run returned 45 pass / 7 fail / 3 unknown /
+3 skip, so **52 of 75** could actually be called pass or fail. The gap is the
+honest part: `unknown` and `skip` are reported as
 such rather than painted green. Each surface gets one of five verdicts:
 
 | Verdict | Meaning |
@@ -104,6 +106,46 @@ a lie.
 **`skip` is not a success.** A key you never set was never checked, so painting
 it green would let a default profile read as all-clear. Skipped rows are hidden
 by default; tick *Show skipped surfaces* to see all of them.
+
+### HTTP/2 keys are a third plane, and they are frozen at tab creation
+
+The 3 HTTP/2 keys do not travel with either of the other two planes. They are
+read out of `HttpNetworkSessionParams` when the NetworkContext is **constructed**,
+which happens inside `session.fromPartition()` — before any Session method can
+run. So they must be passed as a second argument:
+
+```js
+session.fromPartition(name, { http2Profile: { settingsGrease: true } })
+```
+
+Measured, parsing the SETTINGS frame off the wire:
+
+| Call order | GREASE on the wire |
+|---|---|
+| `fromPartition(p, {http2Profile})` | **1** (works) |
+| `fromPartition(p)` then `.setHttp2Profile()` | 0 (silently ignored) |
+| `fromPartition(p)` then `fromPartition(p, {http2Profile})` | 0 (silently ignored) |
+
+The first `fromPartition()` call on a partition name wins. In practice this means
+**HTTP/2 settings are fixed for the life of a tab**: changing them on an open tab
+has no effect. Rather than return success for a setting that did not move,
+`main.js` detects the difference and reports it — *"HTTP/2 settings are fixed
+when the tab is created; close and reopen the tab to change them."* A control
+that looks applied but is not is the worst outcome, because the panel then
+claims a fingerprint the session does not produce.
+
+| Key | Type | Effect on the wire |
+|---|---|---|
+| `settingsGrease` | bool | SETTINGS gains a reserved `0x?a?a` entry: 4 entries → 5 |
+| `endStreamWithDataFrame` | bool | HEADERS flags `0x25` → `0x24`; END_STREAM moves to an empty DATA frame |
+| `greaseFrame` | object | Emit a reserved-type frame after each SETTINGS frame, as `{type, flags, payload}` |
+
+`settingsGrease` matters by default: `net/` ships `enable_http2_settings_grease =
+false`, while real Chrome turns it ON via `components/network_session_configurator`
+— which Electron never runs. An unprofiled session therefore differs from Chrome
+on **every** HTTP/2 connection. `greaseFrame` is left unset in every preset on
+purpose: real Chrome does not set it either (it is opt-in via
+`--http2-grease-frame-type`), so unset is the Chrome-matching value.
 
 ### TLS keys are measured differently
 
@@ -251,6 +293,15 @@ electron Client/test-tls-ui-visible.js
 # `fingerprint` and never called setSSLConfig(), so a Safari-preset tab
 # spoke Chromium's native GREASEd hello.
 electron Client/test-profile-tab-tls.js
+
+# The HTTP/2 plane: routing, type validation, and real SETTINGS bytes (15 checks)
+electron Client/test-h2-plane.js
+
+# Opening a tab FROM a preset must apply that preset's HTTP/2 plane, and
+# changing HTTP/2 on a live tab must be REPORTED, not silently accepted (9 checks)
+# Drives the real UI and parses the SETTINGS frame off the tab's own partition,
+# because the plane is frozen at creation - the reason it needs its own test.
+electron Client/test-h2-tab.js
 
 # Upstream fingerprint smoke (window-level isolation, 20+ surfaces)
 electron fingerprint/scripts/smoke.js --isolation --verbose

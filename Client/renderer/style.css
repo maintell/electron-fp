@@ -358,6 +358,25 @@ body {
 .fp-field-tls label { color: #c9a26a; }
 .fp-field-tls input { border-color: #5a4a2e; }
 .fp-field-tls input.active { border-color: #f4a742; color: #f4a742; }
+
+/* === HTTP/2 plane ==========================================================
+   A THIRD delivery plane, not three more TLS keys. It travels as a
+   fromPartition() option and is frozen when the NetworkContext is built, so it
+   cannot change on an open tab - which is why it leads the pane and is marked
+   in its own colour: the constraint is the whole story, and a section that
+   looks like the others would hide it. */
+.fp-group-h2 { border-left: 3px solid #4ec9b0; }
+.fp-group-h2 > .fp-group-head {
+  background: #1e3330; color: #4ec9b0;
+}
+.fp-group-h2 > .fp-group-head:hover { background: #24403c; color: #7ee0ca; }
+.fp-field-h2 label { color: #6fbfae; }
+.fp-field-h2 input { border-color: #2e5a4a; }
+.fp-field-h2 input.active { border-color: #4ec9b0; color: #4ec9b0; }
+/* A greaseFrame value that is not JSON: refuse it in place, because storing it
+   would only fail later in fpH2Validate() with no visible cause. */
+.fp-field input.fp-field-bad { border-color: #e05252; color: #e05252; }
+
 /* === Status Bar === */
 #status-bar {
   display: flex;
