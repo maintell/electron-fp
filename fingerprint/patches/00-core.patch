@@ -9,6 +9,25 @@
 # silently skipped.
 #
 # Regenerate with fingerprint/scripts/split_patch.js after adapting hunks.
+#
+# MERGE/UPGRADE GUIDE (new Chromium versions):
+#   - This patch is the FOUNDATION: it creates fp_config_helpers.h, which every
+#     other patch in the set includes. It has no upstream anchor at all (new
+#     file), so it is the one patch that should never conflict. If it does,
+#     something is badly wrong - do not "adapt" it, investigate.
+#   - Because it is a new file, an upgrade almost never needs to touch it. It
+#     DOES need review when:
+#       * a key's read semantics change (FpConfigInt vs FpConfigString) - the
+#         caller spread across 10/20-blink-* must agree, and there is no
+#         compiler error to catch a mismatch, only a wrong value at runtime.
+#       * the FP_CONFIG_DATA / FP_CONFIG env-var precedence order changes.
+#   - Ordering is load-bearing: apply this FIRST. Anything that includes the
+#     header before it exists fails to compile, not to patch.
+#   - Risk: LOW (no upstream anchor), but blast radius: HIGH (32+ includers).
+#     A bad edit here breaks every other patch at once.
+#   - After changing this file, regenerate the split patches with
+#     fingerprint/scripts/split_patch.js and re-run
+#     fingerprint/scripts/check.py, then the Client suite.
 # ============================================================================
 
 # --- third_party/blink/renderer/core/frame/fp_config_helpers.h (OWN FILE) ---

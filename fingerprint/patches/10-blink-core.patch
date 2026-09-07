@@ -9,6 +9,30 @@
 # silently skipped.
 #
 # Regenerate with fingerprint/scripts/split_patch.js after adapting hunks.
+#
+# MERGE/UPGRADE GUIDE (new Chromium versions):
+#   - Risk profile of this patch, counted from the per-file MERGE notes below:
+#       8 LOW     (stable getters: screen, navigator hardware, perf timing)
+#       8 MEDIUM  (occasionally refactored: geolocation, fonts, media values)
+#       2 HIGH    (frequent refactors - expect manual hunk work):
+#         * core/html/canvas/html_canvas_element.cc
+#         * platform/fonts/font_cache.cc
+#     Do the two HIGH files FIRST: they are the ones that decide whether an
+#     upgrade is a morning or a week. If both apply cleanly, the rest is usually
+#     mechanical.
+#   - Every hunk here is an early return inside a getter, plus one #include of
+#     fp_config_helpers.h. The include is the fragile part: Blink has been
+#     actively migrating to fewer, more targeted includes, so an upstream change
+#     can move a #include block without touching the function we patch. When a
+#     hunk fails, check whether only the include moved.
+#   - A silently-dropped hunk is the failure mode to guard against: the build
+#     still succeeds and the key just stops working. fingerprint/scripts/check.py
+#     catches a MISSING key, but not a key whose hunk was adapted into the wrong
+#     function. After adapting, run the Client self-test, which compares the
+#     reported value against the configured one per surface.
+#   - Ordering: 00-core MUST be applied first (it creates the shared header).
+#   - After adapting hunks, regenerate with fingerprint/scripts/split_patch.js
+#     so the doc blocks stay in sync with the segments.
 # ============================================================================
 
 # --- third_party/blink/renderer/core/frame/screen.cc ---

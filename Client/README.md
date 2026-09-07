@@ -303,6 +303,15 @@ electron Client/test-h2-plane.js
 # because the plane is frozen at creation - the reason it needs its own test.
 electron Client/test-h2-tab.js
 
+# The patch set must still apply to the tree it targets (18 checks).
+# apply.py covers the 5 Chromium patches, and for the 2 Electron-tree patches it
+# says "verify with check.py" - but check.py only greps the text, it never tries
+# to apply them. Until this test existed, both were documented as verified by a
+# step that did not exist. The subtle part is distinguishing "already applied"
+# from "broken": git apply --check fails both ways, so this uses --reverse -
+# if a patch applies backwards it is already present, which proves it matches.
+node Client/test-patch-apply.js
+
 # Upstream fingerprint smoke (window-level isolation, 20+ surfaces)
 electron fingerprint/scripts/smoke.js --isolation --verbose
 ```

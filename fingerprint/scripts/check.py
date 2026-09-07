@@ -189,8 +189,32 @@ def main():
             p = io.open(ppath, encoding="utf-8", errors="replace").read()
 
             # 3. upgrade guide / purpose header in every patch
-            if "MERGE/UPGRADE GUIDE" not in p and "Apply in filename order" not in p:
-                failures.append(f"{label}: missing upgrade/order header")
+            #
+            # HISTORY: this was an `and` - "fail only if BOTH markers are absent".
+            # Every patch carries "Apply in filename order" in its boilerplate
+            # header, so the second half was always true and MERGE/UPGRADE GUIDE
+            # was a DEAD CHECK: deleting the entire upgrade guide from a patch
+            # still passed. Found by mutation-testing this gate (delete the
+            # marker, expect exit 1, got exit 0).
+            #
+            # The upgrade guide is the part that matters: it is what tells the
+            # next person, on a Chromium bump, where our hunks sit relative to
+            # upstream's and which of them will conflict. Losing it silently is
+            # exactly the rot this gate exists to stop. So require BOTH:
+            #   - "Apply in filename order" (ordering is load-bearing: 00-core
+            #     creates the header the rest include)
+            #   - "MERGE/UPGRADE GUIDE" (per-patch re-anchoring notes)
+            #
+            # The one exception is the retired monolith, which is explicitly
+            # dead weight and says so at the top; it has neither and must not.
+            is_retired_monolith = "DEAD WEIGHT" in p
+            if not is_retired_monolith:
+                for marker in ("Apply in filename order", "MERGE/UPGRADE GUIDE"):
+                    if marker not in p:
+                        failures.append(
+                            f"{label}: missing header marker {marker!r} "
+                            f"(the gate used to accept either one, which made "
+                            f"MERGE/UPGRADE GUIDE unenforceable)")
 
             # 4. per-file doc blocks vs file segments
             segs = re.split(r"(?m)^--- a/", p)
@@ -439,6 +463,117 @@ def main():
                     "doc drift: %s:%d states %s keys but the schema has %d "
                     "-- update the prose (or mark it as the upstream baseline "
                     "if that is what it means)" % (rel, lineno, hit.group(1), _n))
+
+        # 10. PATCH-SET DRIFT: the README directory table must match the tree.
+        #
+        # HISTORY: fingerprint/README.md listed only 4 patches and said the set
+        # was "split into 4", while 40-net-tls, 50-electron-glue and
+        # 60-electron-inspector had been in patches/ for months - 1400+ lines of
+        # Inspector code that a reader following the table would never find.
+        # Then, while fixing it, I hand-wrote the total as 228 hunks when the
+        # active set has 136 (228 is the count INCLUDING the retired monolith).
+        #
+        # The key-count drift check above cannot catch this: it only looks at
+        # key counts. And a table this easy to get wrong is exactly the table a
+        # reader trusts, because it is the index into everything else.
+        #
+        # So: derive the counts from the patches that were already parsed, and
+        # require the README to state them. This runs in the split branch where
+        # `patches`, `all_files` and `total_hunks` are in scope.
+        if patches:
+            readme_p = os.path.join(REPO, "fingerprint", "README.md")
+            if os.path.exists(readme_p):
+                try:
+                    rbody = io.open(readme_p, encoding="utf-8",
+                                    errors="replace").read()
+                except OSError:
+                    rbody = ""
+                n_patches = len(patches)
+                # all_files counts only "--- a/" segments, i.e. files that
+                # EXIST upstream and are modified. New files write "---
+                # /dev/null" and have no such segment, so they are absent here
+                # and show up only in "+++ b/". Both numbers are real; a doc
+                # that quotes one without saying which is ambiguous - which is
+                # precisely how I first wrote "63 文件" from the +++ count and
+                # then had check.py report 59. Require BOTH, named.
+                n_new = len({f for f in re.findall(r"(?m)^\+\+\+ b/(\S+)", joined)
+                             if f not in set(all_files)})
+                n_modified = len(all_files)
+                n_targets = n_modified + n_new
+                # Every patch name must be reachable from the README, otherwise
+                # the index silently omits it.
+                for _, ppath in patches:
+                    label = os.path.basename(ppath)
+                    if label not in rbody:
+                        failures.append(
+                            "doc drift: fingerprint/README.md never mentions "
+                            "%s - it is in patches/ but missing from the "
+                            "directory table, so a reader cannot find it" % label)
+                # The numeric totals the table states must be the real ones.
+                #
+                # SCOPE THE SEARCH TO THE TABLE. First version matched anywhere
+                # in the file, and the README's own caveat - explaining that 59
+                # and 63 are both real and differ by counting method - mentions
+                # BOTH numbers, so it satisfied the regex and the guard went
+                # green on a table that said "63 个修改". A document explaining
+                # its own numbers is exactly where a global match fails.
+                #
+                # So: match against the ONE line that carries the totals
+                # ("生效合计"). Neither the section nor a blockquote-stripped
+                # slice worked - the caveat prose explaining the two counting
+                # methods quotes both numbers and sits inside every broader
+                # scope I tried, so a table reading "63 个修改" still passed.
+                # Anchoring on the 生效合计 line removes the scoping question
+                # entirely: there is exactly one such line, and it is the claim.
+                _tot = None
+                for _line in rbody.splitlines():
+                    if "生效合计" in _line:
+                        _tot = _line
+                        break
+                table_body = _tot or ""
+                expect = (
+                    ("modified-file count",
+                     r"%d\s*个修改" % n_modified),
+                    ("new-file count",
+                     r"%d\s*个新建" % n_new),
+                    ("hunk total",
+                     r"%d\s*个\s*hunk" % total_hunks),
+                )
+                for what, rx in expect:
+                    if not re.search(rx, table_body):
+                        failures.append(
+                            "doc drift: fingerprint/README.md 目录结构 table does "
+                            "not state the real %s (expected %d modified + %d new "
+                            "= %d target files, %d hunks, %d patches) - note the "
+                            "match is scoped to the table, so the caveat prose "
+                            "below it cannot satisfy this by also quoting the "
+                            "numbers"
+                            % (what, n_modified, n_new, n_targets,
+                               total_hunks, n_patches))
+                # The patch-count claim ("split into N") also lives in the same
+                # section and rotted for months at 4 while there were 7.
+                # The bold markers wrap the WHOLE 生效合计 sentence
+                # ("**拆分为 7 个生效补丁，...**"), so they sit before 拆分为,
+                # not around the number. Anchoring \*\* around the digit never
+                # matched and the check was vacuous.
+                if not re.search(r"拆分为\s*%d\s*个生效补丁" % n_patches,
+                                 table_body):
+                    failures.append(
+                        "doc drift: fingerprint/README.md 目录结构 does not state "
+                        "the real active patch count (%d) - it previously said 4 "
+                        "while three whole patches were undiscoverable"
+                        % n_patches)
+                # The SAME claim is repeated in the intro bullet at the top of
+                # the file, because that is the first line a reader sees. Two
+                # copies means two chances to drift: the intro still said
+                # "拆分为 4 个" after the table was corrected. Check both.
+                intro = rbody.split("## 目录结构")[0]
+                if not re.search(r"拆分为\s*%d\s*个生效补丁" % n_patches, intro):
+                    failures.append(
+                        "doc drift: fingerprint/README.md 目录结构 does not state "
+                        "the real active patch count (%d) - it previously said 4 "
+                        "while three whole patches were undiscoverable"
+                        % n_patches)
 
     if failures:
         print("PATCH CHECK FAILED:")

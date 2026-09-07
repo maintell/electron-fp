@@ -2,24 +2,59 @@
 
 本目录与 Electron 主 patch 完全隔离（见 `docs/superpowers/specs/2026-08-26-electron-fingerprint-design.md`）。
 
-- `patches/*.patch` 补丁集（按运行时子系统拆分为 4 个，按文件名顺序施加）；整块替换源仍为 `ungoogled-chromium-windows`，升级时按需替换单个补丁
+- `patches/*.patch` 补丁集（按运行时子系统**拆分为 7 个生效补丁**，按文件名顺序施加；另有 1 个已废弃单体）；整块替换源仍为 `ungoogled-chromium-windows`，升级时按需替换单个补丁
 - 不改 `patches/chromium/.patches` / `patches/config.json`，施加由 `fingerprint/scripts/apply.py` 独立完成
 - `helpers/fp_config_helpers.h` 仅改注入源为 `--fingerprint-config`（per-Renderer，`ElectronBrowserClient::AppendExtraCommandLineSwitchesForRenderer`），其余 63 键语义与上游一致
 
 ## 目录结构
 
-- `patches/*.patch` — 补丁集，按**运行时子系统**拆分为 4 个，按文件名顺序施加：
+- `patches/*.patch` — 补丁集，按**运行时子系统**拆分为 7 个生效补丁（另有 1 个已废弃的单体），按文件名顺序施加。
 
-  | 补丁 | 文件 | 内容 |
-  |---|---|---|
-  | `00-core.patch` | 1 | `fp_config_helpers.h`（新建，被其余 32 个文件 include，必须最先施加） |
-  | `10-blink-core.patch` | 13 | Blink core：screen / geo / canvas / DOM / timing / font_cache |
-  | `20-blink-modules.patch` | 17 | Blink modules：WebGL / WebGPU / audio / speech / media / battery / storage |
-  | `30-webrtc.patch` | 5 | WebRTC：自定义 IP（webrtc 为独立仓库、无 `//base` 依赖）+ `ipc_network_manager.cc` 注入点 |
+  | 补丁 | 文件 | +/- | hunks | 内容 | 详见 |
+  |---|---|---|---|---|---|
+  | `00-core.patch` | 1 | +404/-0 | 1 | `fp_config_helpers.h`（新建，被其余补丁 include，**必须最先施加**） | 下文「配置读取」 |
+  | `10-blink-core.patch` | 18 | +308/-10 | 39 | Blink core：screen / geo / canvas / DOM / timing / font_cache / navigator | 下文「覆盖范围」 |
+  | `20-blink-modules.patch` | 17 | +547/-4 | 43 | Blink modules：WebGL / WebGPU / audio / speech / media / battery / storage | 下文「覆盖范围」 |
+  | `30-webrtc.patch` | 5 | +187/-0 | 10 | WebRTC：自定义 IP（webrtc 为独立仓库、无 `//base` 依赖）+ `ipc_network_manager.cc` 注入点 | 下文「User-Agent 与 navigator.platform」 |
+  | `40-net-tls.patch` | 8 | +427/-23 | 18 | **网络层**：`fp_*` 字段加入 `SSLContextConfig` / mojom / `HttpNetworkSessionParams` | 下文「网络层指纹」 |
+  | `50-electron-glue.patch` | 5 | +222/-1 | 11 | **JS 入口**：`setSSLConfig({fp*})` 与 `fromPartition(name,{http2Profile})` 的两个 gin 转换器 | 下文「网络层指纹」→「构造期约束」 |
+  | `60-electron-inspector.patch` | 9 | +1409/-1 | 14 | **Inspector**：`electron://fingerprint/` 特权 WebUI | 下文「Inspector」 |
+  | `fp-fingerprint.patch` | 42 | +1471/-13 | 92 | **已废弃**（见下）：单体时代的产物，不施加、不校验 | — |
 
-  合计 36 文件。每个补丁含 patch 头说明及 per-file `RANGE/PURPOSE/CONFIG/MERGE` 注释。
-  拆分目的：升级时只需重新锚定失败的那一个子系统，而非 36 个文件整体重来。
+  生效合计：**拆分为 7 个生效补丁，63 个目标文件（59 个修改 + 4 个新建），+3504 行，136 个 hunk**（不含已废弃单体）。
+  （此行是 `check.py` 的漂移校验锚点，须单行完整：补丁数、修改数、新建数、hunk 数四项均由**这一行**核对，
+  故不得折行——含单体时则为 8 个 / 105 文件 / +4975 / 228 个 hunk。）
+
+  > 59 与 63 都不是笔误，二者口径不同，混用会导致对不上数：
+  > - **59 个修改** — 上游已存在、被打补丁的文件（patch 中带 `--- a/` 段）
+  > - **4 个新建** — `fp_config_helpers.h` 与 3 个 `fingerprint_ui.*`
+  >   （patch 中是 `--- /dev/null`，没有 `--- a/` 段）
+  >
+  > `check.py` 的 `targets` 报的是 **59**（它按 `--- a/` 段统计），
+  > 按 `+++ b/` 统计则是 63。引用时必须说明口径。
+
+  这些数字由 `python3 fingerprint/scripts/check.py` 守门：补丁名缺失、
+  或本表的修改数/新建数/hunk 数与实际不符，均会直接失败。改补丁后按实况更新本表。
+
+  拆分目的：升级时只需重新锚定失败的那一个子系统，而非 63 个文件整体重来。
   用 `scripts/split_patch.js` 从源码树重新生成（以源码为准，同时修正注释漂移并重算 hunk 计数）。
+
+  > **本表由 `patches/` 目录实况生成，勿手改。** 上一版仍写着"拆分为 4 个"、
+  > 只列 4 行，而 `40/50/60` 三个补丁已在树中数月 —— 读者按表找补丁会以为它们
+  > 不存在。改补丁后重新核对本表的数字与行数。
+
+  每个补丁含 patch 头说明、**`MERGE/UPGRADE GUIDE`** 以及 per-file
+  `RANGE/PURPOSE/CONFIG/MERGE` 注释。三者的分工：
+  - `RANGE` — 改的是哪个函数/区块（升级时重新锚定的依据）
+  - `PURPOSE` — 为什么改
+  - `CONFIG` — 读了哪些配置键（仅读配置的补丁有此行）
+  - `MERGE` — 该文件的冲突风险（LOW/MEDIUM/HIGH）与具体坑
+
+### 关于 `fp-fingerprint.patch`（已废弃）
+
+它是拆分前的单体补丁，`apply.py` 与 `check.py` 都优先使用拆分补丁、**只在找不到任何拆分补丁时才回退到它**。拆分补丁存在，因此它既不施加也不校验。
+
+它已经造成过一次真实 bug：新增的三个键只加进了单体、没进拆分补丁，于是"键存在"的校验通过了，而实际生效的补丁里没有它们。文件头已标注 `DEAD WEIGHT`，`check.py` 也据此豁免它的头注释检查。**不要编辑它；新增内容一律进拆分补丁。**
 - `helpers/fp_config_helpers.h` — 命令行优先 `FpConfigContent()`（`--fingerprint-config` base64 JSON → `FP_CONFIG_DATA` → `FP_CONFIG` 文件 → `FP_*` env）
 - `scripts/apply.py` — 扫描 `patches/` 下 `[0-9][0-9]-*.patch` 并按序用 `git apply` 施加（无 split 补丁时回退到 monolith）。每个补丁有**独立**的幂等标记，无 `src/third_party/blink` 时跳过返回 exit 0
 - `scripts/check.py` — 本地未接 `devutils/check_patch.py` 9 项静态检查（<1s）：63 配置项（跨全集合校验）/ 头注释 / doc-segment 匹配 / empty-segment / debug 残留 / hunks / 头计数 / 隔离 / 文件不得被多个补丁重复拥有 / 文档里的键数不得与 schema 漂移
@@ -105,10 +140,41 @@ git commit -m "chore(fingerprint): roll fp-fingerprint.patch to Chromium 15x"
 
 ## 本地自检
 
+三层，各自拦不同类别的问题，**缺任何一层都会留下盲区**：
+
 ```bash
+# 1. 静态：文档/键覆盖/调试残留/边界（<1s，无需 src）
 python3 fingerprint/scripts/check.py && echo PASS
-python3 fingerprint/scripts/apply.py --dry-run && echo "dry-run ok (or src missing, skip)"
+
+# 2. Chromium 树：能否施加（需 src）。50/60 在此被跳过，见下。
+python3 fingerprint/scripts/apply.py --src <CHROMIUM_SRC> --dry-run
+
+# 3. Electron 树：验证 50/60 仍处于可施加状态
+node Client/test-patch-apply.js
 ```
+
+### 为什么第 3 层必须单独存在
+
+`apply.py` 对 `50-electron-glue` / `60-electron-inspector` 会打印
+`Electron-tree patch, not applicable to Chromium` —— 它们的路径全是 `shell/...`，
+属于 Electron 树而非 Chromium 树。该提示原先指向 `check.py`，**这是错的**：
+`check.py` 只做文本检查（键覆盖、头注释、残留、边界），从不尝试施加，
+因此它无法发现"补丁再也施加不上去"。真正做这件事的是 `Client/test-patch-apply.js`。
+指向错误的验证器比不指更糟 —— 它制造虚假信心。
+
+### 第 3 层如何区分"已施加"与"已损坏"
+
+`git apply --check` 在两种情况下都失败，必须区分：
+
+| 情况 | 正向 `--check` | 反向 `--check --reverse` | 判定 |
+|---|---|---|---|
+| 树未施加 | 通过 | 失败 | 可正常施加 |
+| **已施加** | 失败 | **通过** | **补丁有效**（反向能还原 ⇒ 内容与树吻合） |
+| 补丁损坏 | 失败 | 失败 | **真的坏了** |
+
+把"已施加"报成失败会对健康仓库误报；漏掉"都不通"则会藏起一个永远无法再施加的补丁。
+`test-patch-apply.js` 用上表判定，四类变异（损坏上下文行 / 改错 hunk 行数 /
+删升级指南 / 删施加顺序说明）全部被捕获。
 
 ## 隔离边界
 

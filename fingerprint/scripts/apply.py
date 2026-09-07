@@ -7,13 +7,20 @@ The patch set lives in fingerprint/patches/ and is split by runtime
 subsystem so that a Chromium upgrade only requires re-anchoring the one
 subsystem that broke, instead of a single monolith:
 
-    00-core.patch           fp_config_helpers.h (shared by 32 of 36 files)
+    00-core.patch           fp_config_helpers.h (created; included by the rest)
     10-blink-core.patch     Blink core: screen, canvas, timing, fonts, geo
     20-blink-modules.patch  Blink modules: webgl, webgpu, audio, media, ...
     30-webrtc.patch         WebRTC: custom IP override
+    40-net-tls.patch        net/: fp_* fields on SSLContextConfig + HTTP/2 params
 
 They are applied in filename order. 00-core must go first because it creates
 fp_config_helpers.h, which the other patches' files include.
+
+Two further patches (50-electron-glue, 60-electron-inspector) target the
+ELECTRON tree (shell/...), not Chromium, so this script skips them - see
+ELECTRON_PATCHES below. The docstring used to stop at 30-webrtc and say "32 of
+36 files", which was true of the original 4-patch split and silently went stale
+when 40/50/60 were added.
 
 Each patch has its OWN idempotency marker, keyed on a string that only that
 patch introduces. This is deliberate: the previous single marker
@@ -150,8 +157,15 @@ def main() -> int:
         # "No such file or directory". Reporting that as a failure made a
         # healthy checkout look broken; skip them here and say why.
         if name in ELECTRON_PATCHES:
+        # Point at the step that ACTUALLY verifies these. This used to say
+        # "(verify with check.py)", but check.py only greps the patch text - it
+        # never attempts to apply anything. So the instruction sent the reader
+        # to a gate that cannot detect a patch that no longer applies, while the
+        # real check (Client/test-patch-apply.js, which runs git apply --check
+        # in both directions) was unmentioned. A pointer to the wrong verifier
+        # is worse than none: it produces false confidence.
             print(f"  {name}: Electron-tree patch, not applicable to Chromium "
-                  f"(verify with check.py)")
+                  f"(verify with node Client/test-patch-apply.js)")
             continue
 
         if a.dry_run:

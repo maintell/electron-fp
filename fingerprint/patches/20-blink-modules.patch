@@ -9,6 +9,28 @@
 # silently skipped.
 #
 # Regenerate with fingerprint/scripts/split_patch.js after adapting hunks.
+#
+# MERGE/UPGRADE GUIDE (new Chromium versions):
+#   - Risk profile, counted from the per-file MERGE notes below:
+#       2 LOW     (stable: battery, do-not-track)
+#      13 MEDIUM  (audio graph, speech, media devices, storage, permissions)
+#       2 HIGH    (frequent refactors - expect manual hunk work):
+#         * modules/webgl/webgl_rendering_context_base.cc
+#         * modules/canvas/canvas2d/base_rendering_context_2d.cc
+#     This is the highest-MEDIUM patch in the set. The MEDIUM files are not
+#     individually hard; they are numerous, and they sit in modules that get
+#     re-parented between blink/modules and blink/core without warning.
+#   - WebGL is the one to watch most closely. webgl_rendering_context_base.cc
+#     is both large and actively changed by the WebGPU convergence work, and our
+#     hunks touch parameter getters that upstream has repeatedly renamed. Re-anchor
+#     on the getter, not on line numbers.
+#   - Audio is a special case: the noise is applied in BOTH base_audio_context.h
+#     and the analyser/offline/audio-destination nodes. If an upstream refactor
+#     splits or merges those, the audio surfaces degrade QUIETLY - the key still
+#     reads as configured while the rendered buffer is untouched. Verify with
+#     Client/test-audio-strength.js, not by eyeballing the build.
+#   - Ordering: 00-core first (shared header), 10-blink-core before this one.
+#   - After adapting hunks, regenerate with fingerprint/scripts/split_patch.js.
 # ============================================================================
 
 # --- third_party/blink/renderer/modules/webaudio/base_audio_context.h ---

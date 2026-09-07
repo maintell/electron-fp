@@ -63,27 +63,88 @@
 #   shell/browser/ui/webui/fingerprint_ui.cc       - data source, page assembly,
 #                                                    live-data builder
 #   shell/browser/ui/webui/fingerprint_ui_page.h   - raw-string HTML + JS
+#
+# MERGE/UPGRADE GUIDE (new Electron/Chromium versions):
+#   - This is the most FRAGILE patch in the set, and it is fragile in a way the
+#     others are not: the previous patches hook getters that upstream refactors,
+#     while this one depends on three INDEPENDENT registration points that must
+#     all succeed and that fail with three DIFFERENT, all-misleading errors
+#     (ERR_INVALID_URL / ERR_FAILED / silent refusal - see "WHY A NEW SCHEME").
+#     On an upgrade, verify all three, because any single one produces a blank
+#     page rather than a compile error.
+#   - The registration must precede url::LockSchemeRegistries(). If an upgrade
+#     moves or renames PreCreateMainMessageLoop, the symptom is a CHECK failure
+#     in url/url_util.cc ("Trying to add a scheme after the lists have been
+#     used"), not a patch conflict. Do not move the registration later to make a
+#     hunk apply - that trades a build error for a runtime crash.
+#   - The inline-everything design (see "WHY THE PAGE IS SELF-CONTAINED") is a
+#     workaround for subresource loads failing on WebUI schemes in this build.
+#     If a future Chromium fixes subresource loading, the page can be split -
+#     but re-verify before relying on it, because the workaround's premise was
+#     measured on stock chrome://accessibility, not assumed.
+#   - SYNC HAZARD: the group/key table in fingerprint_ui.cc duplicates
+#     Client/fp-schema.js. C++ cannot read the JS schema, so this duplication
+#     cannot be removed - only checked. test-inspector.js asserts the total is
+#     63. If a key is added to the schema and not here, that test fails; if it
+#     is added here and not to the schema, the Inspector reports a key the
+#     product does not expose. Update both or neither.
+#   - Ordering: LAST of the set. It reads config produced by 50-electron-glue
+#     and the blink patches, so applying it early yields a page that renders but
+#     reports nothing - the most confusing possible partial failure.
+#   - Risk: HIGH overall, but concentrated in the 6 modified files; the 3 new
+#     files (fingerprint_ui.*) have no upstream anchor and should never conflict.
 # ============================================================================
 #
 # --- filenames.gni
-#   Register the three new WebUI sources in the build.
+# RANGE: the filenames{} list, alongside the existing WebUI sources.
+# PURPOSE: register the three new WebUI sources in the build.
+# MERGE: LOW - the list grows monotonically upstream; conflicts are trivial.
+#   A missing entry is a LINK error, not a silent one, so this is the safest
+#   file in the patch.
 #
 # --- shell/browser/electron_browser_client.cc
-#   Declare "electron" as a WebUI scheme (see registration step 2 above).
+# RANGE: ElectronBrowserClient::GetAdditionalWebUISchemes, plus one #include.
+# PURPOSE: declare "electron" as a WebUI scheme (registration step 2 of 3).
+# MERGE: MEDIUM - the ContentBrowserClient surface is occasionally reorganised,
+#   and this method sits next to GetAdditionalAllowedSchemesForFileSystem, whose
+#   name is similar enough to invite adapting into the WRONG one. Verify the
+#   hunk landed in GetAdditionalWebUISchemes specifically: the wrong method
+#   compiles fine and yields ERR_FAILED at runtime rather than a build error.
 #
 # --- shell/browser/electron_browser_main_parts.cc
-#   url::AddStandardScheme + AddCorsEnabledScheme for "electron", in
-#   PreCreateMainMessageLoop - early enough to beat the GURL-usage DCHECK.
+# RANGE: ElectronBrowserMainParts::PreCreateMainMessageLoopCommon.
+# PURPOSE: url::AddStandardScheme + AddCorsEnabledScheme for "electron"
+#   (registration step 1 of 3). PreCreateMainMessageLoop is early enough to beat
+#   the GURL-usage DCHECK.
+# MERGE: HIGH - the timing constraint is invisible to the compiler. If an
+#   upgrade renames or re-times this hook, do NOT relocate the call later to
+#   make the hunk apply; that converts a build error into the runtime CHECK
+#   "Trying to add a scheme after the lists have been used" (url/url_util.cc).
+#   Anchor on "the earliest hook that runs before any GURL is constructed".
 #
 # --- shell/browser/electron_web_ui_controller_factory.cc
-#   Route host "fingerprint" to FingerprintUI.
+# RANGE: includes, the host->factory mapping, and
+#   CreateWebUIControllerForURL.
+# PURPOSE: route host "fingerprint" to FingerprintUI (step 3 of 3).
+# MERGE: MEDIUM - the factory is hand-maintained and upstream adds hosts to it
+#   regularly, so the hunk context moves. The failure is a blank page, not a
+#   compile error, because an unknown host falls through to the default.
 #
 # --- shell/common/electron_constants.h
-#   Define kElectronUIScheme = "electron".
+# RANGE: namespace electron, kElectronUIScheme.
+# PURPOSE: define kElectronUIScheme = "electron" - the single shared spelling
+#   used by the browser and renderer registrations.
+# MERGE: LOW - additive constant. Renaming it breaks the other files loudly.
 #
 # --- shell/renderer/renderer_client_base.cc
-#   Mirror the browser-process scheme registration in the renderer; schemes are
-#   per-process and a mismatch makes the URL unparseable on one side.
+# RANGE: RendererClientBase::RendererClientBase (constructor).
+# PURPOSE: mirror the browser-process scheme registration in the renderer;
+#   schemes are per-process and a mismatch makes the URL unparseable on one side.
+# MERGE: MEDIUM - the renderer constructor is a common place for upstream to add
+#   initialisation, so context drift is likely. This is the easiest of the three
+#   registrations to forget after an upgrade, and its symptom (ERR_INVALID_URL)
+#   is identical to missing step 1 - so check all three, not just the one that
+#   looks wrong.
 diff --git a/filenames.gni b/filenames.gni
 index e8121b90ec..c977617d7c 100644
 --- a/filenames.gni
