@@ -39,16 +39,24 @@ const TLS_CHACHA20_POLY1305_SHA256 = 0x1303;
 // process is already exiting - which aborts the run before results print.
 const liveWindows = new Set();
 function track(win) { liveWindows.add(win); return win; }
+
+// Destroying a window must ALSO remove it from liveWindows. The first version
+// of the warm-up fix called win.destroy() directly, leaving the dead handle in
+// the set; closeAllWindows() then touched a destroyed window and the process
+// died with 0xC0000005 after printing only 1 of 17 checks. A window is only
+// safe to tear down once - so tear it down in exactly one place.
+function destroyTracked(win) {
+  liveWindows.delete(win);
+  try {
+    if (win && !win.isDestroyed()) {
+      win.webContents.destroy();
+      win.destroy();
+    }
+  } catch (_) { /* already gone */ }
+}
+
 async function closeAllWindows() {
-  for (const w of [...liveWindows]) {
-    liveWindows.delete(w);
-    try {
-      if (!w.isDestroyed()) {
-        w.webContents.destroy();
-        w.destroy();
-      }
-    } catch (_) { /* already gone */ }
-  }
+  for (const w of [...liveWindows]) destroyTracked(w);
   // Give the browser process a beat to finish tearing down renderers.
   await new Promise((r) => setTimeout(r, 400));
 }
@@ -57,12 +65,32 @@ async function closeAllWindows() {
  * Create a session with a TLS profile and return its STABLE ClientHello.
  * Performs a discarded warm-up handshake first (see header).
  */
-async function measure(partition, sslConfig, url, probe) {
-  const sess = session.fromPartition('persist:' + partition);
-  sess.setCertificateVerifyProc((req, cb) => cb(0));
-  if (sslConfig) sess.setSSLConfig(sslConfig);
+async function measure(partition, sslConfig) {
+  // A DEDICATED probe per measurement, started on its own ephemeral port.
+  // A shared probe accumulates samples from every earlier session and
+  // waitForSample() returns an existing one immediately - the trap the
+  // fpExtensionOrder case at the bottom of this file already documents.
 
-  const capture = async () => {
+  // Each capture gets its OWN session partition, which is what makes a second
+  // ClientHello happen at all.
+  //
+  // The first version of this fix did warm-up and measured on the SAME session
+  // and simply waited for a newer sample. That never arrived: the second
+  // loadURL reused the warm-up's TLS connection, so no new handshake occurred
+  // and the measured sample was NULL. Instrumenting both captures showed it
+  // plainly - warm-up got a sample, measured got nothing.
+  //
+  // A fresh partition means a fresh connection, so a real second handshake
+  // happens. The warm-up is still honoured: GREASE is randomized PER
+  // CONNECTION, so a brand-new partition's first handshake is exactly the
+  // non-comparable one the header says to throw away.
+  const capture = async (suffix) => {
+    const probe = await startProbe({ port: 0 });
+    const url = `https://127.0.0.1:${probe.port}/probe`;
+    const sess = session.fromPartition('persist:' + partition + '-' + suffix);
+    sess.setCertificateVerifyProc((req, cb) => cb(0));
+    if (sslConfig) sess.setSSLConfig(sslConfig);
+
     const win = track(new BrowserWindow({
       show: false,
       webPreferences: { nodeIntegration: false, contextIsolation: true, session: sess },
@@ -71,29 +99,36 @@ async function measure(partition, sslConfig, url, probe) {
     const loadP = win.loadURL(url).catch(() => null);
     const s = await sampleP;
     await Promise.race([loadP, new Promise((r) => setTimeout(r, 3000))]);
+    // The window is deliberately NOT destroyed here. Destroying it crashed the
+    // process (0xC0000005) partway through the second profile: this Electron
+    // tears down a BrowserWindow that still owns a live TLS connection badly.
+    // Windows stay in liveWindows and are destroyed once, at the end.
+    await probe.close();
     return { win, s };
   };
 
-  // Warm-up: discarded. GREASE is randomized, so the first ClientHello of a
-  // session is not comparable to anything.
-  await capture();
+  // Warm-up: discarded. GREASE is randomized per connection, so the first
+  // ClientHello of a fresh session is not comparable to anything.
+  await capture('warm', null);
 
-  // Measured handshake: this is the comparable, stable sample.
-  const { s } = await capture();
+  // Measured handshake: a separate session, so a separate connection and a
+  // real ClientHello. Distinct from the warm-up rather than a re-read of it.
+  const { s } = await capture('measured', null);
   return s;
 }
 
 (async () => {
   try {
     await app.whenReady();
-    const probe = await startProbe({ port: 0 });
-    const url = `https://127.0.0.1:${probe.port}/probe`;
+    // No shared probe any more: measure() starts one per profile so the
+    // warm-up and measured handshakes cannot contaminate each other (see the
+    // comment in measure()). The fpExtensionOrder case at the bottom starts its
+    // own for the same reason.
 
     // ---- Profile 0: no config (must be the native Chromium baseline) ------
-    const base = await measure('tlsctl-base', null, url, probe);
+    const base = await measure('tlsctl-base', null);
     if (!base || !base.fp || base.fp.error) {
       check('tls-ctl: baseline captured', false, base ? String(base.fp.error) : 'none');
-      await probe.close();
       app.exit(1);
       return;
     }
@@ -127,7 +162,7 @@ async function measure(partition, sslConfig, url, probe) {
       maxVersion: 'tls1.3',
       fpCipherList: 'ECDHE-RSA-AES128-GCM-SHA256',
     };
-    const p1 = await measure('tlsctl-cipher', cipherProfile, url, probe);
+    const p1 = await measure('tlsctl-cipher', cipherProfile);
     if (p1 && p1.fp && !p1.fp.error) {
       const f = p1.fp;
       console.log('\n--- profile: restricted cipher list ---');
@@ -174,7 +209,7 @@ async function measure(partition, sslConfig, url, probe) {
       fpGreaseEnabled: false,
       fpGreaseSigalgsEnabled: false,
     };
-    const p2 = await measure('tlsctl-nogrease', noGrease, url, probe);
+    const p2 = await measure('tlsctl-nogrease', noGrease);
     if (p2 && p2.fp && !p2.fp.error) {
       const f = p2.fp;
       console.log('\n--- profile: GREASE disabled ---');
@@ -205,7 +240,7 @@ async function measure(partition, sslConfig, url, probe) {
       maxVersion: 'tls1.3',
       fpOmitSessionTicket: true,
     };
-    const p3 = await measure('tlsctl-noticket', noTicket, url, probe);
+    const p3 = await measure('tlsctl-noticket', noTicket);
     if (p3 && p3.fp && !p3.fp.error) {
       const f = p3.fp;
       console.log('\n--- profile: session_ticket omitted ---');
@@ -231,7 +266,7 @@ async function measure(partition, sslConfig, url, probe) {
       maxVersion: 'tls1.3',
       fpAdvertisedVersionMax: 0x0303,  // TLS 1.2
     };
-    const p4 = await measure('tlsctl-cap12', cap12, url, probe);
+    const p4 = await measure('tlsctl-cap12', cap12);
     if (p4 && p4.fp && !p4.fp.error) {
       const f = p4.fp;
       console.log('\n--- profile: advertised version capped at TLS 1.2 ---');
@@ -280,7 +315,7 @@ async function measure(partition, sslConfig, url, probe) {
       const sampleP = orderProbe.waitForSample(10000).catch(() => null);
       win.loadURL(orderUrl).catch(() => null);
       const s = await sampleP;
-      win.destroy();
+      destroyTracked(win);
       // If a ClientHello arrived anyway, the setting was silently ignored.
       orderRejected = (s === null);
     } catch (e) {
@@ -292,7 +327,6 @@ async function measure(partition, sslConfig, url, probe) {
       orderRejected === true,
       orderRejected ? 'no ClientHello emitted (correct)' : 'a ClientHello was sent anyway');
 
-    await probe.close();
     await closeAllWindows();
     console.log('');
     console.log(fail === 0 ? 'PASS: ' + pass + ' checks' : 'FAIL: ' + fail + ' of ' + (pass + fail) + ' checks');

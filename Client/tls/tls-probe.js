@@ -159,6 +159,27 @@ function startProbe(opts = {}) {
           openSockets.clear();
           setTimeout(fin, 1500).unref();
         }),
+        // Returns the most recent sample IMMEDIATELY if one has already
+        // arrived - it does not wait for a new one. That is the right
+        // primitive for "give me the ClientHello for this load", but it has a
+        // trap worth stating plainly:
+        //
+        // It silently defeats any attempt to DISCARD a warm-up handshake. The
+        // second call finds the warm-up sample still queued and hands back
+        // that SAME ClientHello, so nothing is ever discarded.
+        //
+        // test-tls-control.js hit exactly this. Its header said "discard the
+        // first handshake, GREASE is randomized", while both its samples were
+        // the first one - so every profile was judged on the one handshake the
+        // header says is not comparable, and it failed intermittently whenever
+        // GREASE landed in the advertised-version list. (An earlier variant of
+        // this function took a `sinceTs` to wait for a strictly newer sample;
+        // it was removed because the real fix was a fresh session partition per
+        // capture, after which no caller passed it.)
+        //
+        // The safe pattern is therefore a DEDICATED probe per measurement, not
+        // a shared one - which is what test-tls-control.js now does, and what
+        // its fpExtensionOrder case already did for the same reason.
         waitForSample: (timeoutMs = 15000) =>
           new Promise((res, rej) => {
             if (samples.length) return res(samples[samples.length - 1]);
