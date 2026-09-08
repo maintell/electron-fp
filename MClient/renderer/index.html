@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>Electron FP Browser</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Top bar: group bar + tab bar + address bar (full width) -->
+  <div id="top-bar">
+    <div id="group-bar" title="Profile groups (top level)">
+      <div id="groups-container"></div>
+      <button id="new-group-btn" title="New profile group (Ctrl+G)">+ Profile</button>
+    </div>
+    <div id="tab-bar" title="Tabs in the active group">
+      <span id="tab-bar-label" title="Sub-tabs of the active group">Tabs</span>
+      <div id="tabs-container"></div>
+      <button id="new-tab-btn" title="New Tab (Ctrl+T)">+</button>
+      <div id="window-controls">
+        <button id="btn-minimize" class="wc-btn" title="Minimize">&#x2014;</button>
+        <button id="btn-maximize" class="wc-btn" title="Maximize">&#x25A1;</button>
+        <button id="btn-close" class="wc-btn wc-close" title="Close">&#x2715;</button>
+      </div>
+    </div>
+    <div id="address-bar">
+      <button id="btn-back" class="nav-btn" title="Back">&#x25C0;</button>
+      <button id="btn-forward" class="nav-btn" title="Forward">&#x25B6;</button>
+      <button id="btn-reload" class="nav-btn" title="Reload">&#x21BB;</button>
+      <input type="text" id="url-input" placeholder="Enter URL or search..." spellcheck="false" />
+      <button id="btn-go" class="nav-btn nav-go" title="Go">&#x23CE;</button>
+      <button id="btn-devtools" class="nav-btn" title="DevTools (F12)">&#x2699;</button>
+      <button id="btn-profile" class="nav-btn" title="Toggle fingerprint panel (F10)">&#x1F3AE;</button>
+    </div>
+  </div>
+
+  <!-- Main row: web content (left) + fingerprint panel (right column) -->
+  <div id="main-row">
+    <!-- BrowserView is positioned over this area via setBounds -->
+    <div id="content-area"></div>
+
+    <!-- Fingerprint Config Panel: a real layout column, not a floating overlay -->
+    <div id="fp-panel">
+      <div id="fp-panel-header">
+        <h3>Fingerprint <span id="fp-tab-indicator">Tab: -</span></h3>
+        <button id="fp-panel-close" title="Hide panel (F10)">&times;</button>
+      </div>
+      <div id="fp-panel-body">
+        <!-- Profile selector -->
+        <div class="fp-section">
+          <label>Profile</label>
+          <div class="fp-row">
+            <select id="fp-profile-select"></select>
+            <button id="fp-apply-profile" class="fp-btn">Apply</button>
+            <button id="fp-randomize" class="fp-btn fp-btn-accent">Randomize</button>
+          </div>
+        </div>
+
+        <!-- Profile management -->
+        <div class="fp-section">
+          <label>Manage Profiles</label>
+          <div class="fp-row">
+            <button id="fp-new-profile" class="fp-btn">+ New</button>
+            <button id="fp-save-profile" class="fp-btn">Save Current</button>
+            <button id="fp-delete-profile" class="fp-btn fp-btn-danger">Delete</button>
+            <button id="fp-export-profile" class="fp-btn">Export</button>
+            <label class="fp-btn fp-btn-file">
+              Import
+              <input type="file" id="fp-import-file" accept=".json" style="display:none" />
+            </label>
+          </div>
+        </div>
+
+        <!-- User-Agent: a client-level (Electron) surface, NOT one of the
+             kernel's 63 keys. It lives beside `fingerprint` in a profile
+             because fpNormalizeConfig() would silently drop it if nested. -->
+        <div class="fp-section fp-ua">
+          <label>User-Agent <span class="fp-ua-tag">client-level</span></label>
+          <select id="fp-ua-preset" title="Apply a preset UA"></select>
+          <textarea id="fp-ua-input" rows="3" spellcheck="false"
+                    placeholder="Empty = native UA (exposes Electron/…)"></textarea>
+          <div class="fp-row">
+            <button id="fp-ua-apply" class="fp-btn fp-btn-primary">Apply UA</button>
+            <button id="fp-ua-reset" class="fp-btn">Reset to Native</button>
+          </div>
+          <div class="fp-ua-note">
+            Covers <code>navigator.userAgent</code> and the HTTP header.
+            <b>Not covered:</b> <code>navigator.platform</code> (stays
+            <code>Win32</code>), <code>Sec-CH-UA</code> client hints, TLS/JA3/JA4.
+          </div>
+        </div>
+
+        <!-- Sidebar tabs: Config vs Self-test.
+             The self-test runs the shared probe (Client/fp-probe.js - the same
+             one smoke.js uses) inside the LIVE tab and compares each surface
+             against that tab's OWN config, so it answers "did MY settings
+             apply?" rather than "did some fixed set of values apply?". -->
+        <div class="fp-tabs">
+          <button id="fp-tab-config" class="fp-tab fp-tab-active">Config</button>
+          <button id="fp-tab-selftest" class="fp-tab">Self-test</button>
+        </div>
+
+        <!-- ===== Self-test pane (hidden until selected) ===== -->
+        <div id="fp-pane-selftest" class="fp-selftest" hidden>
+          <div class="fp-section">
+            <div class="fp-row">
+              <button id="fp-selftest-run" class="fp-btn fp-btn-primary">Run Self-test</button>
+              <span id="fp-selftest-summary" class="fp-selftest-summary"></span>
+            </div>
+            <div class="fp-selftest-note">
+              Probes the <b>current tab</b> and checks every surface you have
+              configured. Keys you have not set are reported
+              <span class="fp-badge fp-badge-skip">skip</span> &mdash; they are
+              not failures.
+            </div>
+            <label class="fp-checkbox-row">
+              <input type="checkbox" id="fp-selftest-show-skipped" />
+              Show skipped surfaces
+            </label>
+          </div>
+          <div id="fp-selftest-results"></div>
+        </div>
+
+        <!-- ===== Config pane ================================ -->
+        <div id="fp-pane-config">
+        <!-- Grouped key sections (built from the kernel schema, 63 keys / 15 groups) -->
+        <div class="fp-section fp-groups">
+          <div id="fp-groups-summary"></div>
+          <div id="fp-groups"></div>
+        </div>
+
+        <!-- Config editor -->
+        <div class="fp-section fp-editor">
+          <label>Configuration (JSON)</label>
+          <textarea id="fp-json-editor" rows="18" spellcheck="false"></textarea>
+        </div>
+
+        <!-- Apply buttons -->
+        <div class="fp-section fp-actions">
+          <button id="fp-apply-config" class="fp-btn fp-btn-primary">Apply to Current Tab</button>
+          <span id="fp-status"></span>
+        </div>
+        </div><!-- /fp-pane-config -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Status Bar -->
+  <div id="status-bar">
+    <span id="status-profile">Profile: Default</span>
+    <span id="status-info"></span>
+    <span id="status-version"></span>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

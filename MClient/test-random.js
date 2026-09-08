@@ -1,0 +1,351 @@
+#!/usr/bin/env node
+// Verify generateRandomProfile() emits a coherent, schema-valid config.
+"use strict";
+const schema = require("./fp-schema.js");
+const fs = require("fs");
+const path = require("path");
+
+// Resolve main.js against THIS file, not the process CWD. require() is already
+// script-relative, but readFileSync() is CWD-relative, so running this from
+// anywhere but Client/ would silently read the wrong main.js (or throw ENOENT)
+// and the checks below would validate a file that is not the real one.
+const src = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
+const start = src.indexOf("function generateRandomProfile()");
+const end = src.indexOf("// --- App Lifecycle ---");
+const fnSrc = src.slice(start, end);
+
+// The generator is extracted as source text, so ONLY the names passed below are
+// in scope inside it. Anything generateRandomProfile() references from the
+// module scope must be injected here or it throws ReferenceError at call time
+// (which is exactly what happened when the randomizer gained a UA: the test
+// silently produced zero checks instead of failing loudly).
+const mod = new Function(
+  "fpDefaultConfig", "FP_KEY_NAMES", "fpRandomUserAgent", "fpPlatformForUserAgent",
+  "fpVendorForUserAgent", "fpPixelRatioForUserAgent", "fpLanguagesForUserAgent",
+  fnSrc + "; return generateRandomProfile;"
+)(schema.fpDefaultConfig, schema.FP_KEY_NAMES, schema.fpRandomUserAgent,
+  schema.fpPlatformForUserAgent, schema.fpVendorForUserAgent,
+  schema.fpPixelRatioForUserAgent, schema.fpLanguagesForUserAgent);
+
+// Guard against the silent-zero-checks failure above: a ReferenceError thrown
+// here would otherwise abort before any check ran, and a run with 0 checks must
+// never be reported as green.
+if (typeof mod !== "function") {
+  console.log("FAIL  could not extract generateRandomProfile from main.js");
+  process.exit(1);
+}
+
+let pass = 0, fail = 0;
+const check = (n, c, d) => { if (c) { console.log("PASS  " + n + (d ? ": " + d : "")); pass++; } else { console.log("FAIL  " + n + (d ? ": " + d : "")); fail++; } };
+
+// The feature names this adapter can actually expose, and its real limits.
+// Both were captured from a live adapter; the generator must never invent a
+// name or exceed a ceiling, and must never drop below the spec default.
+const WEBGPU_FEATURE_NAMES = [
+  "bgra8unorm-storage", "clip-distances", "core-features-and-limits",
+  "depth-clip-control", "depth32float-stencil8", "dual-source-blending",
+  "float32-blendable", "float32-filterable", "indirect-first-instance",
+  "primitive-index", "rg11b10ufloat-renderable", "shader-f16",
+  "texture-component-swizzle", "texture-compression-bc",
+  "texture-compression-bc-sliced-3d", "texture-formats-tier1",
+  "texture-formats-tier2", "timestamp-query"
+];
+const NATIVE_LIMITS = {
+  maxTextureDimension1D: 16384, maxTextureDimension2D: 16384,
+  maxTextureDimension3D: 2048, maxTextureArrayLayers: 2048,
+  maxBindGroups: 4, maxBindGroupsPlusVertexBuffers: 24,
+  maxBindingsPerBindGroup: 1000, maxDynamicUniformBuffersPerPipelineLayout: 10,
+  maxDynamicStorageBuffersPerPipelineLayout: 8,
+  maxSampledTexturesPerShaderStage: 48, maxSamplersPerShaderStage: 16,
+  maxStorageBuffersPerShaderStage: 16, maxStorageTexturesPerShaderStage: 8,
+  maxUniformBuffersPerShaderStage: 12, maxUniformBufferBindingSize: 65536,
+  maxStorageBufferBindingSize: 2147483644,
+  minUniformBufferOffsetAlignment: 256, minStorageBufferOffsetAlignment: 256,
+  maxVertexBuffers: 8, maxBufferSize: 2147483648, maxVertexAttributes: 30,
+  maxVertexBufferArrayStride: 2048, maxInterStageShaderVariables: 28,
+  maxColorAttachments: 8, maxColorAttachmentBytesPerSample: 128,
+  maxComputeWorkgroupStorageSize: 32768, maxComputeInvocationsPerWorkgroup: 1024,
+  maxComputeWorkgroupSizeX: 1024, maxComputeWorkgroupSizeY: 1024,
+  maxComputeWorkgroupSizeZ: 64, maxComputeWorkgroupsPerDimension: 65535,
+  maxImmediateSize: 64
+};
+// WebGPU spec minimums: a page requesting nothing still receives these, so a
+// limit below them breaks device creation just as surely as exceeding native.
+const SPEC_DEFAULT = {
+  maxTextureDimension1D: 8192, maxTextureDimension2D: 8192,
+  maxTextureDimension3D: 2048, maxTextureArrayLayers: 256,
+  maxBindGroups: 4, maxBindGroupsPlusVertexBuffers: 24,
+  maxBindingsPerBindGroup: 1000, maxDynamicUniformBuffersPerPipelineLayout: 8,
+  maxDynamicStorageBuffersPerPipelineLayout: 4,
+  maxSampledTexturesPerShaderStage: 16, maxSamplersPerShaderStage: 16,
+  maxStorageBuffersPerShaderStage: 8, maxStorageTexturesPerShaderStage: 4,
+  maxUniformBuffersPerShaderStage: 12, maxUniformBufferBindingSize: 65536,
+  maxStorageBufferBindingSize: 134217728,
+  minUniformBufferOffsetAlignment: 256, minStorageBufferOffsetAlignment: 256,
+  maxVertexBuffers: 8, maxBufferSize: 268435456, maxVertexAttributes: 16,
+  maxVertexBufferArrayStride: 2048, maxInterStageShaderVariables: 16,
+  maxColorAttachments: 8, maxColorAttachmentBytesPerSample: 32,
+  maxComputeWorkgroupStorageSize: 16384, maxComputeInvocationsPerWorkgroup: 256,
+  maxComputeWorkgroupSizeX: 256, maxComputeWorkgroupSizeY: 256,
+  maxComputeWorkgroupSizeZ: 64, maxComputeWorkgroupsPerDimension: 65535,
+  maxImmediateSize: 0
+};
+
+const N = 300;
+const bad = [];
+let gpuMismatch = 0, geoMismatch = 0, touchMismatch = 0, strengthBad = 0, levelBad = 0;
+let featUnknown = 0, featDup = 0, featNoCore = 0, featSizeBad = 0;
+let limQuoted = 0, limParse = 0, limOver = 0, limUnder = 0;
+let ipBad = 0, ipInconsistent = 0, fontWhitelistSet = 0, fontCountBad = 0;
+let platformMismatch = 0, platformUnset = 0;
+let vendorMismatch = 0, dprBad = 0, dprMobileMismatch = 0;
+let langsEmpty = 0, langsMalformed = 0;
+const seenGroups = new Set();
+
+for (let i = 0; i < N; i++) {
+  const prof = mod();
+  const fp = prof.fingerprint;
+
+// every Blink key present, none unknown. The TLS plane is checked separately
+// below: it is a different delivery mechanism (setSSLConfig, not
+// --fingerprint-config) and only some keys are set, so holding it to "every key
+// present" would be wrong.
+for (const k of schema.FP_KEY_NAMES) if (!(k in fp)) bad.push(k + " missing");
+const ALL_KEYS = schema.FP_KEY_NAMES.concat(schema.FP_TLS_KEY_NAMES);
+const unknown = Object.keys(fp).filter(k => !ALL_KEYS.includes(k));
+if (unknown.length) bad.push("unknown: " + unknown);
+
+  // cross-API consistency (C17): WebGL vendor must equal WebGPU vendor
+  if (fp.webgl_vendor !== fp.webgpu_vendor) gpuMismatch++;
+
+  // geo must match the configured timezone city
+  const city = { "America/New_York": "40.7128", "America/Chicago": "41.8781", "America/Los_Angeles": "34.0522",
+    "Europe/London": "51.5074", "Europe/Berlin": "52.5200", "Europe/Paris": "48.8566", "Asia/Tokyo": "35.6762",
+    "Asia/Shanghai": "31.2304", "Asia/Kolkata": "19.0760" }[fp.tz_id];
+  if (fp.geo_latitude && city && fp.geo_latitude !== city) geoMismatch++;
+
+  // mobile => touch points > 0, desktop => 0
+  const mobile = fp.screen_width < 500;
+  if (mobile && fp.max_touch_points === 0) touchMismatch++;
+  if (!mobile && fp.max_touch_points > 0) touchMismatch++;
+
+  // audio strength must parse as a float in [0,1]
+  if (fp.audio_data_strength) {
+    const v = parseFloat(fp.audio_data_strength);
+    if (!(v >= 0 && v <= 1)) strengthBad++;
+  }
+  // battery level in [0,1]
+  if (fp.battery_level) {
+    const v = parseFloat(fp.battery_level);
+    if (!(v >= 0 && v <= 1)) levelBad++;
+  }
+
+  schema.fpCoverage(fp).forEach(c => { if (c.active) seenGroups.add(c.id); });
+
+  // ---- guards for the keys that were previously left empty ----
+  // These are cheap static invariants; the kernel round-trip is covered by
+  // test-webgpu.js, which actually instantiates an adapter.
+
+  // webgpu_features is REPLACE: an invented name is dropped by the kernel,
+  // so a name outside the real enum would shrink the set unpredictably.
+  if (fp.webgpu_features) {
+    const feats = fp.webgpu_features.split(",").filter(Boolean);
+    if (new Set(feats).size !== feats.length) featDup++;
+    for (const f of feats) if (WEBGPU_FEATURE_NAMES.indexOf(f) === -1) featUnknown++;
+    if (feats.indexOf("core-features-and-limits") === -1) featNoCore++;
+    if (feats.length < 9 || feats.length > 16) featSizeBad++;
+  }
+
+  // webgpu_limits is MERGE and is bounded on BOTH sides:
+  //   > native  => Dawn rejects device creation, WebGPU breaks entirely
+  //   < spec default => a page asking for the defaults gets rejected too
+  // Quoted keys are fatal: FpConfigString() reads the value as a JSON string
+  // and stops at the first closing quote, so {"k":1} is truncated to "{" and
+  // EVERY limit is silently dropped. This exact bug shipped once already.
+  const lm = fp.webgpu_limits && fp.webgpu_limits.match(/^\{(.*)\}$/);
+  if (lm) {
+    if (/"/.test(fp.webgpu_limits)) limQuoted++;
+    if (!lm[1]) { limParse++; }
+    else {
+      for (const pair of lm[1].split(",")) {
+        const c = pair.indexOf(":");
+        if (c === -1) { limParse++; continue; }
+        const key = pair.slice(0, c).trim();
+        const val = parseInt(pair.slice(c + 1), 10);
+        if (!(key in NATIVE_LIMITS) || !isFinite(val)) { limParse++; continue; }
+        if (val > NATIVE_LIMITS[key]) limOver++;
+        if (SPEC_DEFAULT[key] !== undefined && val < SPEC_DEFAULT[key]) limUnder++;
+      }
+    }
+  } else if (fp.webgpu_limits !== "") {
+    limParse++;
+  }
+
+  // webrtc_ip must be a real 4-octet address, and must not contradict the
+  // network class: a datacentre-style IP claiming 3g (or a carrier IP with a
+  // 300 Mbps downlink) is exactly the mismatch these profiles exist to avoid.
+  if (fp.webrtc_ip) {
+    const p = fp.webrtc_ip.split(".");
+    const oct = p.map(Number);
+    if (p.length !== 4 || oct.some(n => !(n >= 0 && n <= 255))) ipBad++;
+    else {
+      if (oct[3] === 0 || oct[3] === 1 || oct[3] === 255) ipBad++;
+      const mobile = /^(100\.|10\.)/.test(fp.webrtc_ip);
+      const rtt = +fp.net_rtt_ms, down = +fp.net_downlink_mbps;
+      if (mobile && (rtt < 40 || down >= 50)) ipInconsistent++;
+      if (!mobile && (rtt > 60 || down < 5)) ipInconsistent++;
+    }
+  }
+
+  // fonts: 1..3 names. The kernel gives whitelist precedence, so setting both
+  // would silently nullify the blocklist - whitelist must stay empty.
+  if (fp.fonts_whitelist !== "") fontWhitelistSet++;
+  const fonts = fp.fonts_blocklist ? fp.fonts_blocklist.split(",").filter(Boolean) : [];
+  if (fonts.length < 1 || fonts.length > 3) fontCountBad++;
+  for (const f of fonts) if (!f.trim()) fontCountBad++;
+
+  // UA and navigator.platform are separate surfaces with nothing enforcing
+  // agreement. A Mac UA paired with the host's real "Win32" is precisely the
+  // contradiction navigator_platform exists to remove, so the pair must agree.
+  // Checked against the UA that was actually chosen, not a fixed expectation.
+  const wantPlatform = schema.fpPlatformForUserAgent(prof.userAgent);
+  if (fp.navigator_platform !== wantPlatform) platformMismatch++;
+  if (wantPlatform === "") platformUnset++;
+
+  // Keys 61-63. These were the three surfaces an external audit against
+  // browserleaks.com and creepjs found still leaking the host. They are derived
+  // from the UA (not the archetype) precisely so they can never contradict it,
+  // and this asserts that guarantee - the archetype and the UA are drawn from
+  // independent pools, so without the derivation about half of all profiles
+  // came out as "iPhone UA + Google Inc.".
+  const ua = prof.userAgent;
+  const isApple = /Macintosh|iPhone|iPad/.test(ua);
+  const isMobile = /Android|iPhone|iPad/.test(ua);
+
+  const wantVendor = isApple ? "Apple Computer, Inc." : "Google Inc.";
+  if (fp.navigator_vendor !== wantVendor) vendorMismatch++;
+
+  const dpr = parseFloat(fp.device_pixel_ratio);
+  if (!(dpr > 0)) dprBad++;
+  // A mobile UA reporting a desktop ratio of 1 is the contradiction that got
+  // these keys added in the first place.
+  if (isMobile && !(dpr > 1)) dprMobileMismatch++;
+
+  // languages is deliberately left empty by the UA derivation (locale is not
+  // reliably inferable from a UA, and fabricating one is no better than
+  // leaking), so the generator falls back to the archetype list. It must
+  // therefore be non-empty and well-formed.
+  const langs = String(fp.navigator_languages || "");
+  if (!langs) langsEmpty++;
+  else if (!/^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*(,\s*[a-z]{2,3}(-[A-Za-z0-9]{2,8})*)*$/.test(langs)) {
+    langsMalformed++;
+  }
+}
+
+check("schema-complete over " + N + " profiles", bad.length === 0, bad.slice(0, 3).join("; "));
+check("webgpu_features: real names only", featUnknown === 0, featUnknown + " unknown");
+check("webgpu_features: no duplicates", featDup === 0, featDup + " profiles with dupes");
+check("webgpu_features: includes core-features-and-limits", featNoCore === 0, featNoCore + " missing");
+check("webgpu_features: size 9..16", featSizeBad === 0, featSizeBad + " out of range");
+check("webgpu_limits: no quoted keys (FpConfigString truncates)", limQuoted === 0, limQuoted + " quoted");
+check("webgpu_limits: parses", limParse === 0, limParse + " unparseable");
+check("webgpu_limits: never exceeds native (Dawn-safe)", limOver === 0, limOver + " over");
+check("webgpu_limits: never below spec default", limUnder === 0, limUnder + " under");
+check("webrtc_ip: valid non-reserved IPv4", ipBad === 0, ipBad + " bad");
+check("webrtc_ip: consistent with net class", ipInconsistent === 0, ipInconsistent + " inconsistent");
+check("fonts: whitelist stays empty (would nullify blocklist)", fontWhitelistSet === 0, fontWhitelistSet + " set");
+check("fonts_blocklist: 1..3 non-empty names", fontCountBad === 0, fontCountBad + " bad");
+check("webgl/webgpu vendor consistent", gpuMismatch === 0, gpuMismatch + " mismatches");
+check("geo matches timezone", geoMismatch === 0, geoMismatch + " mismatches");
+check("touch points match form factor", touchMismatch === 0, touchMismatch + " mismatches");
+check("audio_data_strength in [0,1]", strengthBad === 0, strengthBad + " bad");
+check("battery_level in [0,1]", levelBad === 0, levelBad + " bad");
+check("navigator_platform agrees with the UA", platformMismatch === 0, platformMismatch + " mismatches");
+check("navigator_platform always set (never Win32 under a Mac UA)", platformUnset === 0, platformUnset + " unset");
+check("navigator_vendor agrees with the UA (no iPhone+Google)", vendorMismatch === 0,
+  vendorMismatch + " contradictions");
+check("device_pixel_ratio is a positive number", dprBad === 0, dprBad + " bad");
+check("device_pixel_ratio > 1 whenever the UA is mobile", dprMobileMismatch === 0,
+  dprMobileMismatch + " mobile profiles at ratio 1");
+check("navigator_languages is set", langsEmpty === 0, langsEmpty + " empty");
+check("navigator_languages is well-formed BCP-47 list", langsMalformed === 0,
+  langsMalformed + " malformed");
+check("randomizer exercises most groups", seenGroups.size >= 12,
+  seenGroups.size + "/" + schema.FP_GROUP_IDS.length + " groups populated");
+
+// NOTE: checking that the ua_* keys are PRESENT would be a tautology.
+// fpDefaultConfig() seeds all 63 keys, so fp always carries them whether or
+// not generateRandomProfile() assigns them - the check can never fail. What is
+// load-bearing is that an explicit value survives normalization, since that is
+// the path every operator override takes. Verified by mutation: deleting the
+// fp.ua_* assignments in main.js leaves a presence-check green, while breaking
+// fpNormalizeConfig turns all three checks below red.
+//
+// Empty is the shipped default and means "derive from the UA"; a non-empty
+// value is what the kernel must honour verbatim, with no reference to the UA
+// (the kernel is a pure function of the config - see test-client-hints.js).
+const uaOverride = schema.fpNormalizeConfig({
+  ua_platform: "Plan9", ua_mobile: "true", ua_brands: "AcmeBrowser=42"
+}).config;
+check("fpNormalizeConfig keeps an explicit ua_platform",
+  uaOverride.ua_platform === "Plan9", JSON.stringify(uaOverride.ua_platform));
+check("fpNormalizeConfig keeps an explicit ua_mobile",
+  uaOverride.ua_mobile === "true", JSON.stringify(uaOverride.ua_mobile));
+check("fpNormalizeConfig keeps an explicit ua_brands",
+  uaOverride.ua_brands === "AcmeBrowser=42", JSON.stringify(uaOverride.ua_brands));
+
+// --- TLS plane coherence ---------------------------------------------------
+// The randomizer picks a UA, so it must pick the TLS shape that goes with it.
+// A Safari UA speaking a GREASEd Chromium ClientHello is the contradiction
+// detection sites flag first, and it is invisible to every page-side check.
+const isWebKitUA = (ua) => /AppleWebKit\/6|Version\/\d+.*Safari/.test(ua) &&
+  !/Chrome|Chromium|Edg|OPR/.test(ua);
+const isFirefoxUA = (ua) => /Firefox\//.test(ua) && !/Seamonkey|Iceweasel/.test(ua);
+
+let tlsMissing = 0, greaseMismatch = 0, ffNoVersion = 0, tlsUnknown = 0;
+let seenWebKit = 0, seenFirefox = 0, seenChromium = 0;
+const TLS_BAD = [];
+for (let i = 0; i < 400; i++) {
+  const r = mod();
+  const fp = r.fingerprint, ua = String(r.userAgent || "");
+  const tlsKeys = Object.keys(fp).filter(k => schema.FP_TLS_KEY_NAMES.includes(k));
+  if (!tlsKeys.length) { tlsMissing++; if (TLS_BAD.length < 3) TLS_BAD.push("no TLS keys"); }
+  for (const k of Object.keys(fp)) {
+    if (/^fp[A-Z]/.test(k) && !schema.FP_TLS_KEY_NAMES.includes(k)) tlsUnknown++;
+  }
+  // Chromium GREASEs (RFC 8701); WebKit and NSS do not.
+  const wantGrease = !(isWebKitUA(ua) || isFirefoxUA(ua));
+  if (fp.fpGreaseEnabled !== wantGrease) {
+    greaseMismatch++;
+    if (TLS_BAD.length < 3) TLS_BAD.push(ua.slice(0, 40) + " grease=" + fp.fpGreaseEnabled);
+  }
+  if (isFirefoxUA(ua)) { seenFirefox++; if (fp.fpAdvertisedVersionMax !== 771) ffNoVersion++; }
+  else if (isWebKitUA(ua)) seenWebKit++;
+  else seenChromium++;
+}
+check("randomizer emits a TLS plane on every profile", tlsMissing === 0,
+  tlsMissing + " of 400 with none" + (TLS_BAD.length ? " e.g. " + TLS_BAD[0] : ""));
+check("randomizer emits only real TLS keys", tlsUnknown === 0, tlsUnknown + " unknown");
+check("GREASE matches the UA's browser family (Chromium yes, WebKit/NSS no)",
+  greaseMismatch === 0, greaseMismatch + " of 400 incoherent");
+check("Firefox UAs advertise TLS 1.2 max (the only way to drop the 1.3 suites)",
+  ffNoVersion === 0, ffNoVersion + " of " + seenFirefox + " Firefox profiles wrong");
+// The randomizer must actually reach all three families, or the checks above
+// are vacuous - they would pass on a generator that only ever emits Chromium.
+check("randomizer exercises Chromium, WebKit and Firefox UAs",
+  seenChromium > 0 && seenWebKit > 0 && seenFirefox > 0,
+  "chromium=" + seenChromium + " webkit=" + seenWebKit + " firefox=" + seenFirefox);
+
+const sample = mod();
+console.log("\nsample: " + sample.name);
+console.log("  active keys: " + schema.FP_KEY_NAMES.filter(k => schema.fpIsActive(k, sample.fingerprint[k])).length + "/" + schema.FP_KEY_NAMES.length);
+console.log("  active TLS:  " + schema.FP_TLS_KEY_NAMES.filter(k => k in sample.fingerprint).length + "/" + schema.FP_TLS_KEY_NAMES.length);
+console.log("  ua: " + String(sample.userAgent).slice(0, 70));
+console.log("  platform: " + sample.fingerprint.navigator_platform);
+console.log("  gpu: " + sample.fingerprint.webgl_vendor + " | " + sample.fingerprint.webgl_renderer);
+console.log("  tz:  " + sample.fingerprint.tz_id + " @ " + sample.fingerprint.geo_latitude + "," + sample.fingerprint.geo_longitude);
+
+console.log("");
+console.log(fail === 0 ? "PASS: randomizer emits coherent " + schema.FP_KEY_NAMES.length + "-key configs"
+                       : "FAIL: " + fail);
+process.exit(fail === 0 ? 0 : 1);

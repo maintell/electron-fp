@@ -62,3 +62,6 @@ spec/fixtures/logo.png
 
 # Opencode plugin working dir (session state, not part of the product)
 .commandcode/
+
+# Packaged MClient binary (493MB build output, reproducible via fixer lane)
+MClient/dist/

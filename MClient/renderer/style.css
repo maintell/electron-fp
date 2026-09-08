@@ -1,0 +1,696 @@
+/* === Reset & Base === */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  color: #e0e0e0;
+  background: #1e1e1e;
+  overflow: hidden;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  user-select: none;
+}
+
+/* === Layout: top bar (full width) / main row (content + panel) / status bar === */
+#top-bar {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  /* tab bar (36) + address bar (36) = 72px */
+}
+#main-row {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-height: 0; /* allow children to shrink */
+}
+#content-area {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+  /* The BrowserView is overlaid here via setBounds; this div is just a placeholder */
+  background: #1e1e1e;
+}
+
+/* === Tab Bar === */
+#tab-bar {
+  display: flex;
+  align-items: flex-end;
+  background: #2d2d2d;
+  height: 36px;
+  padding: 0 8px;
+  -webkit-app-region: drag;
+  flex-shrink: 0;
+}
+
+#tabs-container {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  flex: 1;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-app-region: no-drag;
+}
+#tabs-container::-webkit-scrollbar { display: none; }
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  background: #383838;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+  max-width: 200px;
+  min-width: 80px;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.tab:hover { background: #404040; }
+.tab.active {
+  background: #1e1e1e;
+  height: 32px;
+}
+
+.tab-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.tab-profile-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #666;
+  flex-shrink: 0;
+}
+
+.tab-close {
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: #888;
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 14px;
+  line-height: 18px;
+  text-align: center;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+.tab-close:hover { background: #555; color: #fff; }
+
+#new-tab-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: #aaa;
+  font-size: 20px;
+  cursor: pointer;
+  border-radius: 4px;
+  margin-bottom: 2px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+#new-tab-btn:hover { background: #444; color: #fff; }
+
+/* Window controls */
+#window-controls {
+  display: flex;
+  gap: 0;
+  margin-left: 8px;
+  -webkit-app-region: no-drag;
+}
+.wc-btn {
+  width: 36px;
+  height: 30px;
+  border: none;
+  background: transparent;
+  color: #888;
+  font-size: 14px;
+  cursor: pointer;
+}
+.wc-btn:hover { background: #444; color: #fff; }
+.wc-close:hover { background: #e81123; color: #fff; }
+
+/* === Address Bar === */
+#address-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 36px;
+  padding: 0 8px;
+  background: #2d2d2d;
+  border-bottom: 1px solid #222;
+  flex-shrink: 0;
+}
+
+.nav-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: #aaa;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.nav-btn:hover { background: #444; color: #fff; }
+
+#url-input {
+  flex: 1;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid #444;
+  border-radius: 14px;
+  background: #383838;
+  color: #e0e0e0;
+  font-size: 13px;
+  outline: none;
+}
+#url-input:focus { border-color: #0078d4; background: #2a2a2a; }
+
+.nav-go { font-size: 15px; }
+#btn-profile.active { background: #0078d4; color: #fff; }
+
+/* === Fingerprint Panel (right layout column, not floating) === */
+#fp-panel {
+  flex-shrink: 0;
+  width: 420px;
+  height: 100%;
+  background: #252526;
+  border-left: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#fp-panel.collapsed { display: none; }
+
+#fp-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #333;
+}
+#fp-panel-header h3 { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+#fp-tab-indicator {
+  font-size: 11px;
+  font-weight: 500;
+  color: #4ec9ff;
+  background: #1e1e1e;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #3a3a3a;
+}
+#fp-panel-close {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: #888;
+  font-size: 18px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+#fp-panel-close:hover { background: #444; color: #fff; }
+
+#fp-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+}
+
+.fp-section {
+  margin-bottom: 14px;
+}
+.fp-section label {
+  display: block;
+  font-size: 11px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+
+.fp-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.fp-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid #555;
+  border-radius: 4px;
+  background: #333;
+  color: #ccc;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.fp-btn:hover { background: #444; border-color: #666; }
+.fp-btn-primary { background: #0078d4; border-color: #0078d4; color: #fff; }
+.fp-btn-primary:hover { background: #1a8ce6; }
+.fp-btn-accent { background: #4caf50; border-color: #4caf50; color: #fff; }
+.fp-btn-accent:hover { background: #5cbf60; }
+.fp-btn-danger { background: #c62828; border-color: #c62828; color: #fff; }
+.fp-btn-danger:hover { background: #d63030; }
+.fp-btn-file { display: inline-flex; align-items: center; cursor: pointer; }
+
+#fp-profile-select {
+  flex: 1;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid #555;
+  border-radius: 4px;
+  background: #333;
+  color: #ccc;
+  font-size: 12px;
+}
+
+.fp-editor textarea {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: 'Consolas', 'Fira Code', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+}
+.fp-editor textarea:focus { border-color: #0078d4; }
+
+.fp-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#fp-status {
+  font-size: 12px;
+  color: #4caf50;
+}
+
+/* === Fingerprint grouped sections (63 keys / 15 functional groups) === */
+.fp-groups { padding: 0; }
+#fp-groups-summary { padding: 8px 16px; border-bottom: 1px solid #333; }
+.fp-cov { font-size: 11px; color: #9aa0a6; }
+.fp-cov b { color: #4ec9ff; }
+.fp-unknown {
+  font-size: 11px; color: #f4a742; margin-top: 4px;
+  word-break: break-word;
+}
+
+#fp-groups { overflow-y: auto; }
+.fp-group { border-bottom: 1px solid #2d2d2d; }
+.fp-group-head {
+  display: block; width: 100%; text-align: left;
+  background: #2a2a2b; border: 0; border-bottom: 1px solid #222;
+  color: #c8c8c8; font-size: 12px; font-weight: 600;
+  padding: 7px 16px; cursor: pointer; font-family: inherit;
+}
+.fp-group-head:hover { background: #333; color: #fff; }
+.fp-group-head.has-active { color: #4ec9ff; }
+.fp-group-body { padding: 8px 16px 10px; display: grid; gap: 5px; }
+
+.fp-field { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 8px; }
+.fp-field label {
+  font-size: 11px; color: #9aa0a6; font-family: ui-monospace, Menlo, Consolas, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fp-field input {
+  height: 24px; padding: 0 7px; background: #1e1e1e;
+  border: 1px solid #3a3a3a; border-radius: 3px;
+  color: #e0e0e0; font-size: 11px; outline: none; min-width: 0;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+.fp-field input:focus { border-color: #0078d4; }
+.fp-field input.active { border-color: #4ec9ff; color: #4ec9ff; }
+
+/* === TLS plane =============================================================
+   These 9 keys are delivered by session.setSSLConfig(), not
+   --fingerprint-config, and they are invisible to page JavaScript. They sat as
+   the 16th and last section, below the fold, with no styling at all - the
+   fp-field-tls class was applied in JS but had no CSS rule, so a user
+   scrolling the Config pane had nothing to tell them the section existed.
+   Give the plane a distinct accent so it reads as a separate layer. */
+.fp-group-tls { border-left: 3px solid #f4a742; }
+.fp-group-tls > .fp-group-head {
+  background: #332b1e; color: #f4a742;
+}
+.fp-group-tls > .fp-group-head:hover { background: #40351f; color: #ffc266; }
+.fp-field-tls label { color: #c9a26a; }
+.fp-field-tls input { border-color: #5a4a2e; }
+.fp-field-tls input.active { border-color: #f4a742; color: #f4a742; }
+
+/* === HTTP/2 plane ==========================================================
+   A THIRD delivery plane, not three more TLS keys. It travels as a
+   fromPartition() option and is frozen when the NetworkContext is built, so it
+   cannot change on an open tab - which is why it leads the pane and is marked
+   in its own colour: the constraint is the whole story, and a section that
+   looks like the others would hide it. */
+.fp-group-h2 { border-left: 3px solid #4ec9b0; }
+.fp-group-h2 > .fp-group-head {
+  background: #1e3330; color: #4ec9b0;
+}
+.fp-group-h2 > .fp-group-head:hover { background: #24403c; color: #7ee0ca; }
+.fp-field-h2 label { color: #6fbfae; }
+.fp-field-h2 input { border-color: #2e5a4a; }
+.fp-field-h2 input.active { border-color: #4ec9b0; color: #4ec9b0; }
+/* A greaseFrame value that is not JSON: refuse it in place, because storing it
+   would only fail later in fpH2Validate() with no visible cause. */
+.fp-field input.fp-field-bad { border-color: #e05252; color: #e05252; }
+
+/* === Group bar (top-level profile groups, one row above the sub-tab row) ===
+   Derived from .tab so the two levels read as one family: .group reuses the
+   pill shape + hover + .tab-profile-dot/dot-* colors, but is bolder/larger
+   with an accent top border for the active group — visually distinct from
+   .tab.active (which uses a flat background lift). The sub-tab row stays
+   visually subordinate (slightly smaller tabs). */
+#group-bar {
+  display: flex;
+  align-items: flex-end;
+  background: #1f1f1f; /* one shade deeper than #tab-bar (#2d2d2d) */
+  min-height: 38px;
+  padding: 4px 8px 0;
+  -webkit-app-region: drag;
+  flex-shrink: 0;
+  border-bottom: 1px solid #161616;
+}
+#groups-container {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  flex: 1;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-app-region: no-drag;
+}
+#groups-container::-webkit-scrollbar { display: none; }
+.group {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px;
+  background: #2a2a2a;
+  border-radius: 6px 6px 0 0;
+  border-top: 2px solid transparent;
+  cursor: pointer;
+  max-width: 220px;
+  min-width: 90px;
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: #d5d5d5;
+  transition: background 0.15s, border-color 0.15s;
+}
+.group:hover { background: #333; }
+.group.active {
+  background: #2d2d2d;
+  border-top-color: #0078d4;
+  color: #fff;
+  height: 34px;
+}
+.group-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-count {
+  font-size: 10px;
+  font-weight: 600;
+  color: #999;
+  background: #1e1e1e;
+  border: 1px solid #3a3a3a;
+  border-radius: 8px;
+  padding: 0 6px;
+  line-height: 16px;
+  flex-shrink: 0;
+}
+.group.active .group-count { color: #4ec9ff; border-color: #2d5a8a; }
+.group-close {
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: #888;
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 14px;
+  line-height: 18px;
+  text-align: center;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+.group-close:hover { background: #555; color: #fff; }
+#new-group-btn {
+  height: 28px;
+  padding: 0 10px;
+  margin: 0 4px 4px 6px;
+  border: 1px dashed #555;
+  background: transparent;
+  color: #aaa;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  -webkit-app-region: no-drag;
+}
+#new-group-btn:hover { background: #333; color: #fff; border-color: #0078d4; }
+/* Sub-tab row stays subordinate to the group row above it. */
+#tab-bar-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #777;
+  padding: 0 8px 8px 0;
+  flex-shrink: 0;
+}
+#tab-bar .tab {
+  height: 28px;
+  font-size: 12px;
+  opacity: 0.95;
+}
+#tab-bar .tab.active { height: 30px; }
+
+/* === Status Bar === */
+#status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 22px;
+  padding: 0 10px;
+  background: #007acc;
+  color: #fff;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+#status-info { flex: 1; text-align: center; }
+
+/* === Profile dot colors === */
+.dot-default { background: #666; }
+.dot-win10 { background: #0078d4; }
+.dot-macos { background: #a2aaad; }
+.dot-linux { background: #f57900; }
+.dot-mobile { background: #4caf50; }
+.dot-random { background: #e91e63; }
+
+/* Scrollbar for panel */
+#fp-panel-body::-webkit-scrollbar { width: 6px; }
+#fp-panel-body::-webkit-scrollbar-track { background: transparent; }
+#fp-panel-body::-webkit-scrollbar-thumb { background: #555; border-radius: 3px; }
+
+/* === User-Agent section (client-level surface, not a kernel key) === */
+.fp-ua textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  resize: vertical;
+}
+.fp-ua select {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+}
+.fp-ua-tag {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #2d5a8a;
+  color: #cfe6ff;
+  margin-left: 6px;
+  font-weight: normal;
+}
+.fp-ua-note {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #999;
+}
+.fp-ua-note code {
+  background: #2a2a2a;
+  padding: 0 3px;
+  border-radius: 2px;
+}
+
+/* === Sidebar tabs: Config / Self-test === */
+.fp-tabs {
+  display: flex;
+  border-bottom: 1px solid #333;
+  flex: 0 0 auto;
+}
+.fp-tab {
+  flex: 1;
+  padding: 9px 8px;
+  background: #1e1e1e;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #9aa0a6;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.fp-tab:hover { background: #252525; color: #e8eaed; }
+.fp-tab-active {
+  color: #4ec9ff;
+  border-bottom-color: #4ec9ff;
+  background: #222;
+}
+
+/* === Self-test pane === */
+.fp-selftest { overflow-y: auto; }
+.fp-selftest-summary { font-size: 12px; margin-left: 8px; }
+.fp-selftest-note {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: #999;
+}
+.fp-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: #9aa0a6;
+  cursor: pointer;
+}
+.fp-selftest-empty {
+  padding: 16px;
+  font-size: 12px;
+  color: #9aa0a6;
+  text-align: center;
+  line-height: 1.6;
+}
+.fp-selftest-error {
+  margin: 12px;
+  padding: 10px;
+  border: 1px solid #5a2b2b;
+  border-radius: 3px;
+  background: #2a1a1a;
+  color: #f48771;
+  font-size: 11px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+/* Verdict badges. skip is deliberately grey rather than green: an unconfigured
+   key was never checked, and painting it as a success would let a default
+   profile read as all-clear. */
+.fp-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  vertical-align: middle;
+}
+.fp-badge-pass  { background: #1e3a24; color: #4caf50; }
+.fp-badge-fail  { background: #3a1e1e; color: #f48771; }
+.fp-badge-skip  { background: #2a2a2a; color: #9aa0a6; }
+.fp-badge-error { background: #3a2e1e; color: #f4a742; }
+/* Unknown: applied but not judgeable from one reading. Deliberately distinct
+   from skip (never looked) and from pass (confirmed). */
+.fp-badge-unknown { background: #1e2a3a; color: #4fc3f7; }
+
+/* Group headings, mirroring the Config pane's fp-group sections. */
+.fp-st-group { border-bottom: 1px solid #333; }
+.fp-st-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  background: #1e1e1e;
+  color: #e8eaed;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.fp-st-group-count {
+  margin-left: auto;
+  color: #9aa0a6;
+  font-weight: 400;
+}
+
+.fp-st-row {
+  padding: 7px 16px;
+  border-bottom: 1px solid #2a2a2a;
+  font-size: 11px;
+}
+.fp-st-row:hover { background: #232323; }
+.fp-st-fail  { background: #241616; }
+.fp-st-error { background: #241f14; }
+.fp-st-unknown { background: #16222c; }
+
+.fp-st-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.fp-st-key {
+  font-family: Consolas, 'Courier New', monospace;
+  color: #e8eaed;
+  font-weight: 600;
+}
+.fp-st-expected { color: #9aa0a6; font-family: Consolas, monospace; }
+.fp-st-arrow    { color: #666; }
+.fp-st-got      { color: #4ec9ff; font-family: Consolas, monospace; word-break: break-all; }
+.fp-st-reason   { color: #777; font-style: italic; }
+/* The explanation under a failure is the part that makes this actionable, so
+   it must not be clipped: these are the known trap messages. */
+.fp-st-hint {
+  margin-top: 5px;
+  padding-left: 2px;
+  color: #f4a742;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: normal;
+}

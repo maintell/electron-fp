@@ -1,0 +1,14 @@
+{
+  "name": "electron-fp-client",
+  "version": "1.0.0",
+  "description": "Multi-tab fingerprint browser built on electron-fp",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:debug": "electron . --enable-logging",
+    "test": "node run-tests.js",
+    "test:one": "node run-tests.js"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
