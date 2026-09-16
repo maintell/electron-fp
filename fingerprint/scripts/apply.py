@@ -108,6 +108,12 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Apply fingerprint patch set")
     p.add_argument("--src", default="src", help="Chromium src dir (default: src)")
     p.add_argument("--dry-run", action="store_true", help="check only, do not apply")
+    p.add_argument(
+        "--allow-missing-src",
+        action="store_true",
+        help="exit 0 when the Chromium checkout is absent instead of failing. "
+             "Use only where no src is expected (e.g. a repo-only lint); CI must "
+             "NOT set this, or the dry-run silently verifies nothing.")
     p.add_argument("--patch", default=None,
                    help="apply a single patch instead of the whole set")
     a = p.parse_args()
@@ -131,11 +137,23 @@ def main() -> int:
         cand = (rr / a.src).resolve()
         src = cand if cand.exists() else (pathlib.Path.cwd() / a.src).resolve()
     if not (src / "third_party" / "blink").exists():
-        if not src.exists():
-            print(f"src not found at {src}, skipping (no Chromium checkout)", file=sys.stderr)
+        # Failing loudly by default is deliberate: a dry-run that silently
+        # skips reports success while verifying nothing, which is worse than
+        # no check at all - it was previously read as a passing gate in CI.
+        if a.allow_missing_src:
+            print(f"WARNING: src not usable at {src}; skipping patch check "
+                  f"(--allow-missing-src). NOTHING WAS VERIFIED.",
+                  file=sys.stderr)
             return 0
-        print(f"src at {src} does not look like Chromium (third_party/blink missing), skipping", file=sys.stderr)
-        return 0
+        if not src.exists():
+            print(f"ERROR: src not found at {src}. Point --src at a Chromium "
+                  f"checkout, or pass --allow-missing-src to skip deliberately.",
+                  file=sys.stderr)
+            return 1
+        print(f"ERROR: src at {src} does not look like Chromium "
+              f"(third_party/blink missing). Point --src at a real checkout, or "
+              f"pass --allow-missing-src to skip deliberately.", file=sys.stderr)
+        return 1
 
     print(f"fingerprint patch set: {mode} ({len(patches)} file(s))")
     for patch in patches:

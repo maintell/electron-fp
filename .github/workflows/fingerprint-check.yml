@@ -29,5 +29,12 @@ jobs:
           fetch-depth: 0
       - name: Static fingerprint patch check (56 keys, isolation, hunks)
         run: python3 fingerprint/scripts/check.py
-      - name: Fingerprint patch dry-run (no Chromium checkout → graceful skip)
-        run: python3 fingerprint/scripts/apply.py --dry-run
+
+      # NOTE: the dry-run below verifies NOTHING on a runner without a Chromium
+      # checkout - apply.py needs src/third_party/blink (~100GB, 30-60min gclient
+      # sync) to test whether hunks actually apply. --allow-missing-src makes the
+      # skip loud and deliberate rather than a silent false pass. Real apply
+      # coverage lives in fork-release.yml's fingerprint-patch job, which runs
+      # against a real checkout.
+      - name: "Fingerprint patch dry-run (no checkout - explicit no-op)"
+        run: python3 fingerprint/scripts/apply.py --dry-run --allow-missing-src
