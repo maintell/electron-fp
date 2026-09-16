@@ -180,29 +180,10 @@ index 26c0a088cc1ab..4b1031a7dfdd6 100644
    return MakeGarbageCollected<WebGLShaderPrecisionFormat>(range[0], range[1],
                                                            precision);
  }
-@@ -4533,6 +4613,44 @@ WebGLRenderingContextBase::getSupportedExtensions() {
+@@ -4533,6 +4613,25 @@ WebGLRenderingContextBase::getSupportedExtensions() {
      }
    }
  
-+  // fp: append configured extra extensions.
-+  {
-+    std::string extra = FpConfigString("webgl_extensions");
-+    if (!extra.empty()) {
-+      size_t start = 0;
-+      while (start < extra.size()) {
-+        size_t comma = extra.find(',', start);
-+        std::string name = extra.substr(
-+            start, (comma == std::string::npos ? extra.size() : comma) - start);
-+        if (!name.empty() && !result.Contains(String::FromUtf8(base::as_byte_span(name)))) {
-+          result.push_back(String::FromUtf8(base::as_byte_span(name)));
-+        }
-+        if (comma == std::string::npos)
-+          break;
-+        start = comma + 1;
-+      }
-+    }
-+  }
-+
 +  // fp: append configured extra extensions.
 +  {
 +    std::string extra = FpConfigString("webgl_extensions");
