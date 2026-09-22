@@ -27,7 +27,7 @@ patch introduces. This is deliberate: the previous single marker
 (fp_config_helpers.h exists) was correct for a monolith but would make
 10/20/30 all report "already applied" and silently skip once 00-core ran.
 
-- Exits 0 if src not present (local without sync) so CI without src passes.
+- Absent src exits 1 unless --allow-missing-src, so a no-op cannot read as a pass.
 - Return code pass-through on git failure.
 - Windows path with spaces safe via list args + pathlib.
 - Isolated to fingerprint/; does not touch script/apply_all_patches.py

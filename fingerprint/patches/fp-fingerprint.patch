@@ -349,7 +349,7 @@
 +// 1) --fingerprint-config switch (base64-encoded JSON, Electron per-renderer)
 +// 2) FP_CONFIG_DATA env var (JSON content, sandbox-safe)
 +// 3) FP_CONFIG JSON file
-+// 4) FP_<KEY> env vars (per-key fallback in FpConfigInt/String).
++// 4) FP_<key> env vars (per-key fallback: FpConfigInt/Int64 only, NOT String).
 +
 +#ifndef THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_FP_CONFIG_HELPERS_H_
 +#define THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_FP_CONFIG_HELPERS_H_
@@ -383,7 +383,7 @@
 +// 1) --fingerprint-config switch (base64-encoded JSON, Electron per-renderer)
 +// 2) FP_CONFIG_DATA env (JSON content, sandbox-safe)
 +// 3) FP_CONFIG file (path via env)
-+// 4) FP_* env fallbacks are handled per-key in FpConfigInt/String/Int64.
++// 4) FP_<key> env fallback exists in FpConfigInt/Int64, not in FpConfigString.
 +inline std::string FpConfigContent() {
 +  // 1. Command-line switch (Electron per-Renderer) -- highest priority.
 +  if (auto* cmd = base::CommandLine::ForCurrentProcess()) {
