@@ -13,7 +13,7 @@
 // actually opening a tab from a preset, and measuring that tab's own session,
 // exposed it. So this test does exactly that, through window.api - the same
 // surface the renderer uses.
-const { app, session, BrowserWindow } = require('electron');
+const { app, BrowserWindow } = require('electron');
 const path = require('path');
 const { captureClientHello } = require('./tls-probe');
 
@@ -36,7 +36,9 @@ const EXPECT = {
 
 app.whenReady().then(async () => {
   const keep = new BrowserWindow({ show: false, width: 80, height: 80 });
-  require(path.join(__dirname, 'main.js'));
+  // Capture the module so the test can resolve each tab's OWN live session
+  // through the exported tabs map (no partition naming to re-derive).
+  const mainMod = require(path.join(__dirname, 'main.js'));
   await new Promise((r) => setTimeout(r, 4000));
 
   const wins = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed() && w !== keep);
@@ -77,8 +79,12 @@ app.whenReady().then(async () => {
       ck('preset ' + pr.id + ' opens a tab', false, String(created).slice(0, 70));
       continue;
     }
-    // Measure THAT tab's own partition - main.js uses `fp-tab-${tabId}`.
-    const sess = session.fromPartition('fp-tab-' + tabId);
+    // Measure THAT tab's own session - the live one its BrowserView was created
+    // on. MClient shares one partition per GROUP (fp-group-<groupId>), so the
+    // session cannot be re-derived from the tab id.
+    const tab = mainMod.tabs.get(tabId);
+    const sess = tab && tab.view && tab.view.webContents ? tab.view.webContents.session : null;
+    if (!sess) { ck('preset ' + pr.id + ' has a live session', false, 'no session for ' + tabId); continue; }
     const cap = await captureClientHello(sess, 4000);
     if (!cap.ok) { ck('preset ' + pr.id + ' captured', false, cap.error); continue; }
     const h = cap.hello;
@@ -98,7 +104,9 @@ app.whenReady().then(async () => {
   let defId = null;
   try { defId = JSON.parse(def); } catch (e) { /* left null */ }
   if (typeof defId === 'string' && defId) {
-    const cap = await captureClientHello(session.fromPartition('fp-tab-' + defId), 4000);
+    const defTab = mainMod.tabs.get(defId);
+    const defSess = defTab && defTab.view && defTab.view.webContents ? defTab.view.webContents.session : null;
+    const cap = defSess ? await captureClientHello(defSess, 4000) : { ok: false, error: 'no live session' };
     ck('a "default" tab stays native passthrough',
       cap.ok && cap.hello.ciphers.includes('1301') &&
       cap.hello.greaseCipherCount + cap.hello.greaseExtCount > 0,

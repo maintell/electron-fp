@@ -12,6 +12,28 @@ ipcMain.handle("tab:get-fingerprint", () => null);
 ipcMain.handle("profile:list", () => []);
 ipcMain.handle("panel:set-open", () => true);
 
+// Group + agent channels app.js init()/refreshAll() invoke at boot (see the
+// mirror note in test-ui-groups.js): listGroups -> group:list, getActiveGroup ->
+// group:get-active, createGroup -> group:create (init calls it when no group
+// exists), loadGroupProxy -> getGroupProxy, initAgentPanel -> agentGetConfig ->
+// agent:config:get. group:create stores the group so the follow-up group:list
+// returns it, as main.js does. This probe also clicks UA apply/reset, whose
+// applyFingerprintToGroup() prefers setGroupProfile -> group:set-profile.
+// Missing handlers surface as renderer console errors, which this probe
+// asserts against.
+const mirrorGroups = [];
+ipcMain.handle("group:list", () => mirrorGroups);
+ipcMain.handle("group:get-active", () => (mirrorGroups.length ? mirrorGroups[mirrorGroups.length - 1].id : null));
+ipcMain.handle("group:create", (e, profileId) => {
+  const id = "group-" + (mirrorGroups.length + 1);
+  mirrorGroups.push({ id, profileId: profileId || "default", profileName: "Default",
+                      tabIds: [], activeTabId: null, isActive: true });
+  return id;
+});
+ipcMain.handle("group:get-proxy", () => null);
+ipcMain.handle("group:set-profile", () => true);
+ipcMain.handle("agent:config:get", () => ({ baseUrl: "", model: "", hasKey: false }));
+
 // Mirror of main.js's UA handlers (see the note in test-ui-groups.js): app.js
 // init() calls these on boot, and this probe mirrors main.js rather than
 // requiring it, so new channels must be added in both places.

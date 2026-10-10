@@ -33,7 +33,7 @@ Lower the priority **after** launch and wait on the handle. Launching via
 which `start /LOW` does not (see §1.3).
 
 ```powershell
-# . .\Set-LowPriorityTree.ps1   (helper lives at F:\Temp\opencode\Set-LowPriorityTree.ps1)
+# . .\Set-LowPriorityTree.ps1   (helper defined inline in §1.2 below — no external file)
 $p = Start-Process -FilePath "F:\code\src\third_party\ninja\ninja.exe" `
       -ArgumentList '-C','F:\code\src\out\Default','electron' `
       -PassThru -WindowStyle Hidden `
@@ -146,3 +146,20 @@ node shims that spawn ninja/electron as children, so the tree walk covers them.
   never print.
 - **`openssl` must be on `PATH`** (`C:\OpenSSL-Win64\bin`) for probe cert generation.
 - **Do not run `e test` / `e start` unless asked** — leave verification to the user.
+
+---
+
+## 3. Subsystems and test entry points
+
+This fork adds subsystems on top of upstream Electron. Know which runner each needs.
+
+| Subsystem | Path | Tests | Runner |
+|---|---|---|---|
+| Automation runtime | `automation/runtime/`, `automation/electron/` | `automation/test-*.js` (33 files) | **node**, no Electron |
+| MClient AI agent | `MClient/agent/` | `MClient/test-agent-engine.js` | **node** |
+| MClient group proxy | `MClient/main.js` | `MClient/test-group-proxy.js` | Electron (`MClient/run-tests.js`) |
+| Embedded automation panel | `Client/renderer/automation-panel/` | `Client/test-automation-panel*.js` | Electron (`Client/run-tests.js`) |
+| Packaged automation guard | `resources/automation` | `Client/test-packaged-automation.js` | **node** |
+
+- `docs/automation/` (21 docs) mixes **target design** and **current state**. Read the status index at the top of `automation-gap-analysis.md` before trusting a doc: `database.md` / `script-sdk.md` describe designs that are **NOT** built.
+- The fingerprint patch set is 7 split patches under `fingerprint/patches/` (`00`→`60`); `python fingerprint/scripts/check.py` is the static gate (<1s).

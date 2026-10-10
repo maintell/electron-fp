@@ -23,13 +23,24 @@ const fs = require("fs");
 const path = require("path");
 const schema = require("./fp-schema.js");
 
-// run-tests.js moves resources/app aside before running the suite (otherwise
-// electron.exe launches the packaged app instead of the test file), so under
-// the suite this check would always skip. Look at the stashed name too when
-// the real one is absent - that is where the copy actually is mid-run.
-const DEFAULT_APP = "F:/code/src/out/Default/resources/app";
-const APP = process.env.FP_APP_DIR ||
-  (fs.existsSync(DEFAULT_APP) ? DEFAULT_APP : DEFAULT_APP.replace(/app$/, "_app_off"));
+// MClient's packaged copy lives at MClient/dist/resources/app, and that is the
+// default this check runs against — so the suite form (run-tests.js, no
+// FP_APP_DIR in the environment) verifies the real copy instead of skipping.
+//
+// FP_APP_DIR overrides it. The documented form is repo-root relative
+// (MClient/dist/resources/app); resolve that against the repo root so the
+// command works from MClient/ as well as from the repo root. Other relative
+// values keep the old CWD-relative behaviour.
+const MCLIENT_APP = path.join(__dirname, "dist", "resources", "app");
+const REPO_ROOT = path.join(__dirname, "..");
+const _envApp = process.env.FP_APP_DIR;
+const APP = _envApp
+  ? (path.isAbsolute(_envApp)
+      ? _envApp
+      : /^MClient[\\/]/.test(_envApp)
+        ? path.resolve(REPO_ROOT, _envApp)
+        : path.resolve(_envApp))
+  : MCLIENT_APP;
 
 let pass = 0, fail = 0, skip = 0;
 const ck = (n, ok, d) => {
@@ -40,6 +51,19 @@ const sk = (n, why) => { console.log("SKIP  " + n + "  (" + why + ")"); skip++; 
 
 if (!fs.existsSync(APP)) {
   sk("packaged app copy in sync", APP + " not present (not packaged here)");
+  console.log("\nPASS: " + pass + " checks, " + skip + " skipped");
+  process.exit(0);
+}
+
+// Refuse the CLIENT packaged copy outright: comparing MClient source against
+// it is always STALE and never meaningful. The stashed `_app_off` name must be
+// refused too, not just the live `app` name — MClient/run-tests.js moves the
+// Client copy to _app_off for the duration of the suite, and the old regex
+// only matched `app`, so the suite walked the wrong tree and was permanently
+// red. The /out/Default/resources/ prefix keeps MClient's own
+// dist/resources/app (the default above) allowed.
+if (/out[/\\]Default[/\\]resources[/\\](app|_app_off)$/.test(APP)) {
+  sk("packaged app copy in sync", "APP is the Client packaged copy (" + APP + "); pass FP_APP_DIR=MClient/dist/resources/app");
   console.log("\nPASS: " + pass + " checks, " + skip + " skipped");
   process.exit(0);
 }
@@ -56,7 +80,9 @@ const imported = dm[1].split(",").map(s => s.trim()).filter(Boolean);
 
 let copySchema = null;
 try {
-  copySchema = require(path.join(APP, "fp-schema.js"));
+  // Resolve absolutely: FP_APP_DIR may be relative (MClient/dist/...) while
+  // this file runs from the repo root — require() would resolve against CWD.
+  copySchema = require(path.resolve(APP, "fp-schema.js"));
 } catch (e) {
   console.log("FAIL  packaged fp-schema.js loads  (" + e.message + ")");
   console.log("\nFAIL: the packaged copy cannot even be required");
@@ -82,9 +108,24 @@ ck("packaged key count matches source", srcKeys === copyKeys,
 // the packaged app - launching electron.exe would have failed on
 // "Cannot find module './fp-probe'". A required module is exactly the kind of
 // file this check must cover.
+//
+// MClient adds: agent/ (engine/tools/snapshot/llm — main.js requires
+// ./agent/engine at module scope; a missing agent tree breaks boot the same
+// way a missing fp-probe did). browser-profile.js ships alongside (group
+// profile helpers). tls/ is dev-only (clienthello/test-parser) and NOT shipped.
+// The automation panel ships whole: renderer/index.html loads
+// renderer/automation-panel/panel.css, panel.js and panel-templates.js, and the
+// rpa/ fragment ships alongside it. The default app dir is MClient's own
+// packaged copy (MClient/dist/resources/app) — see the APP resolution above.
 const CODE = ["main.js", "fp-schema.js", "fp-probe.js", "tls-probe.js", "layout.js",
+  "browser-profile.js",
   "preload.js",
-  "package.json", "renderer/app.js", "renderer/index.html", "renderer/style.css"];
+  "package.json", "renderer/app.js", "renderer/index.html", "renderer/style.css",
+  "renderer/automation-panel/panel.html", "renderer/automation-panel/panel.js",
+  "renderer/automation-panel/panel.css", "renderer/automation-panel/panel-templates.js",
+  "renderer/automation-panel/rpa/rpa.html", "renderer/automation-panel/rpa/rpa.js",
+  "renderer/automation-panel/rpa/rpa.css",
+  "agent/engine.js", "agent/tools.js", "agent/snapshot.js", "agent/llm.js"];
 for (const f of CODE) {
   const a = path.join(APP, f);
   const b = path.join(__dirname, f);
@@ -107,6 +148,8 @@ for (const f of CODE) {
 //   profiles.json - user-created profiles. The packaged copy is the DATA
 //                   DESTINATION, so it legitimately holds more than the
 //                   source and must never be overwritten from it.
+//   MClient.exe + Electron runtime files (dist/ shell) - the packaged shell,
+//          not the app copy; never compared here.
 const EXPECTED_EXTRA = ["profiles.json"];
 try {
   const present = [];

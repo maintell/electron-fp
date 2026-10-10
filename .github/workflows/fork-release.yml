@@ -113,7 +113,7 @@ jobs:
       - name: Fingerprint static check (56 keys, isolation, hunks)
         run: python3 fingerprint/scripts/check.py
       - name: Fingerprint patch dry-run (no Chromium checkout → graceful skip)
-        run: python3 fingerprint/scripts/apply.py --dry-run
+        run: python3 fingerprint/scripts/apply.py --dry-run --allow-missing-src
 
   # ---- SISO builders (复用上游，无 repo 门禁，纯 ubuntu-latest 即可) ----
   build-siso-macos:

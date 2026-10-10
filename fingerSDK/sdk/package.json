@@ -1,0 +1,7 @@
+{
+  "name": "finger-sdk",
+  "version": "1.0.0",
+  "description": "Fingerprint SDK: schema, probes and profile rules for the electron-fp fingerprinted Electron build",
+  "main": "index.js",
+  "license": "UNLICENSED"
+}

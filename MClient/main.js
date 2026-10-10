@@ -1,13 +1,85 @@
 'use strict';
 
-const { app, BrowserWindow, BrowserView, ipcMain, session, protocol, net } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, session, protocol, net, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
+
+// --- Configurable data dir (doc 17 Part D / OQ-19) ---------------------------
+// userData holds the persist:auto-<id> partitions (launcher.js / profile-
+// manager.js). Relocate it with --user-data-dir=<path> (CLI) or FP_DATA_DIR
+// (env); CLI wins over env. This MUST run before app.whenReady() and before any
+// window / partition / getPath('userData') use, so it sits at the top of the
+// entry, ahead of every local require. Partition names stay RELATIVE to userData
+// (persist:auto-<id>), so relocating moves every partition and never touches the
+// H2-frozen naming (doc 17 D.4) - do not make partition paths absolute.
+function fpResolveDataDir(argv, env) {
+  const args = Array.isArray(argv) ? argv : [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--user-data-dir' && args[i + 1] && !String(args[i + 1]).startsWith('--')) {
+      return String(args[i + 1]);
+    }
+    if (typeof a === 'string' && a.startsWith('--user-data-dir=')) {
+      const v = a.slice('--user-data-dir='.length);
+      if (v) return v;
+    }
+  }
+  const e = env && env.FP_DATA_DIR;
+  return e ? String(e) : null;
+}
+
+// Copy persisted state from the default dir into a fresh target. NEVER moves or
+// deletes the source (doc 17 D.3). Only runs when the target is empty; the
+// marker makes it run at most once. Any failure throws so the caller can fail
+// fast - never fall back to the default, which would split the data.
+function fpMigrateDataDir(oldDir, newDir) {
+  if (path.resolve(oldDir) === path.resolve(newDir)) return { migrated: false, reason: 'same-dir' };
+  const marker = path.join(newDir, '.fp-data-migrated-from');
+  if (fs.existsSync(marker)) return { migrated: false, reason: 'already-migrated' };
+  if (!fs.existsSync(oldDir)) return { migrated: false, reason: 'no-old-data' };
+  fs.mkdirSync(newDir, { recursive: true });
+  if (fs.readdirSync(newDir).length > 0) return { migrated: false, reason: 'target-not-empty' };
+  // Partitions/ holds every persist:auto-<id> cookie/storage/LevelDB; app-state
+  // files ride along. Both are copied, never removed.
+  const parts = path.join(oldDir, 'Partitions');
+  if (fs.existsSync(parts)) fs.cpSync(parts, path.join(newDir, 'Partitions'), { recursive: true });
+  for (const f of ['profiles.json', 'automation-store.json']) {
+    const src = path.join(oldDir, f);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(newDir, f));
+  }
+  fs.writeFileSync(marker, oldDir + '\n');
+  return { migrated: true };
+}
+
+(function () {
+  const dir = fpResolveDataDir(process.argv, process.env);
+  if (!dir) return; // no config: Electron's default userData is left untouched
+  const target = path.resolve(dir);
+  try {
+    const mode = String(process.env.FP_DATA_DIR_MIGRATE || 'none').toLowerCase();
+    if (mode === 'copy' || mode === 'move') {
+      // 'move' is accepted but implemented as a copy: the design forbids
+      // moving/deleting the source, so neither mode is destructive.
+      const r = fpMigrateDataDir(app.getPath('userData'), target);
+      if (r.migrated) console.log('[fp] data-dir: migrated existing state -> ' + target);
+    }
+    if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+    app.setPath('userData', target);
+  } catch (e) {
+    // Fail fast: silently falling back to the default would split the data.
+    console.error('[fp] data-dir: FATAL: ' + ((e && e.message) || e));
+    process.exit(1);
+  }
+})();
+
 const http = require('http');
 // Shared probe: the SAME PROBE / compare() that fingerprint/scripts/smoke.js
 // uses. One probe, two callers - see Client/fp-probe.js.
 const { PROBE, compare, verdicts } = require('./fp-probe');
 const { captureClientHello, tlsVerdicts } = require('./tls-probe');
+// AI agent (main-process side). engine.js requires electron only lazily, so
+// this require is safe at load; sender/tabProvider are injected in setupIPC().
+const agentEngine = require('./agent/engine');
 // TLS plane (session.setSSLConfig, not a kernel key). No comment inside the
 // braces: test-app-copy-sync.js parses this destructure by splitting on commas
 // and a commented line would be read as an export name that does not exist.
@@ -42,7 +114,7 @@ function saveProfiles(data) {
 // group are views on it. Groups are isolated from each other.
 /** @type {Map<string, {id: string, groupId: string, view: BrowserView, url: string, title: string}>} */
 const tabs = new Map();
-/** @type {Map<string, {id: string, profileId: string, profileName: string, userAgent: string, blink: object|null, tls: object|null, h2: object|null, tabIds: string[], activeTabId: string|null}>} */
+/** @type {Map<string, {id: string, originProfileId: string, profileId: string, profileName: string, userAgent: string, blink: object|null, tls: object|null, h2: object|null, proxy: object|null, proxyPassword: string|null, tabIds: string[], activeTabId: string|null}>} */
 const groups = new Map();
 let activeGroupId = null;
 let activeTabId = null;
@@ -212,6 +284,230 @@ function applyTabTLSConfig(partition, tls) {
 }
 
 /**
+ * Split a pasted full proxy URL (`scheme://[user:pass@]host:port`) into a
+ * Chromium rule plus credentials. Returns null when the input is not a
+ * single URL (legacy `scheme=host:port` / bare forms pass through untouched).
+ * Case- and trailing-slash-tolerant; WHATWG URL also percent-decodes creds.
+ */
+function splitProxyUrl(raw) {
+  const s = String(raw).trim();
+  if (!s || s.includes(';')) return null;
+  if (!/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(s)) return null;
+  let u;
+  try { u = new URL(s); } catch (_) { return null; }
+  if (!u.hostname) return null;
+  const scheme = u.protocol.replace(/:$/, '').toLowerCase();
+  if (!scheme) return null;
+  const host = u.port ? u.hostname + ':' + u.port : u.hostname;
+  // WHATWG URL keeps userinfo percent-encoded (curl decodes it before the
+  // 407 reply, so must we); malformed '%' falls back to the raw string.
+  const dec = (s) => { try { return decodeURIComponent(s); } catch (_) { return s; } };
+  return {
+    rules: scheme + '=' + host,
+    username: u.username ? dec(u.username) : null,
+    password: u.password ? dec(u.password) : null,
+  };
+}
+
+/**
+ * Validate/normalize a group proxy value. Pure (no electron needed) so the
+ * test can require it directly. group.proxy keeps ONLY the session fields
+ * {mode,proxyRules,proxyBypassRules,pacScript,username}; the password travels
+ * beside it and lands in group.proxyPassword (memory only, never persisted).
+ * null/undefined clears the proxy (back to direct).
+ * Paste-and-go: direct/system carrying rules (or a full URL) auto-upgrades
+ * to fixed (pacScript upgrades to pac) with a note; only bare direct (no
+ * rules, no pacScript) truly clears and returns {proxy:null}.
+ */
+function normalizeGroupProxy(proxy) {
+  if (proxy === null || proxy === undefined) return { proxy: null, password: null };
+  if (typeof proxy !== 'object') return { error: 'proxy 须为对象' };
+  let mode = proxy.mode;
+  if (mode !== 'direct' && mode !== 'system' && mode !== 'fixed' && mode !== 'pac') {
+    return { error: 'mode 非法: ' + String(mode) };
+  }
+  const out = { mode };
+  // 长短字段兼容：会话/UI 用 proxyRules，长字段；profile 持久化用 rules 短字段。
+  let rawRules;
+  if (proxy.proxyRules !== undefined) rawRules = String(proxy.proxyRules);
+  else if (proxy.rules !== undefined) rawRules = String(proxy.rules);
+  // Pasted full URL (`http://user:pass@host:port/`): Chromium rules accept
+  // ONLY scheme=host:port — inline creds or a raw URL silently poison the
+  // rule (measured: setProxy reports ok, resolveProxy yields "" or DIRECT).
+  // Split into rules + memory-only credentials instead. A single-scheme
+  // result is kept as-is: scheme scope is Chromium behavior, inventing a
+  // second scheme would change routing semantics behind the user's back.
+  let urlUser = null, urlPass = null;
+  if (rawRules !== undefined) {
+    const split = splitProxyUrl(rawRules);
+    if (split) {
+      rawRules = split.rules;
+      urlUser = split.username;
+      urlPass = split.password;
+    }
+  }
+  if (rawRules !== undefined) out.proxyRules = rawRules;
+  if (proxy.proxyBypassRules !== undefined) out.proxyBypassRules = String(proxy.proxyBypassRules);
+  else if (proxy.bypass !== undefined) out.proxyBypassRules = String(proxy.bypass);
+  if (proxy.pacScript !== undefined) out.pacScript = String(proxy.pacScript);
+  else if (proxy.pac !== undefined) out.pacScript = String(proxy.pac);
+  // Paste-and-go: a full URL is usually pasted with mode left on direct.
+  // Refusing it would reproduce the top "设置无效" report, so upgrade instead.
+  // Only bare direct (no rules, no pacScript) truly clears.
+  let note = null;
+  const hasContent = !!((out.proxyRules && out.proxyRules.trim()) || (out.pacScript && out.pacScript.trim()));
+  if ((mode === 'direct' || mode === 'system') && hasContent) {
+    if (out.pacScript && out.pacScript.trim()) {
+      mode = 'pac';
+      note = 'mode 已按内容自动设为 pac';
+    } else {
+      mode = 'fixed';
+      note = 'mode 已按内容自动设为 fixed';
+    }
+    out.mode = mode;
+  }
+  if (mode === 'direct' && !hasContent) return { proxy: null, password: null, cleared: true };
+  // Explicit fields win over URL-embedded ones; URL fills only the gaps.
+  if (proxy.username !== undefined) out.username = String(proxy.username);
+  else if (urlUser) out.username = urlUser;
+  // Dropped on purpose: a password inside group.proxy would travel wherever
+  // the proxy object travels. It lives in group.proxyPassword instead.
+  const password = proxy.password !== undefined ? String(proxy.password) : urlPass;
+  if (mode === 'fixed' && !(out.proxyRules && out.proxyRules.trim())) {
+    return { error: 'proxyRules 为空' };
+  }
+  if (mode === 'pac' && !(out.pacScript && out.pacScript.trim())) {
+    return { error: 'pacScript 为空' };
+  }
+  return { proxy: out, password, note };
+}
+
+/**
+ * Apply group.proxy to the group's session. Must run AFTER the first
+ * fromPartition() for the name (createGroupView carries the H2 plane on that
+ * call — touching the session earlier would create it without H2 and freeze
+ * the partition wrong) and BEFORE the first navigation, so addGroup awaits
+ * this between addTab() and any loadURL.
+ */
+async function applyGroupProxy(group) {
+  const sess = session.fromPartition(`fp-group-${group.id}`);
+  try {
+    const p = group.proxy;
+    if (!p) return { ok: true };
+    if (p.mode === 'direct') {
+      await sess.setProxy({ mode: 'direct' });
+      return { ok: true };
+    }
+    if (p.mode === 'system') {
+      await sess.setProxy({ mode: 'system' });
+      return { ok: true };
+    }
+    if (p.mode === 'fixed') {
+      if (!p.proxyRules || !p.proxyRules.trim()) return { ok: false, error: 'proxyRules 为空' };
+      const opts = { mode: 'fixed_servers', proxyRules: p.proxyRules };
+      if (p.proxyBypassRules) opts.proxyBypassRules = p.proxyBypassRules;
+      await sess.setProxy(opts);
+      return { ok: true };
+    }
+    if (p.mode === 'pac') {
+      if (!p.pacScript || !p.pacScript.trim()) return { ok: false, error: 'pacScript 为空' };
+      await sess.setProxy({ mode: 'pac_script', pacScript: p.pacScript });
+      return { ok: true };
+    }
+    return { ok: false, error: 'mode 非法: ' + p.mode };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
+// Proxy passwords at rest: one safeStorage-encrypted file per origin profile
+// (same convention as agent-key.bin). MCLIENT_PROXY_DIR overrides the directory for
+// tests so they never touch the real appData.
+function proxyStoreDir() {
+  if (process.env.MCLIENT_PROXY_DIR) return process.env.MCLIENT_PROXY_DIR;
+  return path.join(app.getPath('appData'), 'mclient-agent', 'proxy-passwords');
+}
+function proxyPasswordFile(originProfileId) {
+  const safe = String(originProfileId || 'default').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64) || 'default';
+  return path.join(proxyStoreDir(), 'proxy-' + safe + '.bin');
+}
+function saveGroupPassword(originProfileId, password) {
+  if (!safeStorage.isEncryptionAvailable()) return { ok: false, memoryOnly: true };
+  fs.mkdirSync(proxyStoreDir(), { recursive: true });
+  fs.writeFileSync(proxyPasswordFile(originProfileId), safeStorage.encryptString(String(password)));
+  return { ok: true };
+}
+function loadGroupPassword(originProfileId) {
+  try {
+    return safeStorage.decryptString(fs.readFileSync(proxyPasswordFile(originProfileId)));
+  } catch (_) { return null; }
+}
+function deleteGroupPassword(originProfileId) {
+  try { fs.unlinkSync(proxyPasswordFile(originProfileId)); } catch (_) { /* absent */ }
+  return true;
+}
+
+function reloadGroupTabs(group) {
+  for (const tid of group.tabIds) {
+    const tab = tabs.get(tid);
+    if (tab) {
+      try { tab.view.webContents.loadURL(tab.url || 'about:blank'); } catch {}
+    }
+  }
+}
+
+/**
+ * Set-proxy entry point (IPC handler thin-wraps this, tests call it direct).
+ * Empty password keeps whatever is stored (memory + disk untouched); only a
+ * non-empty password overwrites. Bare direct clears proxy + memory password +
+ * the saved file and resets the session.
+ */
+async function setGroupProxy(gid, proxy) {
+  const group = groups.get(gid);
+  if (!group) return { ok: false, error: 'unknown group' };
+  try {
+    const norm = normalizeGroupProxy(proxy);
+    if (norm.error) return { ok: false, error: norm.error };
+    if (!norm.proxy) {
+      const hadSaved = !!loadGroupPassword(group.originProfileId);
+      group.proxy = null;
+      group.proxyPassword = null;
+      deleteGroupPassword(group.originProfileId);
+      await session.fromPartition(`fp-group-${gid}`).setProxy({ mode: 'direct' });
+      reloadGroupTabs(group);
+      group.profileId = 'custom';
+      group.profileName = 'Custom';
+      mainWindow?.webContents.send('group:profile-changed', { groupId: gid, profileId: group.profileId, profileName: group.profileName });
+      return { ok: true, ...(hadSaved ? { note: '已删除该 profile 保存的密码' } : {}) };
+    }
+    group.proxy = norm.proxy;
+    let note = norm.note || null;
+    if (norm.password) {
+      group.proxyPassword = norm.password;
+      const saved = saveGroupPassword(group.originProfileId, norm.password);
+      if (!saved.ok) note = [note, 'safeStorage 不可用，密码仅内存保存'].filter(Boolean).join('；');
+    }
+    const res = await applyGroupProxy(group);
+    if (!res.ok) return res;
+    reloadGroupTabs(group);
+    group.profileId = 'custom';
+    group.profileName = 'Custom';
+    mainWindow?.webContents.send('group:profile-changed', { groupId: gid, profileId: group.profileId, profileName: group.profileName });
+    return { ok: true, ...(note ? { note } : {}) };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+}
+
+// The password never leaves the main process: callers get the session fields
+// plus hasPassword, never the secret itself.
+function getGroupProxy(gid) {
+  const group = groups.get(gid);
+  if (!group || !group.proxy) return null;
+  return { ...group.proxy, hasPassword: !!group.proxyPassword };
+}
+
+/**
  * Attach page-event forwarding for a group view. Shared by createGroupView()
  * and recreateGroupViews() so the two cannot drift.
  */
@@ -354,7 +650,7 @@ function recreateGroupViews(groupId, { blink, userAgent, tls, h2 }) {
   return true;
 }
 
-function addGroup(profileId = 'default') {
+async function addGroup(profileId = 'default') {
   const profiles = loadProfiles();
   const profile = profiles.profiles.find(p => p.id === profileId) || profiles.profiles[0];
   // Split the profile into its THREE delivery planes. This is the group-CREATION
@@ -375,14 +671,31 @@ function addGroup(profileId = 'default') {
   // with. It cannot be read back from the session (there is no getter), so
   // without this the drift check in recreateGroupViews() has nothing to compare
   // against and a change could only ever be silently ignored.
+  // Proxy is a fourth plane beside Blink/TLS/H2. A profile may carry it
+  // (without a password); an invalid one must not silently boot direct.
+  let profileProxy = null;
+  if (profile.proxy) {
+    if (profile.proxy.password !== undefined) {
+      console.warn('[fp] profile proxy password ignored: passwords are memory-only, use group:set-proxy');
+    }
+    const norm = normalizeGroupProxy(profile.proxy);
+    if (norm.error) {
+      console.error('[fp] refused profile proxy: ' + norm.error);
+    } else {
+      profileProxy = norm.proxy;
+    }
+  }
   const group = {
     id: groupId,
+    originProfileId: profile.id, // immutable: key for the saved proxy password
     profileId: profile.id,
     profileName: profile.name,
     userAgent: profile.userAgent || '',
     blink: split ? split.fingerprint : null,
     tls: split ? split.tls : null,
     h2: (split && split.h2) ? split.h2 : null,
+    proxy: profileProxy,
+    proxyPassword: null, // memory only: set via group:set-proxy, never persisted
     tabIds: [],
     activeTabId: null,
     h2Refused: null,
@@ -392,6 +705,18 @@ function addGroup(profileId = 'default') {
 
   mainWindow?.webContents.send('group:created', { groupId, profileId: group.profileId, profileName: group.profileName });
   const tabId = addTab(groupId);
+  // First fromPartition() (with H2) already happened inside createGroupView;
+  // no view has navigated yet, so this is the slot for the proxy plane.
+  if (group.proxy) {
+    const res = await applyGroupProxy(group);
+    if (!res.ok) {
+      console.error('[fp] refused profile proxy: ' + res.error);
+    } else {
+      // Restore a previously saved password for this origin profile.
+      const restored = loadGroupPassword(group.originProfileId);
+      if (restored) group.proxyPassword = restored;
+    }
+  }
   activeGroupId = groupId;
   mainWindow?.webContents.send('group:activated', { groupId });
   return groupId;
@@ -560,6 +885,32 @@ function createMainWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
+  // --- P0 navigation + permission guardrails (ADR-6) ---
+  // window.open / new-window without a handler spawns an unpermissioned
+  // BrowserView-less window outside the group partition model — deny by default.
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  // will-navigate: keep the shell on file:// — any navigation of the MAIN
+  // window itself (XSS / link drag) is denied, not rerouted.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    try {
+      if (!String(url || '').startsWith('file://')) event.preventDefault();
+    } catch (_) {
+      try { event.preventDefault(); } catch (_) {}
+    }
+  });
+  // webview attach without a handler inherits the embedder partition — deny.
+  mainWindow.webContents.on('will-attach-webview', (event) => {
+    try { event.preventDefault(); } catch (_) {}
+  });
+  // permission deny-list (default-deny): no prompt is ever auto-granted by the
+  // shell. Automation scripts that need media/geolocation must run through the
+  // capability-gated SDK path, not the shell prompt.
+  try {
+    if (typeof session.defaultSession.setPermissionRequestHandler === 'function') {
+      session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
+    }
+  } catch (_) { /* older Electron: no handler API — permissions stay default */ }
+
   // Resize active BrowserView on window resize (also shrink if panel open)
   mainWindow.on('resize', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -588,8 +939,8 @@ function createMainWindow() {
   // first thing that happens - addTab() also activates whatever it creates, so
   // opening the sites afterwards would steal focus from it. We therefore add
   // them and then hand focus back to tab 1.
-  mainWindow.webContents.once('did-finish-load', () => {
-    const gid = addGroup('default');
+  mainWindow.webContents.once('did-finish-load', async () => {
+    const gid = await addGroup('default');
     const g = groups.get(gid);
     for (const site of FP_AUDIT_SITES) {
       const id = addTab(gid);
@@ -600,25 +951,66 @@ function createMainWindow() {
 }
 
 // --- IPC Handlers ---
+// Sender gate (gap-analysis B3 / ADR-6 P0, same posture as Client/main.js):
+// every ipcMain.handle below must go through checked(). Renderer XSS must not
+// reach main with forged group/tabIds.
+function senderAllowed(e) {
+  try {
+    const s = e && e.sender;
+    if (!s || typeof s.getURL !== 'function') return false;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const mainWc = mainWindow.webContents;
+      if (s === mainWc) return true;
+      try {
+        const su = s.getURL() || '';
+        const mu = mainWc.getURL() || '';
+        if (su && mu && su === mu) return true;
+      } catch (_) { /* fall through to deny */ }
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+function denyIpc(channel) {
+  try { console.warn('[ipc-deny] sender not allowed: ' + channel); } catch (_) {}
+  return { ok: false, error: { code: 'DENY', message: 'sender not allowed' } };
+}
+function checked(channel, fn) {
+  return (e, ...args) => {
+    if (!senderAllowed(e)) return denyIpc(channel);
+    return fn(e, ...args);
+  };
+}
 function setupIPC() {
   // Group operations (top-level tab = isolated profile browser)
-  ipcMain.handle('group:create', (e, profileId) => addGroup(profileId || 'default'));
-  ipcMain.handle('group:close', (e, groupId) => closeGroup(groupId));
-  ipcMain.handle('group:activate', (e, groupId) => activateGroup(groupId));
-  ipcMain.handle('group:list', () => {
+  ipcMain.handle('group:create', checked('group:create', (e, profileId) => addGroup(profileId || 'default')));
+  ipcMain.handle('group:close', checked('group:close', (e, groupId) => closeGroup(groupId)));
+  ipcMain.handle('group:activate', checked('group:activate', (e, groupId) => {
+    agentEngine.cancelOnGroupSwitch(); // a run's tab scope is gone by definition
+    return activateGroup(groupId);
+  }));
+  ipcMain.handle('group:list', checked('group:list', () => {
     const list = [];
     for (const [id, group] of groups) {
       list.push({ id, profileId: group.profileId, profileName: group.profileName, tabIds: [...group.tabIds], activeTabId: group.activeTabId, isActive: id === activeGroupId });
     }
     return list;
-  });
-  ipcMain.handle('group:get-active', () => activeGroupId);
-  ipcMain.handle('group:set-profile', (e, { groupId, config, userAgent }) => {
+  }));
+  ipcMain.handle('group:get-active', checked('group:get-active', () => activeGroupId));
+  ipcMain.handle('group:set-profile', checked('group:set-profile', (e, { groupId, config, userAgent }) => {
     return applyGroupProfile(groupId || activeGroupId, config, userAgent);
-  });
+  }));
+
+  // Group proxy (fourth plane). Failures return {ok:false,error}, never throw.
+  // Semantics for the UI: mode auto-upgrades (direct/system + content ->
+  // fixed/pac, see normalizeGroupProxy); empty password keeps the stored one;
+  // only bare direct + empty rules clears (and deletes the saved password).
+  ipcMain.handle('group:set-proxy', checked('group:set-proxy', (e, { groupId, proxy }) => setGroupProxy(groupId || activeGroupId, proxy)));
+  ipcMain.handle('group:get-proxy', checked('group:get-proxy', (e, groupId) => getGroupProxy(groupId || activeGroupId)));
 
   // Tab operations
-  ipcMain.handle('tab:create', (e, arg) => {
+  ipcMain.handle('tab:create', checked('tab:create', async (e, arg) => {
     // Compat: string = legacy profileId OR a groupId (renderer passes
     // activeGroupId through createTab for "new sub-tab in this group").
     // Missing groupId falls back to activeGroupId.
@@ -627,7 +1019,7 @@ function setupIPC() {
       const pid = arg || 'default';
       const ag = groups.get(activeGroupId);
       if (ag && ag.profileId === pid) return addTab(activeGroupId);
-      const gid = addGroup(pid);
+      const gid = await addGroup(pid);
       const g = groups.get(gid);
       return g ? g.activeTabId : null;
     }
@@ -636,26 +1028,26 @@ function setupIPC() {
       if (arg.profileId) {
         const ag = groups.get(activeGroupId);
         if (ag && ag.profileId === arg.profileId) return addTab(activeGroupId, arg.url);
-        const gid = addGroup(arg.profileId);
+        const gid = await addGroup(arg.profileId);
         const g = groups.get(gid);
         return g ? g.activeTabId : null;
       }
       return addTab(activeGroupId, arg.url);
     }
     return addTab(activeGroupId);
-  });
-  ipcMain.handle('tab:close', (e, tabId) => closeTab(tabId));
-  ipcMain.handle('tab:activate', (e, tabId) => activateTab(tabId));
-  ipcMain.handle('tab:navigate', (e, { tabId, url }) => navigateTab(tabId, url));
-  ipcMain.handle('tab:list', () => {
+  }));
+  ipcMain.handle('tab:close', checked('tab:close', (e, tabId) => closeTab(tabId)));
+  ipcMain.handle('tab:activate', checked('tab:activate', (e, tabId) => activateTab(tabId)));
+  ipcMain.handle('tab:navigate', checked('tab:navigate', (e, { tabId, url }) => navigateTab(tabId, url)));
+  ipcMain.handle('tab:list', checked('tab:list', () => {
     const list = [];
     for (const [id, tab] of tabs) {
       const group = groups.get(tab.groupId);
       list.push({ id, groupId: tab.groupId, profileId: group ? group.profileId : null, profileName: group ? group.profileName : null, url: tab.url, title: tab.title, isActive: id === activeTabId });
     }
     return list;
-  });
-  ipcMain.handle('tab:get-active', () => ({ groupId: activeGroupId, tabId: activeTabId }));
+  }));
+  ipcMain.handle('tab:get-active', checked('tab:get-active', () => ({ groupId: activeGroupId, tabId: activeTabId })));
 
   // Shared group-profile apply: split into the three delivery planes,
   // recreate the group's views on the same partition, broadcast, report drift.
@@ -724,33 +1116,33 @@ function setupIPC() {
   }
 
   // Tab fingerprint operations (group semantics: read/apply via the tab's group)
-  ipcMain.handle('tab:get-fingerprint', (e, tabId) => {
+  ipcMain.handle('tab:get-fingerprint', checked('tab:get-fingerprint', (e, tabId) => {
     const tab = tabs.get(tabId || activeTabId);
     if (!tab) return null;
     try {
       return tab.view.webContents.getFingerprintConfig();
     } catch { return null; }
-  });
-  ipcMain.handle('tab:set-fingerprint', (e, { tabId, config, userAgent }) => {
+  }));
+  ipcMain.handle('tab:set-fingerprint', checked('tab:set-fingerprint', (e, { tabId, config, userAgent }) => {
     const tid = tabId || activeTabId;
     const tab = tabs.get(tid);
     if (!tab) return false;
     return applyGroupProfile(tab.groupId, config, userAgent);
-  });
+  }));
 
   // User-Agent is a client-level (Electron) surface, kept separate from the
   // kernel's 63-key fingerprint config. See applyTabUserAgent() for why the
   // order of operations matters.
-  ipcMain.handle('tab:get-ua', (e, tabId) => {
+  ipcMain.handle('tab:get-ua', checked('tab:get-ua', (e, tabId) => {
     const tab = tabs.get(tabId || activeTabId);
     if (!tab) return null;
     const group = groups.get(tab.groupId);
     try {
       return session.fromPartition(`fp-group-${tab.groupId}`).getUserAgent() || '';
     } catch { return (group ? group.userAgent : '') || ''; }
-  });
+  }));
 
-  ipcMain.handle('tab:set-ua', (e, { tabId, userAgent }) => {
+  ipcMain.handle('tab:set-ua', checked('tab:set-ua', (e, { tabId, userAgent }) => {
     const tid = tabId || activeTabId;
     const tab = tabs.get(tid);
     if (!tab) return false;
@@ -777,50 +1169,52 @@ function setupIPC() {
       });
       return true;
     } catch { return false; }
-  });
+  }));
 
   // Fingerprint panel open/close — shrink/expand the active BrowserView so the
   // panel (DOM layer) is not covered by the BrowserView (native top layer).
-  ipcMain.handle('panel:set-open', (e, isOpen) => {
+  ipcMain.handle('panel:set-open', checked('panel:set-open', (e, isOpen) => {
     panelOpen = !!isOpen;
     resizeActiveView();
     return true;
-  });
+  }));
 
   // Profile operations
-  ipcMain.handle('profile:list', () => loadProfiles().profiles);
-  ipcMain.handle('profile:get', (e, profileId) => {
+  ipcMain.handle('profile:list', checked('profile:list', () => loadProfiles().profiles));
+  ipcMain.handle('profile:get', checked('profile:get', (e, profileId) => {
     const data = loadProfiles();
     return data.profiles.find(p => p.id === profileId) || null;
-  });
-  ipcMain.handle('profile:create', (e, profile) => {
+  }));
+  ipcMain.handle('profile:create', checked('profile:create', (e, profile) => {
     const data = loadProfiles();
     const id = profile.id || `profile-${Date.now()}`;
     const newProfile = { ...profile, id, createdAt: new Date().toISOString() };
     data.profiles.push(newProfile);
     saveProfiles(data);
     return newProfile;
-  });
-  ipcMain.handle('profile:update', (e, profile) => {
+  }));
+  ipcMain.handle('profile:update', checked('profile:update', (e, profile) => {
     const data = loadProfiles();
     const idx = data.profiles.findIndex(p => p.id === profile.id);
     if (idx === -1) return null;
     data.profiles[idx] = { ...data.profiles[idx], ...profile };
     saveProfiles(data);
     return data.profiles[idx];
-  });
-  ipcMain.handle('profile:delete', (e, profileId) => {
+  }));
+  ipcMain.handle('profile:delete', checked('profile:delete', (e, profileId) => {
     const data = loadProfiles();
     data.profiles = data.profiles.filter(p => p.id !== profileId);
     saveProfiles(data);
     return true;
-  });
-  ipcMain.handle('profile:randomize', () => {
+  }));
+  ipcMain.handle('profile:randomize', checked('profile:randomize', () => {
     return generateRandomProfile();
-  });
+  }));
 
-  // DevTools for active tab
-  ipcMain.handle('tab:toggle-devtools', (e, tabId) => {
+  // DevTools for active tab. Locked while an agent run is active: DevTools
+  // owns the debugger, and the agent's snapshot/act tools need it.
+  ipcMain.handle('tab:toggle-devtools', checked('tab:toggle-devtools', (e, tabId) => {
+    if (agentEngine.isRunning()) return 'AGENT_RUNNING——agent 运行中，DevTools 已锁定';
     const tab = tabs.get(tabId || activeTabId);
     if (!tab) return;
     if (tab.view.webContents.isDevToolsOpened()) {
@@ -828,31 +1222,31 @@ function setupIPC() {
     } else {
       tab.view.webContents.openDevTools({ mode: 'detach' });
     }
-  });
+  }));
 
   // Get Electron/Chromium version info
-  ipcMain.handle('app:versions', () => ({
+  ipcMain.handle('app:versions', checked('app:versions', () => ({
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     node: process.versions.node,
     v8: process.versions.v8
-  }));
+  })));
   // Fingerprint schema: lets the renderer build grouped sections and validate
   // the JSON editor against the exact kernel key set (63 keys / 15 groups).
-  ipcMain.handle('ua:presets', () => FP_UA_PRESETS);
+  ipcMain.handle('ua:presets', checked('ua:presets', () => FP_UA_PRESETS));
 
   // Derive navigator_platform from a UA string in the main process rather than
   // duplicating the mapping in the renderer. Two copies of this table would
   // drift, and a drifted platform silently contradicts the UA - exactly the
   // failure mode this whole surface exists to prevent.
-  ipcMain.handle('ua:platform-for', (e, ua) => fpPlatformForUserAgent(ua));
+  ipcMain.handle('ua:platform-for', checked('ua:platform-for', (e, ua) => fpPlatformForUserAgent(ua)));
 
   // The TLS plane is delivered as a SEPARATE group list rather than merged into
   // `keys`/`groups`. Merging would make it indistinguishable from the 63 Blink
   // keys, and the difference is not cosmetic: those go to --fingerprint-config,
   // these go to session.setSSLConfig(). The renderer renders both but must not
   // forget which is which, so the payload keeps them apart.
-  ipcMain.handle('fp:schema', () => ({
+  ipcMain.handle('fp:schema', checked('fp:schema', () => ({
     version: FP_SCHEMA_VERSION,
     keyCount: FP_KEY_NAMES.length,
     keys: FP_KEYS,
@@ -868,8 +1262,8 @@ function setupIPC() {
       keys: FP_H2_KEYS,
       groups: FP_H2_GROUPS,
     }
-  }));
-  ipcMain.handle('fp:coverage', (e, cfg) => fpCoverage(cfg || {}));
+  })));
+  ipcMain.handle('fp:coverage', checked('fp:coverage', (e, cfg) => fpCoverage(cfg || {})));
 
   // --- Self-test ---------------------------------------------------------
   //
@@ -891,7 +1285,7 @@ function setupIPC() {
   //
   // An inactive key is skip, NOT fail: the panel judges only what the user
   // actually asked for, otherwise a default profile would show 63 red rows.
-  ipcMain.handle('selftest:run', async (e, tabId) => {
+  ipcMain.handle('selftest:run', checked('selftest:run', async (e, tabId) => {
     const tab = tabs.get(tabId || activeTabId);
     if (!tab || !tab.view) return { error: 'no active tab', rows: [] };
 
@@ -1008,7 +1402,106 @@ function setupIPC() {
       tlsRows, tlsSummary, tlsError,
       url: needsTempOrigin ? '(temporary probe origin)' : priorUrl,
     };
+  }));
+
+  // --- Agent (AI operator, main-process side) ---
+  // Automation bridge (script-sdk.md §8): agent trajectories land as SDK calls in
+  // the SAME automation Runtime — no second engine. The runner below is a thin
+  // adapter: trajectory steps ({type,selector,url,value,...}) map 1:1 onto the
+  // automation script surface and execute against THIS run's own group tab via
+  // the agent's existing tabProvider scope (SCOPE_DENIED outside it). Audit marks
+  // caller type `agent`. Unwired (no automation tree / headless tests) the tools
+  // answer honest NOT_WIRED — the bridge never fakes a run.
+  const tabProviderShim = {
+    getActiveTab: () => { const t = tabs.get(activeTabId); return t ? { id: t.id, groupId: t.groupId, view: t.view } : null; },
+    activeGroupId: () => activeGroupId,
+    listTabs: (gid) => { const g = groups.get(gid); return g ? g.tabIds.map((id) => tabs.get(id)).filter(Boolean).map((t) => ({ id: t.id, url: t.url, title: t.title })) : []; },
+    createTab: (gid) => addTab(gid),
+    closeTab: (id) => { if (!tabs.has(id)) return false; closeTab(id); return true; },
+    getTab: (id) => { const t = tabs.get(id); return t ? { id: t.id, groupId: t.groupId, view: t.view } : null; },
+  };
+  // Automation bridge runner needs the provider defined first (declared above).
+  const agentAutomation = (() => {
+    let runTrajectory = null;
+    try {
+      const { runAst } = require('../automation/runtime/rpa-ast');
+      const { doAct } = require('./agent/tools');
+      const { withDebugger } = require('./agent/snapshot');
+      const ast = (steps) => ({ nodes: [{ type: 'start' }, ...steps, { type: 'end' }] });
+      runTrajectory = async (steps, opts) => {
+        const tab = tabProviderShim.getActiveTab();
+        if (!tab) throw new Error('AGENT_NO_TAB');
+        const wc = tab.view && tab.view.webContents;
+        if (!wc) throw new Error('AGENT_NO_WEBCONTENTS');
+        // A recorded click/fill/type carries a raw CSS selector, not a snapshot
+        // ref. Resolve it to a backendNodeId via CDP, then replay the agent's own
+        // act primitives under ONE debugger session. runAst ignores page.* return
+        // values, so any miss MUST throw — a silent failure would read SUCCESS.
+        const actVia = async (kind, sel, args) => {
+          const r = await withDebugger(wc, async (send) => {
+            const doc = await send('DOM.getDocument', { depth: 0 });
+            const q = await send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: sel });
+            if (!q || !q.nodeId) return { error: 'AGENT_BRIDGE_NO_ELEMENT: ' + sel };
+            const d = await send('DOM.describeNode', { nodeId: q.nodeId });
+            const b = d && d.node && d.node.backendNodeId;
+            if (b === null || b === undefined) return { error: 'AGENT_BRIDGE_NO_ELEMENT: ' + sel };
+            return doAct({ debugger: { sendCommand: send } }, kind, { ref: sel, backendNodeId: b }, args);
+          });
+          if (r && r.error) throw new Error('AGENT_BRIDGE_ACT: ' + r.error);
+          return r;
+        };
+        // minimal page-sandbox over the live tab: same primitives the agent's
+        // own act/navigate tools use (loadURL / executeJavaScript / debugger Input).
+        // Polling wait primitives for the AST's `wait` node (validateAst only
+        // accepts {type:'wait',for:'selector'|'text'|'url'}). Timeout throws loud.
+        const WAIT_TIMEOUT_MS = 30000;
+        const poll = async (pred, timeoutMsg) => {
+          const deadline = Date.now() + WAIT_TIMEOUT_MS;
+          for (;;) {
+            if (await pred()) return;
+            if (Date.now() >= deadline) throw new Error(timeoutMsg);
+            await new Promise((r) => setTimeout(r, 100));
+          }
+        };
+        const page = {
+          click: (sel) => actVia('click', String(sel), {}),
+          type: (sel, text) => actVia('type', String(sel), { text: String(text) }),
+          fill: (sel, text) => actVia('fill', String(sel), { text: String(text) }),
+          goto: async (url) => { await wc.loadURL(url); },
+          evaluate: async (expr) => wc.executeJavaScript(String(expr), true),
+          waitForSelector: (sel, opts) => poll(
+            () => wc.executeJavaScript('(() => { const el = document.querySelector(' + JSON.stringify(String(sel)) + ');' +
+              ' if (!el) return false;' + (opts && opts.visible ? ' const st = getComputedStyle(el);' +
+              " if (st.display === 'none' || st.visibility === 'hidden') return false;" +
+              ' const r = el.getBoundingClientRect(); if (!(r.width > 0 && r.height > 0)) return false;' : '') +
+              ' return true; })()', true),
+            'AGENT_BRIDGE_WAIT_SELECTOR_TIMEOUT: ' + sel),
+          waitForText: (sel, text) => poll(
+            () => wc.executeJavaScript('(() => { const el = document.querySelector(' + JSON.stringify(String(sel)) + ');' +
+              ' return !!el && el.innerText.includes(' + JSON.stringify(String(text)) + '); })()', true),
+            'AGENT_BRIDGE_WAIT_TEXT_TIMEOUT: ' + sel),
+          waitForURL: (url) => poll(
+            () => String(wc.getURL() || '').includes(String(url)),
+            'AGENT_BRIDGE_WAIT_URL_TIMEOUT: ' + url),
+        };
+        const out = await runAst(ast(steps), { page, browser: { goto: page.goto }, params: {}, log: () => {} });
+        return { status: 'SUCCESS', result: out };
+      };
+    } catch (_) {
+      runTrajectory = null; // automation tree absent — tools stay honest NOT_WIRED
+    }
+    return runTrajectory ? { runTrajectory } : undefined;
+  })();
+  agentEngine.configure({
+    sender: (evt) => mainWindow?.webContents.send('agent:event', evt),
+    tabProvider: tabProviderShim,
+    automation: agentAutomation,
   });
+  ipcMain.handle('agent:start', checked('agent:start', (e, { goal }) => agentEngine.start({ goal })));
+  ipcMain.handle('agent:stop', checked('agent:stop', () => agentEngine.stop()));
+  ipcMain.handle('agent:config:get', checked('agent:config:get', () => agentEngine.getConfig()));
+  ipcMain.handle('agent:config:set', checked('agent:config:set', (e, cfg) => agentEngine.setConfig(cfg || {})));
+  ipcMain.handle('agent:approve', checked('agent:approve', (e, { runId, approved }) => agentEngine.approve(runId, approved)));
 }
 
 // Human-readable explanations for the failure modes this panel is meant to
@@ -1493,9 +1986,109 @@ function generateRandomProfile() {
   };
 }
 // --- App Lifecycle ---
+// MCLIENT_LIB_MODE=1 loads this file as a library (test-group-proxy.js):
+// no windows and no IPC — only the exported helpers. The login hook below
+// stays registered: the e2e test drives real groups/tabs in-process and the
+// proxy 407 must be answered by the production handler, not a copy.
+// Automation stack: same wiring as Client/main.js — attachAutomation over the
+// local service + a preload facade. A missing automation tree must not break
+// MClient boot (try/catch); test-automation-integration.js asserts the bridge.
+// The live service, set by wireAutomation() so tests can drive it in-process.
+let automationService = null;
+
+function wireAutomation() {
+  try {
+    const wire = require('../automation/electron/wire');
+    const { createElectronExecutor } = require('../automation/electron/executor');
+    const { createAttachBroker } = require('../automation/runtime/attach-broker');
+    const { createBrowserSession } = require('../automation/runtime/browser-session');
+    const { createRecorderController } = require('../automation/electron/recorder-controller');
+
+    const audit = () => {};
+
+    // Launcher adapter over MClient groups/tabs. A "profile" here is a GROUP id:
+    // its active tab is the live webContents the script drives, on that group's
+    // own partition (fp-group-<id>), so cookies/storage/UA stay group-isolated.
+    // Groups are created by the UI, so start/stop are no-ops; acquire returns
+    // undefined when no live tab exists and the executor then raises ProfileError
+    // — an honest failure, never a silent fake.
+    const launcher = {
+      acquire: (groupId) => {
+        const group = groups.get(groupId);
+        if (!group) return undefined;
+        const tabId =
+          group.activeTabId && tabs.has(group.activeTabId)
+            ? group.activeTabId
+            : group.tabIds.find((id) => tabs.has(id));
+        const tab = tabId ? tabs.get(tabId) : null;
+        if (!tab || !tab.view || !tab.view.webContents) return undefined;
+        return {
+          window: mainWindow,
+          webContents: tab.view.webContents,
+          electronSession: session.fromPartition('fp-group-' + groupId),
+        };
+      },
+      list: () => [...groups.keys()],
+      start: () => {},
+      stop: () => {},
+    };
+
+    // ONE shared attach per webContents (doc 17 B): the executor, the recorder and
+    // any external CDP all route through this broker, so a run cannot collide with
+    // itself over the single-client Electron debugger.
+    const broker = createAttachBroker({ createSession: createBrowserSession, audit });
+    const executor = createElectronExecutor({ launcher, broker });
+    // Manager calls runnerFactory({ profileContext }); bind that context's live
+    // session, then hand back the per-run runner.
+    const runnerFactory = (opts) => executor.for(opts && opts.profileContext)();
+
+    // Live recorder targets the group's active tab (same live-webContents contract
+    // as the launcher) and joins the SAME broker attach, so recording and a run
+    // share the one Electron debugger session.
+    const recorderController = createRecorderController({
+      resolveWebContents: ({ profileId, url } = {}) => {
+        const gid = profileId && groups.has(profileId) ? profileId : activeGroupId;
+        const group = gid ? groups.get(gid) : null;
+        if (!group) return undefined;
+        const tabId =
+          group.activeTabId && tabs.has(group.activeTabId)
+            ? group.activeTabId
+            : group.tabIds.find((id) => tabs.has(id));
+        const tab = tabId ? tabs.get(tabId) : null;
+        if (!tab || !tab.view || !tab.view.webContents) return undefined;
+        if (url) { try { tab.view.webContents.loadURL(url); } catch (_) {} }
+        return { webContents: tab.view.webContents };
+      },
+      broker,
+      audit,
+    });
+
+    const stack = wire.buildLocalStack({
+      file: path.join(__dirname, 'automation-store.json'),
+      runnerFactory,
+      recorderController,
+      audit,
+    });
+    automationService = stack.service;
+    wire.attachAutomation({
+      ipcMain,
+      service: stack.service,
+      allowedSenders: [{ urlPrefix: 'file://' }],
+      push: (ch, payload) => {
+        try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(ch, payload); } catch (_) {}
+      },
+    });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+if (process.env.MCLIENT_LIB_MODE !== '1') {
 app.whenReady().then(() => {
   setupIPC();
   createMainWindow();
+  wireAutomation();
 });
 
 app.on('window-all-closed', () => {
@@ -1505,3 +2098,30 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
   if (!mainWindow) createMainWindow();
 });
+}
+
+// Proxy auth, registered once globally. Answers ONLY proxy challenges from a
+// webContents that belongs to a group holding a proxy password; every other
+// auth request (server auth, no-password groups) is left alone.
+app.on('login', (event, webContents, request, authInfo, callback) => {
+  if (!authInfo || !authInfo.isProxy) return;
+  try {
+    for (const tab of tabs.values()) {
+      if (tab.view && tab.view.webContents === webContents) {
+        const group = groups.get(tab.groupId);
+        if (group && group.proxyPassword) {
+          event.preventDefault();
+          callback((group.proxy && group.proxy.username) || '', group.proxyPassword);
+        }
+        return;
+      }
+    }
+  } catch { /* never intervene on error */ }
+});
+
+// Exported for test-group-proxy.js (via MCLIENT_LIB_MODE=1 require) and
+// test-automation-browser.js (drives the live service in-process).
+module.exports = { wireAutomation, normalizeGroupProxy, applyGroupProxy, setGroupProxy, getGroupProxy,
+  saveGroupPassword, loadGroupPassword, deleteGroupPassword, groups, tabs, addGroup, addTab,
+  navigateTab, activateTab, closeGroup, fpResolveDataDir, fpMigrateDataDir,
+  get automationService() { return automationService; } };

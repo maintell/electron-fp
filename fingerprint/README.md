@@ -4,7 +4,7 @@
 
 - `patches/*.patch` 补丁集（按运行时子系统**拆分为 7 个生效补丁**，按文件名顺序施加；另有 1 个已废弃单体）；整块替换源仍为 `ungoogled-chromium-windows`，升级时按需替换单个补丁
 - 不改 `patches/chromium/.patches` / `patches/config.json`，施加由 `fingerprint/scripts/apply.py` 独立完成
-- `helpers/fp_config_helpers.h` 仅改注入源为 `--fingerprint-config`（per-Renderer，`ElectronBrowserClient::AppendExtraCommandLineSwitchesForRenderer`），其余 63 键语义与上游一致
+- `helpers/fp_config_helpers.h` 仅改注入源为 `--fingerprint-config`（per-Renderer，`ElectronBrowserClient::AppendExtraCommandLineSwitches`），其余 63 键语义与上游一致
 
 ## 目录结构
 
@@ -14,14 +14,14 @@
   |---|---|---|---|---|---|
   | `00-core.patch` | 1 | +404/-0 | 1 | `fp_config_helpers.h`（新建，被其余补丁 include，**必须最先施加**） | 下文「配置读取」 |
   | `10-blink-core.patch` | 18 | +308/-10 | 39 | Blink core：screen / geo / canvas / DOM / timing / font_cache / navigator | 下文「覆盖范围」 |
-  | `20-blink-modules.patch` | 17 | +547/-4 | 43 | Blink modules：WebGL / WebGPU / audio / speech / media / battery / storage | 下文「覆盖范围」 |
+  | `20-blink-modules.patch` | 17 | +528/-4 | 43 | Blink modules：WebGL / WebGPU / audio / speech / media / battery / storage | 下文「覆盖范围」 |
   | `30-webrtc.patch` | 5 | +187/-0 | 10 | WebRTC：自定义 IP（webrtc 为独立仓库、无 `//base` 依赖）+ `ipc_network_manager.cc` 注入点 | 下文「User-Agent 与 navigator.platform」 |
   | `40-net-tls.patch` | 8 | +427/-23 | 18 | **网络层**：`fp_*` 字段加入 `SSLContextConfig` / mojom / `HttpNetworkSessionParams` | 下文「网络层指纹」 |
   | `50-electron-glue.patch` | 5 | +222/-1 | 11 | **JS 入口**：`setSSLConfig({fp*})` 与 `fromPartition(name,{http2Profile})` 的两个 gin 转换器 | 下文「网络层指纹」→「构造期约束」 |
   | `60-electron-inspector.patch` | 9 | +1409/-1 | 14 | **Inspector**：`electron://fingerprint/` 特权 WebUI | 下文「Inspector」 |
   | `fp-fingerprint.patch` | 42 | +1471/-13 | 92 | **已废弃**（见下）：单体时代的产物，不施加、不校验 | — |
 
-  生效合计：**拆分为 7 个生效补丁，63 个目标文件（59 个修改 + 4 个新建），+3504 行，136 个 hunk**（不含已废弃单体）。
+  生效合计：**拆分为 7 个生效补丁，63 个目标文件（59 个修改 + 4 个新建），+3485 行，136 个 hunk**（不含已废弃单体）。
   （此行是 `check.py` 的漂移校验锚点，须单行完整：补丁数、修改数、新建数、hunk 数四项均由**这一行**核对，
   故不得折行——含单体时则为 8 个 / 105 文件 / +4975 / 228 个 hunk。）
 
@@ -427,7 +427,7 @@ Chrome/154.0.8015.0 Electron/45.0.0-nightly.20260825 Safari/537.36
 
 1. **UA 不是内核 key。** `fpNormalizeConfig()` 会丢弃内核不认识的 key，所以 UA
    若放进 `fingerprint` 对象会被静默丢弃。它必须作为 `profile.userAgent`
-    平级字段存在——UA 属 Electron 层，60 个 key 属 Blink 层。
+    平级字段存在——UA 属 Electron 层，63 个 key 属 Blink 层。
 2. **`setUserAgent()` 必须在创建 `BrowserView` 之前调用。** 实测：对已打开的
    session 设 UA 后 reload 也不生效，但同 partition 的**新** view 会生效。
 

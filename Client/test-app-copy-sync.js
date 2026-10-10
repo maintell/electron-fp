@@ -84,7 +84,17 @@ ck("packaged key count matches source", srcKeys === copyKeys,
 // file this check must cover.
 const CODE = ["main.js", "fp-schema.js", "fp-probe.js", "tls-probe.js", "layout.js",
   "preload.js",
-  "package.json", "renderer/app.js", "renderer/index.html", "renderer/style.css"];
+  "package.json", "renderer/app.js", "renderer/index.html", "renderer/style.css",
+  // Automation panel embedded in the renderer shell (index.html loads panel.js +
+  // panel-templates.js + panel.css). The whole dir is copied so the packaged app
+  // matches source; a missing entry here is exactly the drift #4 exists to catch.
+  "renderer/automation-panel/panel.js",
+  "renderer/automation-panel/panel.css",
+  "renderer/automation-panel/panel-templates.js",
+  "renderer/automation-panel/panel.html",
+  "renderer/automation-panel/rpa/rpa.html",
+  "renderer/automation-panel/rpa/rpa.css",
+  "renderer/automation-panel/rpa/rpa.js"];
 for (const f of CODE) {
   const a = path.join(APP, f);
   const b = path.join(__dirname, f);
@@ -107,7 +117,11 @@ for (const f of CODE) {
 //   profiles.json - user-created profiles. The packaged copy is the DATA
 //                   DESTINATION, so it legitimately holds more than the
 //                   source and must never be overwritten from it.
-const EXPECTED_EXTRA = ["profiles.json"];
+// automation-store.json - the packaged app's automation service writes its JSON
+// store next to main.js (Client/main.js one-liner: buildLocalService({ file:
+// join(__dirname, 'automation-store.json') })). Like profiles.json it is a DATA
+// DESTINATION: it legitimately appears after the app runs, never copied from source.
+const EXPECTED_EXTRA = ["profiles.json", "automation-store.json"];
 try {
   const present = [];
   (function walk(d, p) {

@@ -1,0 +1,10 @@
+{
+  "name": "@fp-automation/browser",
+  "version": "0.1.0",
+  "description": "Browser capability layer for the electron-fp automation SDK (page/cookies/storage/network/download/upload/dialog). Thin facade over a transport; method names mirror automation.d.ts. Zero browser logic.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "private": true,
+  "files": ["index.js", "index.d.ts", "lib/"]
+}

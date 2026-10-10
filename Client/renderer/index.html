@@ -5,6 +5,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
   <title>Electron FP Browser</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="automation-panel/panel.css">
 </head>
 <body>
   <!-- Top bar: tab bar + address bar (full width) -->
@@ -26,6 +27,7 @@
       <button id="btn-go" class="nav-btn nav-go" title="Go">&#x23CE;</button>
       <button id="btn-devtools" class="nav-btn" title="DevTools (F12)">&#x2699;</button>
       <button id="btn-profile" class="nav-btn" title="Toggle fingerprint panel (F10)">&#x1F3AE;</button>
+      <button id="btn-automation" class="nav-btn" title="Toggle automation panel (F9)">&#x1F916;</button>
     </div>
   </div>
 
@@ -138,6 +140,20 @@
         </div><!-- /fp-pane-config -->
       </div>
     </div>
+
+    <!-- Automation Panel: shares the fp panel's right-hand slot (mutually
+         exclusive). Same 420px width so the single panel:set-open IPC shrinks
+         the BrowserView correctly for either column. Hidden by default. -->
+    <div id="ap-panel" class="collapsed">
+      <div id="ap-panel-header">
+        <h3>Automation</h3>
+        <button id="ap-panel-close" title="Hide panel (F9)">&times;</button>
+      </div>
+      <div id="ap-panel-body">
+        <div id="automation-panel"></div>
+        <div id="ap-templates"></div>
+      </div>
+    </div>
   </div>
 
   <!-- Status Bar -->
@@ -147,6 +163,8 @@
     <span id="status-version"></span>
   </div>
 
+  <script src="automation-panel/panel.js"></script>
+  <script src="automation-panel/panel-templates.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

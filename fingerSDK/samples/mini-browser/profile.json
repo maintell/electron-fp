@@ -1,0 +1,13 @@
+{
+  "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+  "fingerprint": {
+    "hardware_concurrency": 8,
+    "screen_width": 1920,
+    "screen_height": 1080,
+    "tz_id": "America/New_York",
+    "navigator_platform": "Win32",
+    "fpGreaseEnabled": true,
+    "fpOmitSessionTicket": true,
+    "settingsGrease": true
+  }
+}

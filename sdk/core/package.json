@@ -1,0 +1,10 @@
+{
+  "name": "@fp-automation/core",
+  "version": "0.1.0",
+  "description": "Thin loopback client for the electron-fp automation runtime (transport + types + errors + capability handshake). Zero browser logic.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "private": true,
+  "files": ["index.js", "index.d.ts", "lib/"]
+}

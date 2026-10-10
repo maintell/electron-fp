@@ -1,0 +1,10 @@
+{
+  "name": "@fp-automation/tasks",
+  "version": "0.1.0",
+  "description": "Task/queue/schedule layer for the electron-fp automation SDK. Thin wrapper over @fp-automation/core: submit + poll-to-terminal, plus schedule management. Zero browser logic.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "private": true,
+  "files": ["index.js", "index.d.ts", "lib/"]
+}

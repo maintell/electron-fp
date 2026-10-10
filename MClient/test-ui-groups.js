@@ -26,6 +26,27 @@ ipcMain.handle("tab:get-fingerprint", () => null);
 ipcMain.handle("profile:list", () => []);
 ipcMain.handle("panel:set-open", () => true);
 
+// Group + agent channels app.js init()/refreshAll() invoke at boot:
+// listGroups -> group:list, getActiveGroup -> group:get-active,
+// createGroup -> group:create (init calls it when no group exists), and
+// loadCurrentFingerprint -> loadGroupProxy -> getGroupProxy; initAgentPanel ->
+// agentGetConfig -> agent:config:get. Shapes mirror main.js's empty app state
+// (group:create stores the group so the follow-up group:list returns it, as the
+// real handler does; a bare [] would make the mirror lie about the contract).
+// Missing handlers surface as renderer console errors, which this probe asserts
+// against - they are mirror gaps, not UI bugs.
+const mirrorGroups = [];
+ipcMain.handle("group:list", () => mirrorGroups);
+ipcMain.handle("group:get-active", () => (mirrorGroups.length ? mirrorGroups[mirrorGroups.length - 1].id : null));
+ipcMain.handle("group:create", (e, profileId) => {
+  const id = "group-" + (mirrorGroups.length + 1);
+  mirrorGroups.push({ id, profileId: profileId || "default", profileName: "Default",
+                      tabIds: [], activeTabId: null, isActive: true });
+  return id;
+});
+ipcMain.handle("group:get-proxy", () => null);
+ipcMain.handle("agent:config:get", () => ({ baseUrl: "", model: "", hasKey: false }));
+
 // User-Agent (client-level surface). Registered as part of the mirror above:
 // app.js init() calls listUaPresets() and getUserAgent() on boot.
 const UA_HANDLERS = {

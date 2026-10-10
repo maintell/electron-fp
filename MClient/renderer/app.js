@@ -22,6 +22,9 @@ const $btnDevtools = document.getElementById('btn-devtools');
 const $btnProfile = document.getElementById('btn-profile');
 const $fpPanel = document.getElementById('fp-panel');
 const $fpPanelClose = document.getElementById('fp-panel-close');
+const $btnAutomation = document.getElementById('btn-automation');
+const $apPanel = document.getElementById('ap-panel');
+const $apPanelClose = document.getElementById('ap-panel-close');
 const $fpProfileSelect = document.getElementById('fp-profile-select');
 const $fpApplyProfile = document.getElementById('fp-apply-profile');
 const $fpRandomize = document.getElementById('fp-randomize');
@@ -39,6 +42,16 @@ const $fpUaPreset = document.getElementById('fp-ua-preset');
 const $fpUaInput = document.getElementById('fp-ua-input');
 const $fpUaApply = document.getElementById('fp-ua-apply');
 const $fpUaReset = document.getElementById('fp-ua-reset');
+// --- Group-level proxy (session lane; main.js owns getGroupProxy/setGroupProxy) ---
+const $proxyMode = document.getElementById('proxy-mode');
+const $proxyRules = document.getElementById('proxy-rules');
+const $proxyBypass = document.getElementById('proxy-bypass');
+const $proxyPac = document.getElementById('proxy-pac');
+const $proxyUsername = document.getElementById('proxy-username');
+const $proxyPassword = document.getElementById('proxy-password');
+const $proxyApply = document.getElementById('proxy-apply');
+const $proxySave = document.getElementById('proxy-save');
+const $proxyStatus = document.getElementById('proxy-status');
 const $statusProfile = document.getElementById('status-profile');
 const $statusInfo = document.getElementById('status-info');
 const $statusVersion = document.getElementById('status-version');
@@ -51,6 +64,25 @@ const $fpSelfTestRun = document.getElementById('fp-selftest-run');
 const $fpSelfTestSummary = document.getElementById('fp-selftest-summary');
 const $fpSelfTestResults = document.getElementById('fp-selftest-results');
 const $fpSelfTestShowSkipped = document.getElementById('fp-selftest-show-skipped');
+// --- Side panel second-level tabs (fingerprint | AI | proxy) ---
+const $sideTabFp = document.getElementById('fp-tab-fingerprint');
+const $sideTabAgent = document.getElementById('fp-tab-agent');
+const $sideTabProxy = document.getElementById('fp-tab-proxy');
+const $paneFingerprint = document.getElementById('fp-pane-fingerprint');
+const $paneAgent = document.getElementById('fp-pane-agent');
+const $paneProxy = document.getElementById('fp-pane-proxy');
+// --- AI agent panel ---
+const $agentGoal = document.getElementById('agent-goal');
+const $agentStart = document.getElementById('agent-start');
+const $agentStop = document.getElementById('agent-stop');
+const $agentStatus = document.getElementById('agent-status');
+const $agentBaseUrl = document.getElementById('agent-baseurl');
+const $agentModel = document.getElementById('agent-model');
+const $agentKey = document.getElementById('agent-key');
+const $agentSaveConfig = document.getElementById('agent-save-config');
+const $agentClearHistory = document.getElementById('agent-clear-history');
+const $agentMessages = document.getElementById('agent-messages');
+const $agentApprovals = document.getElementById('agent-approvals');
 
 // --- Tab Rendering ---
 function renderTabs(tabs) {
@@ -365,20 +397,34 @@ $btnDevtools.addEventListener('click', () => {
 // main process to shrink the BrowserView so the panel area is not covered — only
 // then are the panel's buttons actually clickable (clicks would otherwise hit
 // the page rendered by the BrowserView).
-let panelOpen = true; // always visible by default
+let panelOpen = true; // fingerprint column visible
+let autoOpen = false; // automation column visible (shares the fp panel's slot)
+
+// #fp-panel and #ap-panel occupy the SAME right-hand slot and are mutually
+// exclusive, so the main process only ever has to shrink the BrowserView by one
+// panel width (420px). The single boolean IPC carries "is either column open".
+function applyPanelLayout() {
+  $fpPanel.classList.toggle('collapsed', !panelOpen);
+  $apPanel.classList.toggle('collapsed', !autoOpen);
+  $btnProfile.classList.toggle('active', panelOpen);
+  $btnAutomation.classList.toggle('active', autoOpen);
+  window.api.setPanelOpen(panelOpen || autoOpen);
+}
 
 function setPanelState(isOpen) {
   panelOpen = isOpen;
+  autoOpen = false; // one column at a time
   if (isOpen) {
-    $fpPanel.classList.remove('collapsed');
-    $btnProfile.classList.add('active');
     loadProfilesIntoSelect();
     loadCurrentFingerprint();
-  } else {
-    $fpPanel.classList.add('collapsed');
-    $btnProfile.classList.remove('active');
   }
-  window.api.setPanelOpen(isOpen);
+  applyPanelLayout();
+}
+
+function setAutoState(isOpen) {
+  autoOpen = isOpen;
+  panelOpen = false; // one column at a time
+  applyPanelLayout();
 }
 
 // Update the "Group: X / Tab: Y" indicator and load the active group's config.
@@ -392,6 +438,10 @@ $btnProfile.addEventListener('click', () => setPanelState(!panelOpen));
 
 $fpPanelClose.addEventListener('click', () => setPanelState(false));
 
+$btnAutomation.addEventListener('click', () => setAutoState(!autoOpen));
+
+$apPanelClose.addEventListener('click', () => setAutoState(false));
+
 async function loadProfilesIntoSelect() {
   profiles = await window.api.listProfiles();
   $fpProfileSelect.innerHTML = '';
@@ -404,6 +454,8 @@ async function loadProfilesIntoSelect() {
 }
 
 async function loadCurrentFingerprint() {
+  // 组级代理先行：无 tab 的空组也要重填（组语义，不依赖 tab）。
+  await loadGroupProxy();
   const tid = targetTabId();
   if (!tid) return;
   const fp = await window.api.getFingerprint(tid);
@@ -481,6 +533,92 @@ $fpUaReset.addEventListener('click', async () => {
   $fpStatus.textContent = 'UA reset to native';
   await renderFpGroups();
   setTimeout(() => { $fpStatus.textContent = ''; }, 2000);
+});
+
+// --- Group-level proxy · session -------------------------------------------
+// 代理跟随 active group，切换组面板重填。密码 safeStorage 加密存本机，重启自动
+// 恢复；留空=沿用已存（lane 只返 hasPassword，永不返 password，明文只进 set）。
+function updateProxyDisabled() {
+  if (!$proxyMode) return;
+  const mode = $proxyMode.value;
+  if ($proxyRules) $proxyRules.disabled = mode !== 'fixed';
+  if ($proxyBypass) $proxyBypass.disabled = mode !== 'fixed';
+  if ($proxyPac) $proxyPac.disabled = mode !== 'pac';
+}
+
+async function loadGroupProxy() {
+  if (!$proxyMode) return;
+  updateProxyDisabled();
+  if (!hasApi('getGroupProxy')) { warnMissingApi('getGroupProxy'); return; }
+  try {
+    const data = await window.api.getGroupProxy(activeGroupId);
+    if (!data) {
+      $proxyMode.value = 'direct';
+      if ($proxyRules) $proxyRules.value = '';
+      if ($proxyBypass) $proxyBypass.value = '';
+      if ($proxyPac) $proxyPac.value = '';
+      if ($proxyUsername) $proxyUsername.value = '';
+      // password 框永远不回填值；无已存密码 → 首次设置文案。
+      if ($proxyPassword) { $proxyPassword.value = ''; $proxyPassword.placeholder = '首次设置代理密码'; }
+      if ($proxyStatus) $proxyStatus.textContent = '';
+    } else {
+      $proxyMode.value = data.mode || 'direct';
+      if ($proxyRules) $proxyRules.value = data.proxyRules ?? data.rules ?? '';
+      if ($proxyBypass) $proxyBypass.value = data.proxyBypassRules ?? data.bypass ?? '';
+      if ($proxyPac) $proxyPac.value = data.pacScript ?? data.pac ?? '';
+      if ($proxyUsername) $proxyUsername.value = data.username ?? '';
+      // password 框永远不回填值；hasPassword 驱动 placeholder 切换。
+      if ($proxyPassword) { $proxyPassword.value = ''; $proxyPassword.placeholder = data.hasPassword ? '已保存（留空沿用）' : '首次设置代理密码'; }
+      if ($proxyStatus) $proxyStatus.textContent = '';
+    }
+  } catch (e) { console.warn('[renderer] getGroupProxy failed:', e); }
+  updateProxyDisabled();
+}
+
+if ($proxyMode) $proxyMode.addEventListener('change', updateProxyDisabled);
+
+if ($proxyApply) $proxyApply.addEventListener('click', async () => {
+  if (!hasApi('setGroupProxy')) { warnMissingApi('setGroupProxy'); return; }
+  const proxy = {
+    mode: $proxyMode ? $proxyMode.value : 'direct',
+    proxyRules: $proxyRules ? $proxyRules.value.trim() : '',
+    proxyBypassRules: $proxyBypass ? $proxyBypass.value.trim() : '',
+    pacScript: $proxyPac ? $proxyPac.value.trim() : '',
+    username: $proxyUsername ? $proxyUsername.value.trim() : '',
+  };
+  if ($proxyPassword && $proxyPassword.value) proxy.password = $proxyPassword.value;
+  try {
+    const r = await window.api.setGroupProxy(activeGroupId, proxy);
+    if (r && r.ok) {
+      if ($proxyStatus) $proxyStatus.textContent = 'Proxy applied' + (r.note ? ' — ' + r.note : '');
+      if ($proxyPassword) $proxyPassword.value = '';
+    } else if ($proxyStatus) {
+      $proxyStatus.textContent = (r && r.error) || 'Failed to apply proxy';
+    }
+  } catch (e) { if ($proxyStatus) $proxyStatus.textContent = String((e && e.message) || e); }
+});
+
+if ($proxySave) $proxySave.addEventListener('click', async () => {
+  if (!hasApi('updateProfile')) { warnMissingApi('updateProfile'); return; }
+  const g = currentGroup();
+  const profileId = (g && groupProfileOf(g)) || ($fpProfileSelect && $fpProfileSelect.value);
+  if (!profileId) { if ($proxyStatus) $proxyStatus.textContent = 'No profile for active group'; return; }
+  // 存 profile 的是短字段（不含 password），与会话字段的映射见对接假设。
+  const proxyForProfile = {
+    mode: $proxyMode ? $proxyMode.value : 'direct',
+    rules: $proxyRules ? $proxyRules.value.trim() : '',
+    bypass: $proxyBypass ? $proxyBypass.value.trim() : '',
+    pac: $proxyPac ? $proxyPac.value.trim() : '',
+    username: $proxyUsername ? $proxyUsername.value.trim() : '',
+  };
+  try {
+    if (hasApi('getProfile')) {
+      const existing = await window.api.getProfile(profileId);
+      if (!existing) { if ($proxyStatus) $proxyStatus.textContent = 'Profile not found'; return; }
+    }
+    await window.api.updateProfile({ id: profileId, proxy: proxyForProfile });
+    if ($proxyStatus) $proxyStatus.textContent = 'Saved to profile';
+  } catch (e) { if ($proxyStatus) $proxyStatus.textContent = String((e && e.message) || e); }
 });
 
 $fpApplyProfile.addEventListener('click', async () => {
@@ -903,6 +1041,11 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     setPanelState(!panelOpen);
   }
+  // F9: toggle automation panel (shares the fp panel's slot)
+  if (e.key === 'F9') {
+    e.preventDefault();
+    setAutoState(!autoOpen);
+  }
 });
 
 // --- New Tab / New Group ---
@@ -982,6 +1125,13 @@ subscribeEvent('group:created', async () => { scheduleRefreshAll(); });
 subscribeEvent('group:closed', async () => { scheduleRefreshAll(); });
 subscribeEvent('group:activated', async (data) => {
   if (data) activeGroupId = (typeof data === 'string') ? data : (data.groupId || data.id || activeGroupId);
+  // Agent runs are scoped to a group: the main process cancels the run on
+  // switch. Do NOT call agentStop() here — that would race the main lane's
+  // own cancel -> done/error sequence. Just hint; the done/error event below
+  // resets the Start/Stop buttons via setAgentRunning().
+  if (agentRunning && $agentStatus) {
+    $agentStatus.textContent = '已随组切换停止';
+  }
   await refreshAll();
 });
 subscribeEvent('group:profile-changed', async (data) => {
@@ -1188,5 +1338,300 @@ $fpSelfTestRun.addEventListener('click', runSelfTest);
 $fpSelfTestShowSkipped.addEventListener('change', () => {
   if (lastSelfTest) renderSelfTest(lastSelfTest);
 });
+
+// --- AI agent sidebar -----------------------------------------------
+// Renderer side only: the main-process lane owns agent/* IPC. Every call is
+// existence-guarded (hasApi) and every subscription goes through
+// subscribeEvent, so a main without the agent lane only logs warnings.
+let agentRunning = false;
+const agentApprovalTimers = new Map(); // approvalKey -> countdown interval id
+
+function setSideTab(which) {
+  const isFp = which !== 'agent' && which !== 'proxy';
+  const isAgent = which === 'agent';
+  const isProxy = which === 'proxy';
+  $paneFingerprint.hidden = !isFp;
+  $paneAgent.hidden = !isAgent;
+  if ($paneProxy) $paneProxy.hidden = !isProxy;
+  $sideTabFp.classList.toggle('side-tab-active', isFp);
+  $sideTabAgent.classList.toggle('side-tab-active', isAgent);
+  if ($sideTabProxy) $sideTabProxy.classList.toggle('side-tab-active', isProxy);
+}
+
+function setAgentRunning(running, statusText) {
+  agentRunning = running;
+  $agentStart.disabled = running;
+  $agentStop.disabled = !running;
+  if (statusText !== undefined) $agentStatus.textContent = statusText;
+}
+
+function agentAppendMessage(role, text, image) {
+  const cls = role === 'user' ? 'agent-msg-user'
+    : role === 'tool' ? 'agent-msg-tool' : 'agent-msg-assistant';
+  const el = document.createElement('div');
+  el.className = `agent-msg ${cls}`;
+  if (text) {
+    // textContent, never innerHTML: tool output must not become markup.
+    const p = document.createElement('div');
+    p.className = 'agent-msg-text';
+    p.textContent = text;
+    el.appendChild(p);
+  }
+  if (image) {
+    // Screenshot tool results render inline. The CSP allows data: images
+    // (img-src 'self' data:), which is the expected payload shape.
+    const img = document.createElement('img');
+    img.className = 'agent-msg-img';
+    img.src = image;
+    img.alt = 'tool screenshot';
+    el.appendChild(img);
+  }
+  $agentMessages.appendChild(el);
+  $agentMessages.scrollTop = $agentMessages.scrollHeight;
+}
+
+function agentStopApprovalTimer(key) {
+  const id = agentApprovalTimers.get(key);
+  if (id !== undefined) {
+    clearInterval(id);
+    agentApprovalTimers.delete(key);
+  }
+}
+
+function agentAddApproval(evt) {
+  const runId = evt.runId || evt.id || '';
+  const tool = evt.tool || evt.name || 'tool';
+  const args = evt.args !== undefined ? evt.args : evt.params;
+  const key = `${runId}:${tool}:${Date.now()}`;
+  let summary = '';
+  try {
+    summary = typeof args === 'string' ? args : JSON.stringify(args);
+  } catch (e) { summary = String(args); }
+  if (summary && summary.length > 300) summary = summary.slice(0, 300) + '…';
+
+  const card = document.createElement('div');
+  card.className = 'agent-approval';
+
+  const name = document.createElement('div');
+  name.className = 'agent-approval-tool';
+  name.textContent = tool;
+  card.appendChild(name);
+
+  if (summary) {
+    const params = document.createElement('div');
+    params.className = 'agent-approval-args';
+    params.textContent = summary;
+    card.appendChild(params);
+  }
+
+  const state = document.createElement('div');
+  state.className = 'agent-approval-state';
+  state.textContent = 'waiting for decision';
+
+  const row = document.createElement('div');
+  row.className = 'agent-approval-row';
+
+  const okBtn = document.createElement('button');
+  okBtn.className = 'fp-btn fp-btn-primary';
+  okBtn.textContent = '批准';
+  const noBtn = document.createElement('button');
+  noBtn.className = 'fp-btn fp-btn-danger';
+  noBtn.textContent = '拒绝';
+  const countdown = document.createElement('span');
+  countdown.className = 'agent-approval-countdown';
+
+  const decide = (approved) => {
+    agentStopApprovalTimer(key);
+    okBtn.disabled = true;
+    noBtn.disabled = true;
+    if (!hasApi('agentApprove')) { warnMissingApi('agentApprove'); return; }
+    try {
+      const r = window.api.agentApprove(runId, approved);
+      if (r && typeof r.catch === 'function') r.catch((e) => console.warn('[renderer] agentApprove failed:', e));
+    } catch (e) { console.warn('[renderer] agentApprove failed:', e); }
+    state.textContent = approved ? 'approved' : 'rejected';
+  };
+  okBtn.addEventListener('click', () => decide(true));
+  noBtn.addEventListener('click', () => decide(false));
+
+  // 30s countdown: display only. On expiry the card is marked expired and the
+  // buttons disabled; the main lane owns the actual timeout policy.
+  let remain = 30;
+  countdown.textContent = `${remain}s`;
+  agentApprovalTimers.set(key, setInterval(() => {
+    remain -= 1;
+    if (remain <= 0) {
+      agentStopApprovalTimer(key);
+      okBtn.disabled = true;
+      noBtn.disabled = true;
+      countdown.textContent = 'expired';
+      state.textContent = 'expired (no decision sent)';
+      return;
+    }
+    countdown.textContent = `${remain}s`;
+  }, 1000));
+
+  row.appendChild(okBtn);
+  row.appendChild(noBtn);
+  row.appendChild(countdown);
+  card.appendChild(row);
+  card.appendChild(state);
+  $agentApprovals.appendChild(card);
+}
+
+subscribeEvent('agent:event', (evt) => {
+  if (!evt || typeof evt.type !== 'string') return;
+  switch (evt.type) {
+    case 'agent:started': {
+      // Start click already did setAgentRunning(true): only paint the status line.
+      $agentStatus.textContent = 'running: ' + (evt.goal || '');
+      break;
+    }
+    case 'agent:tool-call': {
+      const name = evt.name || 'tool';
+      let summary = '';
+      try {
+        summary = typeof evt.args === 'string' ? evt.args : JSON.stringify(evt.args);
+      } catch (e) { summary = String(evt.args); }
+      if (summary && summary.length > 300) summary = summary.slice(0, 300) + '…';
+      agentAppendMessage('tool', '→ ' + name + (summary ? ' ' + summary : ''));
+      break;
+    }
+    case 'agent:tool-result': {
+      const name = evt.name || 'tool';
+      if (evt.image) {
+        agentAppendMessage('tool', '← ' + name, evt.image);
+        break;
+      }
+      let summary = '';
+      try {
+        summary = typeof evt.result === 'string' ? evt.result : JSON.stringify(evt.result ?? '');
+      } catch (e) { summary = String(evt.result); }
+      if (summary && summary.length > 300) summary = summary.slice(0, 300) + '…';
+      agentAppendMessage('tool', '← ' + name + (summary ? ' ' + summary : ''));
+      break;
+    }
+    case 'agent:approval-needed': {
+      const tc = evt.toolCall || {};
+      // agentAddApproval expects {runId, tool, args}; feed it from toolCall.
+      // Its buttons call agentApprove(runId, approved) — runId, not toolCall.id.
+      agentAddApproval({ runId: evt.runId, tool: tc.name || 'tool', args: tc.args });
+      const last = $agentApprovals.lastElementChild;
+      if (last) {
+        if (evt.runId) last.dataset.runId = evt.runId;
+        if (tc.id) last.dataset.toolCallId = tc.id;
+      }
+      $agentStatus.textContent = 'waiting for approval';
+      break;
+    }
+    case 'agent:approval-resolved': {
+      const label = evt.reason === 'timeout'
+        ? 'expired (auto-denied)'
+        : (evt.approved ? 'approved' : 'denied');
+      for (const k of [...agentApprovalTimers.keys()]) {
+        if (evt.runId && k.startsWith(evt.runId + ':')) agentStopApprovalTimer(k);
+      }
+      const cards = [...$agentApprovals.querySelectorAll('.agent-approval')];
+      let targets = evt.runId ? cards.filter((c) => c.dataset.runId === evt.runId) : [];
+      if (!targets.length && cards.length) targets = [cards[cards.length - 1]];
+      for (const card of targets) {
+        const state = card.querySelector('.agent-approval-state');
+        if (state) state.textContent = label;
+        if (evt.reason === 'timeout') {
+          const cd = card.querySelector('.agent-approval-countdown');
+          if (cd) cd.textContent = 'expired';
+        }
+        card.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+      }
+      break;
+    }
+    case 'agent:done': {
+      let text = '';
+      try {
+        text = typeof evt.result === 'string' ? evt.result : JSON.stringify(evt.result ?? '');
+      } catch (e) { text = String(evt.result); }
+      if (text) agentAppendMessage('assistant', text);
+      setAgentRunning(false, 'done');
+      break;
+    }
+    case 'agent:stopped': {
+      setAgentRunning(false, evt.reason || 'stopped');
+      break;
+    }
+    case 'agent:error': {
+      const raw = evt.error ?? evt.message ?? 'unknown';
+      let msg = '';
+      try {
+        msg = typeof raw === 'string' ? raw : JSON.stringify(raw);
+      } catch (e) { msg = String(raw); }
+      setAgentRunning(false, 'error: ' + msg);
+      break;
+    }
+    default:
+      console.warn('[renderer] unknown agent:event type:', evt.type);
+  }
+});
+
+$sideTabFp.addEventListener('click', () => setSideTab('fingerprint'));
+$sideTabAgent.addEventListener('click', () => setSideTab('agent'));
+if ($sideTabProxy) $sideTabProxy.addEventListener('click', () => setSideTab('proxy'));
+
+$agentStart.addEventListener('click', async () => {
+  const goal = $agentGoal.value.trim();
+  if (!goal || agentRunning) return;
+  if (!hasApi('agentStart')) { warnMissingApi('agentStart'); return; }
+  setAgentRunning(true, 'running…');
+  agentAppendMessage('user', goal);
+  try {
+    await window.api.agentStart({ goal });
+  } catch (e) {
+    setAgentRunning(false, 'error: ' + (e && e.message || e));
+  }
+});
+
+$agentStop.addEventListener('click', async () => {
+  if (!hasApi('agentStop')) { warnMissingApi('agentStop'); return; }
+  try {
+    await window.api.agentStop();
+  } catch (e) { console.warn('[renderer] agentStop failed:', e); }
+  // Buttons reset when the main lane emits done/error, not here.
+});
+
+$agentSaveConfig.addEventListener('click', async () => {
+  if (!hasApi('agentSetConfig')) { warnMissingApi('agentSetConfig'); return; }
+  try {
+    await window.api.agentSetConfig({
+      baseUrl: $agentBaseUrl.value.trim(),
+      model: $agentModel.value.trim(),
+      key: $agentKey.value,
+    });
+    // The key must not linger in the renderer in plaintext: clear the box.
+    $agentKey.value = '';
+    $agentStatus.textContent = 'config saved';
+  } catch (e) {
+    $agentStatus.textContent = 'save failed: ' + (e && e.message || e);
+  }
+});
+
+$agentClearHistory.addEventListener('click', () => {
+  $agentMessages.innerHTML = '';
+  $agentApprovals.innerHTML = '';
+  for (const id of agentApprovalTimers.values()) clearInterval(id);
+  agentApprovalTimers.clear();
+});
+
+async function initAgentPanel() {
+  setSideTab('fingerprint');
+  if (!hasApi('agentGetConfig')) { warnMissingApi('agentGetConfig'); return; }
+  try {
+    const cfg = await window.api.agentGetConfig() || {};
+    if (cfg.baseUrl) $agentBaseUrl.value = cfg.baseUrl;
+    if (cfg.model) $agentModel.value = cfg.model;
+    // Deliberately never fill $agentKey: the key must not be echoed back
+    // into the renderer in plaintext.
+  } catch (e) { console.warn('[renderer] agentGetConfig failed:', e); }
+}
+
+initAgentPanel();
 
 init();

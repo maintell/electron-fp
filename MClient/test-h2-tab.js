@@ -8,7 +8,8 @@
 // It was only found by opening a tab from a preset and measuring THAT tab.
 //
 // So: drive the real UI through window.api, create a tab from each preset, then
-// parse the SETTINGS frame off that tab's own partition (fp-tab-<id>).
+// parse the SETTINGS frame off that tab's own live session (resolved from the
+// tab's webContents; MClient shares one partition per GROUP, fp-group-<id>).
 //
 // It also pins the honesty rule. The H2 plane is frozen at partition creation,
 // so changing it on a live tab cannot work. The product must SAY that rather
@@ -16,7 +17,7 @@
 // outcome, because the panel then claims a fingerprint the session does not
 // produce.
 
-const { app, session, BrowserWindow } = require('electron');
+const { app, BrowserWindow } = require('electron');
 const path = require('path');
 
 let pass = 0, fail = 0;
@@ -93,13 +94,15 @@ function startProbe() {
 }
 
 const probes = [];
-async function measurePartition(partition) {
+// Takes the tab's LIVE session - the exact one its BrowserView was created on.
+// MClient shares one partition per GROUP (fp-group-<groupId>); measuring
+// 'fp-tab-<tabId>' would probe a different, empty session and prove nothing.
+async function measurePartition(sess) {
   const probe = await startProbe();
   probes.push(probe);
   // NOTE: deliberately NO fromPartition options here. This measures the
-  // partition as the product left it. Passing a profile would work and prove
-  // nothing about whether createTabView() supplied one.
-  const sess = session.fromPartition(partition);
+  // session as the product left it. Passing a profile would work and prove
+  // nothing about whether the tab-creation path supplied one.
   sess.setCertificateVerifyProc((req, cb) => cb(0));
   const win = new BrowserWindow({
     show: false,
@@ -123,7 +126,9 @@ const EXPECT = {
 
 app.whenReady().then(async () => {
   keepAlive = new BrowserWindow({ show: false, width: 80, height: 80 });
-  require(path.join(__dirname, 'main.js'));
+  // Capture the module so the test can resolve each tab's OWN live session
+  // through the exported tabs map (no partition naming to re-derive).
+  const mainMod = require(path.join(__dirname, 'main.js'));
   await new Promise((r) => setTimeout(r, 4000));
 
   const wins = BrowserWindow.getAllWindows()
@@ -169,8 +174,14 @@ app.whenReady().then(async () => {
     }
     await new Promise((r) => setTimeout(r, 1200));
 
-    // Measure the tab's OWN partition, as the product built it.
-    const rec = await measurePartition('fp-tab-' + tabId);
+    // Measure the tab's OWN session, as the product built it.
+    const tab = mainMod.tabs.get(tabId);
+    const sess = tab && tab.view && tab.view.webContents ? tab.view.webContents.session : null;
+    if (!sess) {
+      ck(pr.id + ': tab has a live session', false, 'no session for ' + tabId);
+      continue;
+    }
+    const rec = await measurePartition(sess);
     if (!rec) {
       ck(pr.id + ': measured that tab\'s partition', false, 'no SETTINGS captured');
       continue;

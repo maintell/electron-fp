@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<!-- Standalone viewer for the automation script panel.
+     Append ?demo=1 to see it with mock fixtures (no bridge needed). -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Automation Panel</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <div id="automation-panel"></div>
+  <!-- Templates region (acceptance #33): sibling of #automation-panel because
+       mount() rebuilds that node's innerHTML. Filled by panel.js only when the
+       bridge exposes templates.*; the fragment labels itself (own toolbar). -->
+  <div id="ap-templates"></div>
+  <script src="panel.js"></script>
+  <script src="panel-templates.js"></script>
+</body>
+</html>

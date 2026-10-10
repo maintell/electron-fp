@@ -1,0 +1,4 @@
+SDK date: 2026-09-16
+Electron: v45.0.0-nightly.20260825
+electron-fp commit: 76e6fee2154b9da40d40f661a6c465e3d9e0d4aa
+Platform: win32-x64

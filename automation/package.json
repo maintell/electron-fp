@@ -1,0 +1,6 @@
+{
+  "name": "electron-fp-automation",
+  "private": true,
+  "type": "commonjs",
+  "//": "Module-type marker. The packaged copy lives under out/Default/, whose package.json is type:module for the TS toolchain; with no nearer marker Node would resolve resources/automation/**/*.js as ESM, and the app's require('../automation/electron/wire') would throw - swallowed by the one-liner's try/catch, producing a silent no-bridge run. Keep this file CommonJS and copy it with the tree."
+}

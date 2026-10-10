@@ -1,0 +1,10 @@
+{
+  "name": "@fp-automation/rpa",
+  "version": "0.1.0",
+  "description": "RPA AST builder/serializer for the electron-fp automation SDK. Schema mirrors automation/runtime/rpa-ast.js (same node types/fields); compiles through the same runtime. Zero browser logic.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "private": true,
+  "files": ["index.js", "index.d.ts", "lib/"]
+}

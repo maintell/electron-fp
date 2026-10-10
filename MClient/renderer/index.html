@@ -5,47 +5,59 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
   <title>Electron FP Browser</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="automation-panel/panel.css">
 </head>
 <body>
-  <!-- Top bar: group bar + tab bar + address bar (full width) -->
+  <!-- Top bar: profile-group row only (full width) -->
   <div id="top-bar">
     <div id="group-bar" title="Profile groups (top level)">
       <div id="groups-container"></div>
       <button id="new-group-btn" title="New profile group (Ctrl+G)">+ Profile</button>
-    </div>
-    <div id="tab-bar" title="Tabs in the active group">
-      <span id="tab-bar-label" title="Sub-tabs of the active group">Tabs</span>
-      <div id="tabs-container"></div>
-      <button id="new-tab-btn" title="New Tab (Ctrl+T)">+</button>
       <div id="window-controls">
         <button id="btn-minimize" class="wc-btn" title="Minimize">&#x2014;</button>
         <button id="btn-maximize" class="wc-btn" title="Maximize">&#x25A1;</button>
         <button id="btn-close" class="wc-btn wc-close" title="Close">&#x2715;</button>
       </div>
     </div>
-    <div id="address-bar">
-      <button id="btn-back" class="nav-btn" title="Back">&#x25C0;</button>
-      <button id="btn-forward" class="nav-btn" title="Forward">&#x25B6;</button>
-      <button id="btn-reload" class="nav-btn" title="Reload">&#x21BB;</button>
-      <input type="text" id="url-input" placeholder="Enter URL or search..." spellcheck="false" />
-      <button id="btn-go" class="nav-btn nav-go" title="Go">&#x23CE;</button>
-      <button id="btn-devtools" class="nav-btn" title="DevTools (F12)">&#x2699;</button>
-      <button id="btn-profile" class="nav-btn" title="Toggle fingerprint panel (F10)">&#x1F3AE;</button>
-    </div>
   </div>
 
-  <!-- Main row: web content (left) + fingerprint panel (right column) -->
+  <!-- Main row: browser column (left) + fingerprint panel (right column, full height) -->
   <div id="main-row">
-    <!-- BrowserView is positioned over this area via setBounds -->
-    <div id="content-area"></div>
+    <div id="browser-col">
+      <div id="tab-bar" title="Tabs in the active group">
+        <span id="tab-bar-label" title="Sub-tabs of the active group">Tabs</span>
+        <div id="tabs-container"></div>
+        <button id="new-tab-btn" title="New Tab (Ctrl+T)">+</button>
+      </div>
+      <div id="address-bar">
+        <button id="btn-back" class="nav-btn" title="Back">&#x25C0;</button>
+        <button id="btn-forward" class="nav-btn" title="Forward">&#x25B6;</button>
+        <button id="btn-reload" class="nav-btn" title="Reload">&#x21BB;</button>
+        <input type="text" id="url-input" placeholder="Enter URL or search..." spellcheck="false" />
+        <button id="btn-go" class="nav-btn nav-go" title="Go">&#x23CE;</button>
+        <button id="btn-devtools" class="nav-btn" title="DevTools (F12)">&#x2699;</button>
+        <button id="btn-profile" class="nav-btn" title="Toggle fingerprint panel (F10)">&#x1F3AE;</button>
+        <button id="btn-automation" class="nav-btn" title="Toggle automation panel (F9)">&#x1F916;</button>
+      </div>
+      <!-- BrowserView is positioned over this area via setBounds -->
+      <div id="content-area"></div>
+    </div><!-- /browser-col -->
 
-    <!-- Fingerprint Config Panel: a real layout column, not a floating overlay -->
+    <!-- Side Panel: fingerprint + AI agent (real layout column, not floating) -->
     <div id="fp-panel">
       <div id="fp-panel-header">
         <h3>Fingerprint <span id="fp-tab-indicator">Tab: -</span></h3>
         <button id="fp-panel-close" title="Hide panel (F10)">&times;</button>
       </div>
+      <!-- Second-level tabs: fingerprint vs AI vs proxy -->
+      <div class="side-tabs">
+        <button id="fp-tab-fingerprint" class="side-tab side-tab-active">指纹</button>
+        <button id="fp-tab-agent" class="side-tab">AI</button>
+        <button id="fp-tab-proxy" class="side-tab">代理</button>
+      </div>
       <div id="fp-panel-body">
+        <!-- ===== Fingerprint pane (all pre-existing fingerprint UI, ids unchanged) ===== -->
+        <div id="fp-pane-fingerprint">
         <!-- Profile selector -->
         <div class="fp-section">
           <label>Profile</label>
@@ -141,6 +153,88 @@
           <span id="fp-status"></span>
         </div>
         </div><!-- /fp-pane-config -->
+        </div><!-- /fp-pane-fingerprint -->
+
+        <!-- ===== AI agent pane ================================ -->
+        <div id="fp-pane-agent" hidden>
+          <!-- Goal + run controls -->
+          <div class="fp-section">
+            <label>Goal</label>
+            <textarea id="agent-goal" rows="3" spellcheck="false"
+                      placeholder="Describe the task for the AI operator..."></textarea>
+            <div class="fp-row">
+              <button id="agent-start" class="fp-btn fp-btn-primary">Start</button>
+              <button id="agent-stop" class="fp-btn fp-btn-danger" disabled>Stop</button>
+            </div>
+            <div id="agent-status" class="agent-status">idle</div>
+          </div>
+
+          <!-- Model config (key never echoed back, see app.js) -->
+          <div class="fp-section">
+            <label>Model config</label>
+            <input id="agent-baseurl" type="text" spellcheck="false" placeholder="Base URL (e.g. https://api.openai.com/v1)" />
+            <input id="agent-model" type="text" spellcheck="false" placeholder="Model (e.g. gpt-4o)" />
+            <input id="agent-key" type="password" autocomplete="off" spellcheck="false" placeholder="API key (cleared after save)" />
+            <div class="fp-row">
+              <button id="agent-save-config" class="fp-btn">Save config</button>
+              <button id="agent-clear-history" class="fp-btn">Clear history</button>
+            </div>
+          </div>
+
+          <!-- Tool-approval cards -->
+          <div class="fp-section">
+            <label>Approvals</label>
+            <div id="agent-approvals"></div>
+          </div>
+
+          <!-- Message stream -->
+          <div class="fp-section">
+            <label>Messages</label>
+            <div id="agent-messages"></div>
+          </div>
+        </div><!-- /fp-pane-agent -->
+
+        <!-- ===== Proxy pane (group-level session proxy, ids unchanged) ===== -->
+        <div id="fp-pane-proxy" hidden>
+        <!-- Proxy · session (group-level: follows the active group, refilled on group switch) -->
+        <div class="fp-section fp-proxy" id="proxy-section">
+          <label>Proxy · session <span class="fp-ua-tag">group-level</span></label>
+          <div class="fp-proxy-note">代理跟随 active group，切换组面板重填。密码加密存本机，重启自动恢复；留空=沿用。</div>
+          <label class="fp-proxy-sub">Mode</label>
+          <select id="proxy-mode">
+            <option value="direct">direct</option>
+            <option value="system">system</option>
+            <option value="fixed">fixed</option>
+            <option value="pac">pac</option>
+          </select>
+          <input id="proxy-rules" type="text" spellcheck="false" placeholder="http=127.0.0.1:8080;https=127.0.0.1:8080（可直接粘完整 URL，账密自动拆分；mode 会自动匹配）" />
+          <input id="proxy-bypass" type="text" spellcheck="false" placeholder="localhost,127.0.0.1" />
+          <input id="proxy-pac" type="text" spellcheck="false" placeholder="PAC URL（仅 pac 模式）" />
+          <div class="fp-row">
+            <input id="proxy-username" type="text" autocomplete="off" spellcheck="false" placeholder="用户名（可选）" />
+            <input id="proxy-password" type="password" autocomplete="off" spellcheck="false" placeholder="首次设置代理密码" />
+          </div>
+          <div class="fp-row">
+            <button id="proxy-apply" class="fp-btn fp-btn-primary">Apply Proxy</button>
+            <button id="proxy-save" class="fp-btn">Save to Profile</button>
+          </div>
+          <div id="proxy-status" class="fp-proxy-status"></div>
+        </div>
+        </div><!-- /fp-pane-proxy -->
+      </div>
+    </div>
+
+    <!-- Automation Panel: shares the fp panel's right-hand slot (mutually
+         exclusive). Same 420px width so the single panel:set-open IPC shrinks
+         the BrowserView correctly for either column. Hidden by default. -->
+    <div id="ap-panel" class="collapsed">
+      <div id="ap-panel-header">
+        <h3>Automation</h3>
+        <button id="ap-panel-close" title="Hide panel (F9)">&times;</button>
+      </div>
+      <div id="ap-panel-body">
+        <div id="automation-panel"></div>
+        <div id="ap-templates"></div>
       </div>
     </div>
   </div>
@@ -152,6 +246,8 @@
     <span id="status-version"></span>
   </div>
 
+  <script src="automation-panel/panel.js"></script>
+  <script src="automation-panel/panel-templates.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

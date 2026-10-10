@@ -144,16 +144,17 @@ ck('main.js applies TLS before the view is constructed',
   main.indexOf('applyTabTLSConfig(partition') < main.indexOf('new BrowserView'));
 
 // --- 9. The UA-precedent callers must preserve the TLS config. ------------
-// recreateTabView() resets whatever it is handed, so a caller that omits the
-// TLS arg silently wipes the profile.
-// The call spans two lines, so match across newlines.
-// The HTTP/2 plane is now a sixth argument: it cannot actually change on a live
-// tab, but passing tab.h2 is what lets recreateTabView() DETECT a mismatch and
+// recreateGroupViews() resets whatever it is handed, so a caller that omits the
+// TLS arg silently wipes the profile. (MClient shares one profile per GROUP, so
+// tab:set-ua recreates the whole group's views; the invariant is unchanged -
+// drop tls/h2 from the call and this check fails again.)
+// The HTTP/2 plane rides along: it cannot actually change on a live group, but
+// passing group.h2 is what lets recreateGroupViews() DETECT a mismatch and
 // report it instead of silently ignoring the request.
 ck('tab:set-ua passes the live TLS config through',
-  /recreateTabView\(tid,[^;]*?tab\.tls \|\| null/s.test(main));
+  /recreateGroupViews\(group\.id,[^;]*?tls:\s*group\.tls \|\| null/s.test(main));
 ck('tab:set-ua also passes the HTTP/2 config (so drift is reported)',
-  /recreateTabView\(tid,[^;]*?tab\.tls \|\| null,\s*tab\.h2 \|\| null\)/s.test(main));
+  /recreateGroupViews\(group\.id,[^;]*?tls:\s*group\.tls \|\| null,\s*h2:\s*group\.h2 \|\| null\s*\}\s*\)/s.test(main));
 
 console.log('\n' + (fail === 0
   ? 'PASS: ' + pass + ' checks, ' + skip + ' skipped'

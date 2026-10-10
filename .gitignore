@@ -65,3 +65,16 @@ spec/fixtures/logo.png
 
 # Packaged MClient binary (493MB build output, reproducible via fixer lane)
 MClient/dist/
+
+# fingerSDK runtime binary (493MB, ships outside git alongside the SDK)
+fingerSDK/bin/
+
+# MClient delivery package (staging dir + zip, built on demand, never committed)
+MClient-win64/
+MClient-win64.zip
+
+# Automation runtime JSON store (data destination, written at runtime — never committed)
+automation-store.json
+
+# Playwright MCP scratch (tool artifacts, not part of the product)
+.playwright-mcp/

@@ -1,0 +1,7 @@
+{
+  "name": "sdk-mini-browser",
+  "version": "1.0.0",
+  "description": "Minimal fingerSDK sample browser (single partition, profile.json driven)",
+  "main": "main.js",
+  "license": "UNLICENSED"
+}

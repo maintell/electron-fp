@@ -16,6 +16,9 @@ const $btnDevtools = document.getElementById('btn-devtools');
 const $btnProfile = document.getElementById('btn-profile');
 const $fpPanel = document.getElementById('fp-panel');
 const $fpPanelClose = document.getElementById('fp-panel-close');
+const $btnAutomation = document.getElementById('btn-automation');
+const $apPanel = document.getElementById('ap-panel');
+const $apPanelClose = document.getElementById('ap-panel-close');
 const $fpProfileSelect = document.getElementById('fp-profile-select');
 const $fpApplyProfile = document.getElementById('fp-apply-profile');
 const $fpRandomize = document.getElementById('fp-randomize');
@@ -133,20 +136,34 @@ $btnDevtools.addEventListener('click', () => {
 // main process to shrink the BrowserView so the panel area is not covered — only
 // then are the panel's buttons actually clickable (clicks would otherwise hit
 // the page rendered by the BrowserView).
-let panelOpen = true; // always visible by default
+let panelOpen = true;   // fingerprint column visible
+let autoOpen = false;   // automation column visible (shares the fp panel's slot)
+
+// #fp-panel and #ap-panel occupy the SAME right-hand slot and are mutually
+// exclusive, so the main process only ever has to shrink the BrowserView by one
+// panel width (420px). The single boolean IPC carries "is either column open".
+function applyPanelLayout() {
+  $fpPanel.classList.toggle('collapsed', !panelOpen);
+  $apPanel.classList.toggle('collapsed', !autoOpen);
+  $btnProfile.classList.toggle('active', panelOpen);
+  $btnAutomation.classList.toggle('active', autoOpen);
+  window.api.setPanelOpen(panelOpen || autoOpen);
+}
 
 function setPanelState(isOpen) {
   panelOpen = isOpen;
+  autoOpen = false; // one column at a time
   if (isOpen) {
-    $fpPanel.classList.remove('collapsed');
-    $btnProfile.classList.add('active');
     loadProfilesIntoSelect();
     loadCurrentFingerprint();
-  } else {
-    $fpPanel.classList.add('collapsed');
-    $btnProfile.classList.remove('active');
   }
-  window.api.setPanelOpen(isOpen);
+  applyPanelLayout();
+}
+
+function setAutoState(isOpen) {
+  autoOpen = isOpen;
+  panelOpen = false; // one column at a time
+  applyPanelLayout();
 }
 
 // Update the "Tab: N" indicator and load THAT tab's own fingerprint config
@@ -159,6 +176,10 @@ function syncPanelToTab(tabId, title) {
 $btnProfile.addEventListener('click', () => setPanelState(!panelOpen));
 
 $fpPanelClose.addEventListener('click', () => setPanelState(false));
+
+$btnAutomation.addEventListener('click', () => setAutoState(!autoOpen));
+
+$apPanelClose.addEventListener('click', () => setAutoState(false));
 
 async function loadProfilesIntoSelect() {
   profiles = await window.api.listProfiles();
@@ -653,6 +674,11 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'F10') {
     e.preventDefault();
     setPanelState(!panelOpen);
+  }
+  // F9: toggle automation panel (shares the fp panel's slot)
+  if (e.key === 'F9') {
+    e.preventDefault();
+    setAutoState(!autoOpen);
   }
 });
 

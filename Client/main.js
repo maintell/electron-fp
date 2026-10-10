@@ -3,6 +3,75 @@
 const { app, BrowserWindow, BrowserView, ipcMain, session, protocol, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
+
+// --- Configurable data dir (doc 17 Part D / OQ-19) ---------------------------
+// userData holds the persist:auto-<id> partitions (launcher.js / profile-
+// manager.js). Relocate it with --user-data-dir=<path> (CLI) or FP_DATA_DIR
+// (env); CLI wins over env. This MUST run before app.whenReady() and before any
+// window / partition / getPath('userData') use, so it sits at the top of the
+// entry, ahead of every local require. Partition names stay RELATIVE to userData
+// (persist:auto-<id>), so relocating moves every partition and never touches the
+// H2-frozen naming (doc 17 D.4) - do not make partition paths absolute.
+function fpResolveDataDir(argv, env) {
+  const args = Array.isArray(argv) ? argv : [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--user-data-dir' && args[i + 1] && !String(args[i + 1]).startsWith('--')) {
+      return String(args[i + 1]);
+    }
+    if (typeof a === 'string' && a.startsWith('--user-data-dir=')) {
+      const v = a.slice('--user-data-dir='.length);
+      if (v) return v;
+    }
+  }
+  const e = env && env.FP_DATA_DIR;
+  return e ? String(e) : null;
+}
+
+// Copy persisted state from the default dir into a fresh target. NEVER moves or
+// deletes the source (doc 17 D.3). Only runs when the target is empty; the
+// marker makes it run at most once. Any failure throws so the caller can fail
+// fast - never fall back to the default, which would split the data.
+function fpMigrateDataDir(oldDir, newDir) {
+  if (path.resolve(oldDir) === path.resolve(newDir)) return { migrated: false, reason: 'same-dir' };
+  const marker = path.join(newDir, '.fp-data-migrated-from');
+  if (fs.existsSync(marker)) return { migrated: false, reason: 'already-migrated' };
+  if (!fs.existsSync(oldDir)) return { migrated: false, reason: 'no-old-data' };
+  fs.mkdirSync(newDir, { recursive: true });
+  if (fs.readdirSync(newDir).length > 0) return { migrated: false, reason: 'target-not-empty' };
+  // Partitions/ holds every persist:auto-<id> cookie/storage/LevelDB; app-state
+  // files ride along. Both are copied, never removed.
+  const parts = path.join(oldDir, 'Partitions');
+  if (fs.existsSync(parts)) fs.cpSync(parts, path.join(newDir, 'Partitions'), { recursive: true });
+  for (const f of ['profiles.json', 'automation-store.json']) {
+    const src = path.join(oldDir, f);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(newDir, f));
+  }
+  fs.writeFileSync(marker, oldDir + '\n');
+  return { migrated: true };
+}
+
+(function () {
+  const dir = fpResolveDataDir(process.argv, process.env);
+  if (!dir) return; // no config: Electron's default userData is left untouched
+  const target = path.resolve(dir);
+  try {
+    const mode = String(process.env.FP_DATA_DIR_MIGRATE || 'none').toLowerCase();
+    if (mode === 'copy' || mode === 'move') {
+      // 'move' is accepted but implemented as a copy: the design forbids
+      // moving/deleting the source, so neither mode is destructive.
+      const r = fpMigrateDataDir(app.getPath('userData'), target);
+      if (r.migrated) console.log('[fp] data-dir: migrated existing state -> ' + target);
+    }
+    if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+    app.setPath('userData', target);
+  } catch (e) {
+    // Fail fast: silently falling back to the default would split the data.
+    console.error('[fp] data-dir: FATAL: ' + ((e && e.message) || e));
+    process.exit(1);
+  }
+})();
+
 const http = require('http');
 // Shared probe: the SAME PROBE / compare() that fingerprint/scripts/smoke.js
 // uses. One probe, two callers - see Client/fp-probe.js.
@@ -458,6 +527,24 @@ function createMainWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
+  // --- P0 navigation + permission guardrails (ADR-6, mirrors MClient) ---
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    try {
+      if (!String(url || '').startsWith('file://')) event.preventDefault();
+    } catch (_) {
+      try { event.preventDefault(); } catch (_) {}
+    }
+  });
+  mainWindow.webContents.on('will-attach-webview', (event) => {
+    try { event.preventDefault(); } catch (_) {}
+  });
+  try {
+    if (typeof session.defaultSession.setPermissionRequestHandler === 'function') {
+      session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
+    }
+  } catch (_) { /* older Electron: no handler API — permissions stay default */ }
+
   // Resize active BrowserView on window resize (also shrink if panel open)
   mainWindow.on('resize', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -494,30 +581,65 @@ function createMainWindow() {
 }
 
 // --- IPC Handlers ---
+// Sender gate (gap-analysis B3 / ADR-6 P0): every ipcMain.handle below must go
+// through checked(). Renderer XSS must not reach main with forged tabIds.
+// Rule: sender must be the main window's own webContents (the file:// shell
+// loaded by createMainWindow). Automation channels additionally enforce their
+// own allowlist inside automation/electron/wire (attachAutomation
+// allowedSenders); this gate is the outer ring, not a replacement.
+function senderAllowed(e) {
+  try {
+    const s = e && e.sender;
+    if (!s || typeof s.getURL !== 'function') return false;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const mainWc = mainWindow.webContents;
+      if (s === mainWc) return true;
+      // same-window navigation keeps identity: compare live URLs as fallback
+      try {
+        const su = s.getURL() || '';
+        const mu = mainWc.getURL() || '';
+        if (su && mu && su === mu) return true;
+      } catch (_) { /* fall through to deny */ }
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+function denyIpc(channel) {
+  try { console.warn('[ipc-deny] sender not allowed: ' + channel); } catch (_) {}
+  return { ok: false, error: { code: 'DENY', message: 'sender not allowed' } };
+}
+function checked(channel, fn) {
+  return (e, ...args) => {
+    if (!senderAllowed(e)) return denyIpc(channel);
+    return fn(e, ...args);
+  };
+}
 function setupIPC() {
   // Tab operations
-  ipcMain.handle('tab:create', (e, profileId) => addTab(profileId || 'default'));
-  ipcMain.handle('tab:close', (e, tabId) => closeTab(tabId));
-  ipcMain.handle('tab:activate', (e, tabId) => activateTab(tabId));
-  ipcMain.handle('tab:navigate', (e, { tabId, url }) => navigateTab(tabId, url));
-  ipcMain.handle('tab:list', () => {
+  ipcMain.handle('tab:create', checked('tab:create', (e, profileId) => addTab(profileId || 'default')));
+  ipcMain.handle('tab:close', checked('tab:close', (e, tabId) => closeTab(tabId)));
+  ipcMain.handle('tab:activate', checked('tab:activate', (e, tabId) => activateTab(tabId)));
+  ipcMain.handle('tab:navigate', checked('tab:navigate', (e, { tabId, url }) => navigateTab(tabId, url)));
+  ipcMain.handle('tab:list', checked('tab:list', () => {
     const list = [];
     for (const [id, tab] of tabs) {
       list.push({ id, profileId: tab.profileId, profileName: tab.profileName, url: tab.url, title: tab.title, isActive: id === activeTabId });
     }
     return list;
-  });
-  ipcMain.handle('tab:get-active', () => activeTabId);
+  }));
+  ipcMain.handle('tab:get-active', checked('tab:get-active', () => activeTabId));
 
   // Tab fingerprint operations
-  ipcMain.handle('tab:get-fingerprint', (e, tabId) => {
+  ipcMain.handle('tab:get-fingerprint', checked('tab:get-fingerprint', (e, tabId) => {
     const tab = tabs.get(tabId || activeTabId);
     if (!tab) return null;
     try {
       return tab.view.webContents.getFingerprintConfig();
     } catch { return null; }
-  });
-  ipcMain.handle('tab:set-fingerprint', (e, { tabId, config, userAgent }) => {
+  }));
+  ipcMain.handle('tab:set-fingerprint', checked('tab:set-fingerprint', (e, { tabId, config, userAgent }) => {
     const tid = tabId || activeTabId;
     const tab = tabs.get(tid);
     if (!tab) return false;
@@ -576,20 +698,20 @@ function setupIPC() {
       }
       return true;
     } catch { return false; }
-  });
+  }));
 
   // User-Agent is a client-level (Electron) surface, kept separate from the
   // kernel's 63-key fingerprint config. See applyTabUserAgent() for why the
   // order of operations matters.
-  ipcMain.handle('tab:get-ua', (e, tabId) => {
+  ipcMain.handle('tab:get-ua', checked('tab:get-ua', (e, tabId) => {
     const tab = tabs.get(tabId || activeTabId);
     if (!tab) return null;
     try {
       return session.fromPartition(`fp-tab-${tab.id}`).getUserAgent() || '';
     } catch { return tab.userAgent || ''; }
-  });
+  }));
 
-  ipcMain.handle('tab:set-ua', (e, { tabId, userAgent }) => {
+  ipcMain.handle('tab:set-ua', checked('tab:set-ua', (e, { tabId, userAgent }) => {
     const tid = tabId || activeTabId;
     const tab = tabs.get(tid);
     if (!tab) return false;
@@ -611,50 +733,50 @@ function setupIPC() {
       });
       return true;
     } catch { return false; }
-  });
+  }));
 
   // Fingerprint panel open/close — shrink/expand the active BrowserView so the
   // panel (DOM layer) is not covered by the BrowserView (native top layer).
-  ipcMain.handle('panel:set-open', (e, isOpen) => {
+  ipcMain.handle('panel:set-open', checked('panel:set-open', (e, isOpen) => {
     panelOpen = !!isOpen;
     resizeActiveView();
     return true;
-  });
+  }));
 
   // Profile operations
-  ipcMain.handle('profile:list', () => loadProfiles().profiles);
-  ipcMain.handle('profile:get', (e, profileId) => {
+  ipcMain.handle('profile:list', checked('profile:list', () => loadProfiles().profiles));
+  ipcMain.handle('profile:get', checked('profile:get', (e, profileId) => {
     const data = loadProfiles();
     return data.profiles.find(p => p.id === profileId) || null;
-  });
-  ipcMain.handle('profile:create', (e, profile) => {
+  }));
+  ipcMain.handle('profile:create', checked('profile:create', (e, profile) => {
     const data = loadProfiles();
     const id = profile.id || `profile-${Date.now()}`;
     const newProfile = { ...profile, id, createdAt: new Date().toISOString() };
     data.profiles.push(newProfile);
     saveProfiles(data);
     return newProfile;
-  });
-  ipcMain.handle('profile:update', (e, profile) => {
+  }));
+  ipcMain.handle('profile:update', checked('profile:update', (e, profile) => {
     const data = loadProfiles();
     const idx = data.profiles.findIndex(p => p.id === profile.id);
     if (idx === -1) return null;
     data.profiles[idx] = { ...data.profiles[idx], ...profile };
     saveProfiles(data);
     return data.profiles[idx];
-  });
-  ipcMain.handle('profile:delete', (e, profileId) => {
+  }));
+  ipcMain.handle('profile:delete', checked('profile:delete', (e, profileId) => {
     const data = loadProfiles();
     data.profiles = data.profiles.filter(p => p.id !== profileId);
     saveProfiles(data);
     return true;
-  });
-  ipcMain.handle('profile:randomize', () => {
+  }));
+  ipcMain.handle('profile:randomize', checked('profile:randomize', () => {
     return generateRandomProfile();
-  });
+  }));
 
   // DevTools for active tab
-  ipcMain.handle('tab:toggle-devtools', (e, tabId) => {
+  ipcMain.handle('tab:toggle-devtools', checked('tab:toggle-devtools', (e, tabId) => {
     const tab = tabs.get(tabId || activeTabId);
     if (!tab) return;
     if (tab.view.webContents.isDevToolsOpened()) {
@@ -662,31 +784,31 @@ function setupIPC() {
     } else {
       tab.view.webContents.openDevTools({ mode: 'detach' });
     }
-  });
+  }));
 
   // Get Electron/Chromium version info
-  ipcMain.handle('app:versions', () => ({
+  ipcMain.handle('app:versions', checked('app:versions', () => ({
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     node: process.versions.node,
     v8: process.versions.v8
-  }));
+  })));
   // Fingerprint schema: lets the renderer build grouped sections and validate
   // the JSON editor against the exact kernel key set (63 keys / 15 groups).
-  ipcMain.handle('ua:presets', () => FP_UA_PRESETS);
+  ipcMain.handle('ua:presets', checked('ua:presets', () => FP_UA_PRESETS));
 
   // Derive navigator_platform from a UA string in the main process rather than
   // duplicating the mapping in the renderer. Two copies of this table would
   // drift, and a drifted platform silently contradicts the UA - exactly the
   // failure mode this whole surface exists to prevent.
-  ipcMain.handle('ua:platform-for', (e, ua) => fpPlatformForUserAgent(ua));
+  ipcMain.handle('ua:platform-for', checked('ua:platform-for', (e, ua) => fpPlatformForUserAgent(ua)));
 
   // The TLS plane is delivered as a SEPARATE group list rather than merged into
   // `keys`/`groups`. Merging would make it indistinguishable from the 63 Blink
   // keys, and the difference is not cosmetic: those go to --fingerprint-config,
   // these go to session.setSSLConfig(). The renderer renders both but must not
   // forget which is which, so the payload keeps them apart.
-  ipcMain.handle('fp:schema', () => ({
+  ipcMain.handle('fp:schema', checked('fp:schema', () => ({
     version: FP_SCHEMA_VERSION,
     keyCount: FP_KEY_NAMES.length,
     keys: FP_KEYS,
@@ -702,8 +824,8 @@ function setupIPC() {
       keys: FP_H2_KEYS,
       groups: FP_H2_GROUPS,
     }
-  }));
-  ipcMain.handle('fp:coverage', (e, cfg) => fpCoverage(cfg || {}));
+  })));
+  ipcMain.handle('fp:coverage', checked('fp:coverage', (e, cfg) => fpCoverage(cfg || {})));
 
   // --- Self-test ---------------------------------------------------------
   //
@@ -725,7 +847,7 @@ function setupIPC() {
   //
   // An inactive key is skip, NOT fail: the panel judges only what the user
   // actually asked for, otherwise a default profile would show 63 red rows.
-  ipcMain.handle('selftest:run', async (e, tabId) => {
+  ipcMain.handle('selftest:run', checked('selftest:run', async (e, tabId) => {
     const tab = tabs.get(tabId || activeTabId);
     if (!tab || !tab.view) return { error: 'no active tab', rows: [] };
 
@@ -842,7 +964,81 @@ function setupIPC() {
       tlsRows, tlsSummary, tlsError,
       url: needsTempOrigin ? '(temporary probe origin)' : priorUrl,
     };
-  });
+  }));
+  // Automation IPC bridge. wireAutomation() builds the REAL backend (a per-tab
+  // launcher + one shared attach broker + the electron executor) so scripts
+  // drive the live tab, then attaches it (own sender-check inside
+  // wire.attachAutomation; allowedSenders + audit live in
+  // automation/runtime/ipc-bridge.js). Kept in its own function so the try/catch
+  // stays boot-safe: a missing automation tree (e.g. packaged copy without
+  // resources/automation) must not break Client boot; test-packaged-automation.js
+  // guards the copy instead.
+  wireAutomation();
+}
+
+// The live service, set by wireAutomation() so tests can drive it in-process.
+let automationService = null;
+
+// Mirror of MClient/main.js wireAutomation(). A "profile" here is a TAB id: its
+// BrowserView webContents is the live page the script drives, on that tab's own
+// partition (fp-tab-<id>), so cookies/storage/UA stay per-tab isolated. Tabs are
+// created by the UI, so start/stop are no-ops; acquire returns undefined when no
+// live view exists and the executor then raises ProfileError — an honest
+// failure, never a silent fake run. A missing automation tree returns false
+// without breaking boot.
+function wireAutomation() {
+  try {
+    const wire = require('../automation/electron/wire');
+    const { createElectronExecutor } = require('../automation/electron/executor');
+    const { createAttachBroker } = require('../automation/runtime/attach-broker');
+    const { createBrowserSession } = require('../automation/runtime/browser-session');
+
+    // Audit sink is console-only here: the automation audit table lands with
+    // database.md (same posture as the pre-wire one-liner).
+    const audit = (...a) => { try { console.debug('[automation-audit]', JSON.stringify(a)); } catch (_) {} };
+
+    const launcher = {
+      acquire: (tabId) => {
+        const tab = tabs.get(tabId);
+        if (!tab || !tab.view || !tab.view.webContents) return undefined;
+        return {
+          window: mainWindow,
+          webContents: tab.view.webContents,
+          electronSession: session.fromPartition('fp-tab-' + tabId),
+        };
+      },
+      list: () => [...tabs.keys()],
+      start: () => {},
+      stop: () => {},
+    };
+
+    // ONE shared attach per webContents (doc 17 B): the executor, the recorder
+    // and any external CDP all route through this broker, so a run cannot
+    // collide with itself over the single-client Electron debugger.
+    const broker = createAttachBroker({ createSession: createBrowserSession, audit });
+    const executor = createElectronExecutor({ launcher, broker });
+    // Manager calls runnerFactory({ profileContext }); bind that context's live
+    // session, then hand back the per-run runner.
+    const runnerFactory = (opts) => executor.for(opts && opts.profileContext)();
+
+    const stack = wire.buildLocalStack({
+      file: path.join(__dirname, 'automation-store.json'),
+      runnerFactory,
+      audit,
+    });
+    automationService = stack.service;
+    wire.attachAutomation({
+      ipcMain,
+      service: stack.service,
+      allowedSenders: [{ urlPrefix: 'file://' }],
+      push: (ch, payload) => {
+        try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(ch, payload); } catch (_) {}
+      },
+    });
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 // Human-readable explanations for the failure modes this panel is meant to
@@ -1339,3 +1535,9 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
   if (!mainWindow) createMainWindow();
 });
+
+// Exported for test-automation-browser.js (drives the live service in-process)
+// and test-data-dir.js (exercises the resolver + migration).
+module.exports = { wireAutomation, tabs, addTab, closeTab, fpResolveDataDir, fpMigrateDataDir,
+  get automationService() { return automationService; },
+  get mainWindow() { return mainWindow; } };
